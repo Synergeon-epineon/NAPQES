@@ -1,9 +1,9 @@
 ---
-title: "NAPSEQ Authenticated Encryption with Associated Data"
-abbrev: "NAPSEQ-AEAD"
+title: "NAPQES Authenticated Encryption with Associated Data"
+abbrev: "NAPQES-AEAD"
 category: info
 
-docname: draft-napseq-aead-00
+docname: draft-napqes-aead-00
 submissiontype: IETF
 number:
 date: 2026-05-12
@@ -65,14 +65,14 @@ informative:
 
 --- abstract
 
-This document describes NAPSEQ, an Authenticated Encryption with Associated
+This document describes NAPQES, an Authenticated Encryption with Associated
 Data (AEAD) construction built exclusively from HMAC-SHA256 (FIPS 198-1) and
-SHA-256 (FIPS 180-4).  NAPSEQ combines a prime-indexed token cipher with
+SHA-256 (FIPS 180-4).  NAPQES combines a prime-indexed token cipher with
 HMAC-derived noise injection and a standard HMAC-SHA256 authentication tag.
 It does not rely on algebraic structures such as finite-field arithmetic,
 group operations, or AES S-box permutations, and is therefore not subject to
 Shor's algorithm or hidden-subgroup quantum attacks.  The security of
-NAPSEQ reduces to the pseudorandomness of HMAC-SHA256.
+NAPQES reduces to the pseudorandomness of HMAC-SHA256.
 
 This document specifies the wire format (version 6, frozen), the key
 derivation schedule, the token construction, the padding scheme, and the
@@ -89,7 +89,7 @@ multiplication (GCM) or add-rotate-XOR over 32-bit words (ChaCha20) — whose
 security against quantum adversaries running Shor's algorithm or
 hidden-subgroup variants has not been fully characterised.
 
-NAPSEQ takes a different approach: the entire construction is defined in
+NAPQES takes a different approach: the entire construction is defined in
 terms of a single primitive, HMAC-SHA256, which is approved under FIPS 198-1
 and FIPS 180-4 and whose security reduces to the collision resistance and
 pseudorandomness of SHA-256.  Grover's algorithm applies to SHA-256 with a
@@ -98,7 +98,7 @@ approximately 128 bits for a 256-bit hash.
 
 ## Goals
 
-The design goals of NAPSEQ are:
+The design goals of NAPQES are:
 
 1. **Single-primitive security.** All cryptographic operations — token
    derivation, noise injection, padding, and authentication — use
@@ -134,7 +134,7 @@ The following notation is used throughout:
 
 # Key Representation
 
-A NAPSEQ key is an ordered tuple of K distinct prime integers, each in the
+A NAPQES key is an ordered tuple of K distinct prime integers, each in the
 range [1 000 000, 9 999 999].  The reference implementation generates keys
 using a cryptographically secure random source ({{FIPS140-3}}-compliant DRBG).
 
@@ -331,7 +331,7 @@ verification.  Callers SHOULD use `decrypt_stream_strict` instead.
 
 ## Security Reduction
 
-The confidentiality and integrity of NAPSEQ reduce to the pseudorandomness
+The confidentiality and integrity of NAPQES reduce to the pseudorandomness
 of HMAC-SHA256.  Specifically:
 
 - **Confidentiality (IND-CPA):** Under the PRF assumption on HMAC-SHA256,
@@ -351,7 +351,7 @@ of HMAC-SHA256.  Specifically:
 
 ## Post-Quantum Analysis
 
-NAPSEQ does not use finite-field arithmetic, discrete logarithms, lattice
+NAPQES does not use finite-field arithmetic, discrete logarithms, lattice
 problems, or any structure exploitable by Shor's algorithm or known quantum
 hidden-subgroup algorithms.  The sole quantum speedup applicable is Grover's
 algorithm applied to SHA-256 preimage search, reducing the effective security
@@ -441,7 +441,3 @@ Full vectors with hexadecimal ciphertext fields are provided in
 `tests/kat/v6_vectors.json`.  The KAT generator (`tests/gen_kats.py`)
 can be used to regenerate and verify the corpus on any conforming
 implementation.
-
-# Acknowledgements
-
-[To be added prior to publication.]
