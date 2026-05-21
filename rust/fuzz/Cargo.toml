@@ -1,0 +1,24 @@
+[package]
+name = "napqes-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.napqes]
+path = ".."
+
+# Cargo-fuzz requires nightly.  Build with:
+#   cargo +nightly fuzz run decode_bytes -- -max_total_time=300
+# Corpus is stored in fuzz/corpus/decode_bytes/ (created on first run).
+
+[[bin]]
+name = "decode_bytes"
+path = "fuzz_targets/decode_bytes.rs"
+test = false
+doc = false
