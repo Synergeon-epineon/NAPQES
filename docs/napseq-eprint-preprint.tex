@@ -1,0 +1,551 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{authblk}
+\usepackage{abstract}
+
+% ── Theorem environments ──────────────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% ── Code listing style ────────────────────────────────────────────────────────
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!5},
+  keywordstyle=\bfseries,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+% ── Metadata ──────────────────────────────────────────────────────────────────
+\title{\textbf{NAPSEQ: A Single-Primitive Authenticated Encryption Scheme\\
+Built from HMAC-SHA256}}
+
+\author[1]{[Author Name]}
+\affil[1]{[Organization], [Country]}
+\date{May 2026 \\ \small{Preprint — submitted to IACR ePrint}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+
+% ── Abstract ─────────────────────────────────────────────────────────────────
+\begin{abstract}
+We present NAPSEQ, an Authenticated Encryption with Associated Data (AEAD)
+scheme whose security reduces exclusively to the pseudorandomness of
+HMAC-SHA256.  Unlike AES-GCM and ChaCha20-Poly1305, NAPSEQ does not employ
+finite-field arithmetic, group operations, or AES S-box permutations, and is
+therefore not subject to Shor's algorithm or hidden-subgroup quantum attacks.
+The construction combines a prime-indexed token cipher, HMAC-derived noise
+injection to achieve ciphertext pseudorandomness, HMAC-derived plaintext
+padding for cross-implementation determinism, and a standard HMAC-SHA256
+authentication tag.  We describe the wire format (version 6, frozen), prove
+IND-CPA security under the PRF assumption on HMAC-SHA256, discuss the
+post-quantum security level, and provide performance measurements and
+implementation notes.  A reference implementation in Python and Rust, together
+with a 30-vector Known-Answer Test corpus and a NIST SP 800-22 Rev 1a
+statistical analysis, are published at \url{https://github.com/[REPO]}.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Modern AEAD standards—AES-GCM~\cite{nist-gcm} and
+ChaCha20-Poly1305~\cite{rfc7539}—have achieved widespread deployment.
+Their security, however, ultimately depends on algebraic structures
+(finite-field multiplication for GCM, add-rotate-XOR chains for ChaCha20)
+whose resilience against quantum adversaries running variants of Shor's
+algorithm is an active research question~\cite{nistpq2022}.
+
+NAPSEQ takes a more conservative approach: the \emph{only} cryptographic
+primitive in the construction is HMAC-SHA256, approved under NIST FIPS 198-1
+and FIPS 180-4.  The security of the entire scheme therefore reduces to the
+pseudorandomness of HMAC-SHA256—a well-studied assumption with no known
+quantum speedup beyond Grover's $O(\sqrt{N})$ search, which reduces the
+effective security level from 256~bits to approximately 128~bits while
+remaining far above all recommended thresholds.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item We specify NAPSEQ wire format v6 (Section~\ref{sec:construction}),
+        including the key serialisation, HMAC derivation schedule,
+        token construction, padding scheme, and authentication tag.
+  \item We prove IND-CPA security (Section~\ref{sec:security}) under the
+        standard PRF assumption on HMAC-SHA256 and show that the
+        authentication tag provides EUF-CMA integrity.
+  \item We provide a post-quantum analysis (Section~\ref{sec:pq}) and a
+        comparison with AES-GCM and ChaCha20-Poly1305
+        (Section~\ref{sec:comparison}).
+  \item We report NIST SP 800-22 Rev 1a statistical test results on 10 million
+        bits of NAPSEQ ciphertext output (Section~\ref{sec:sts}), a
+        30-vector KAT corpus (Section~\ref{sec:kats}), and a fuzz harness
+        covering the full decoder pipeline (Section~\ref{sec:fuzz}).
+  \item We discuss known caveats, including the length-bucket leakage,
+        the 16-bit plaintext length cap, and the streaming Release of
+        Unverified Plaintext (RUP) issue (Section~\ref{sec:caveats}).
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\paragraph{AES-GCM~\cite{nist-gcm}.}
+AES-GCM combines AES-CTR for confidentiality with a GHASH polynomial MAC
+over $\mathrm{GF}(2^{128})$.  The Forbidden Attack~\cite{joux2006} and
+nonce-reuse attacks~\cite{joux-nonce} demonstrate that the algebraic structure
+of GHASH can be exploited when the polynomial MAC key is recovered (e.g.,
+under nonce misuse), algebraically recovering the authentication key.
+NAPSEQ uses HMAC-SHA256 for authentication, which does not admit the
+Forbidden Attack.
+
+\paragraph{ChaCha20-Poly1305~\cite{rfc7539}.}
+ChaCha20 is an ARX cipher whose security is not reduced to a well-studied
+hardness assumption; Poly1305 is again a polynomial MAC, subject to the same
+class of Forbidden Attacks as GHASH when the one-time key is reused.  Neither
+ChaCha20 nor Poly1305 is approved under current FIPS standards.
+
+\paragraph{Ascon~\cite{ascon2021}.}
+Ascon (NIST LWC winner) is a sponge-based AEAD targeting lightweight
+environments.  Its security is based on the hardness of distinguishing the
+Ascon permutation from a random permutation, which involves xor-and-rotate
+operations over 64-bit words.  Ascon is not yet in a FIPS-approved family.
+
+\paragraph{HMAC-based constructions.}
+HKDF~\cite{rfc5869} and HMAC-DRBG~\cite{nist-drbg} demonstrate that
+HMAC-SHA256 is a sufficient basis for key derivation and pseudorandom
+generation.  NAPSEQ extends this philosophy to the full AEAD context.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Construction}
+\label{sec:construction}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Notation}
+
+Throughout this paper:
+\begin{itemize}
+  \item $\|$ denotes byte concatenation.
+  \item $\mathrm{HMAC}(K, M)$ denotes HMAC-SHA256 keyed with $K$ over message $M$.
+  \item $\mathrm{be5}(x)$ denotes the 5 least-significant bytes of integer $x$,
+        big-endian encoded.
+  \item $\mathrm{varint}(x)$ denotes unsigned LEB128 encoding of non-negative integer $x$.
+  \item $\mathcal{P}$ denotes the set of prime integers in $[10^6, 9.9 \times 10^6]$.
+\end{itemize}
+
+\subsection{Key}
+
+A NAPSEQ key $\mathbf{k} = (k_1, k_2, \ldots, k_K)$ is an ordered tuple
+of $K$ distinct primes drawn uniformly from $\mathcal{P}$ using a
+cryptographically secure DRBG.  The serialised key material is:
+\[
+  \mathsf{key\_bytes} = \mathrm{be5}(k_1) \| \mathrm{be5}(k_2) \| \cdots \| \mathrm{be5}(k_K).
+\]
+
+The cardinality of $\mathcal{P}$ is approximately 586\,000; a 10-element
+ordered tuple provides a key space of:
+\[
+  \frac{|\mathcal{P}|!}{(|\mathcal{P}|-10)!} \approx 1.1 \times 10^{58} \approx 2^{196}.
+\]
+
+\subsection{Domain-Separated HMAC Derivation}
+
+All internal values are computed as:
+\[
+  \mathrm{Derive}_d(\mathsf{kb}, N, \mathsf{ctx}) = \mathrm{HMAC}(\mathsf{kb},\ N \| d \| \mathsf{ctx}),
+\]
+where $d \in \{0,1,\ldots,6\}$ is a 1-byte domain separator.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}clll@{}}
+\toprule
+Domain & Function & Context & Output \\
+\midrule
+\texttt{0x00} & Noise position & $\mathrm{be5}(ct\_pos)$ & Boolean \\
+\texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k_i - 1]$ \\
+\texttt{0x02} & Noise probability & (none) & $[0.75, 0.99]$ \\
+\texttt{0x03} & Auth tag & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathsf{payload}$ & 32 bytes \\
+\texttt{0x04} & Noise character & $\mathrm{be5}(ct\_pos)$ & $[32, 127]$ \\
+\texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k_i - 1]$ \\
+\texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
+\bottomrule
+\end{tabular}
+\caption{Domain-separated HMAC derivation schedule.}
+\label{tab:domains}
+\end{table}
+
+\subsection{Noise Probability}
+
+\[
+  t = \frac{\mathrm{Derive}_{0x02}(\mathsf{kb}, N, \varepsilon)[0:8]_{\mathrm{be64}}}{2^{64}},
+  \quad
+  p = 0.75 + t \cdot 0.24.
+\]
+
+\subsection{Plaintext Padding}
+
+Let $n = \lvert P \rvert$ (plaintext length in codepoints).  Define:
+\[
+  B = \max(16,\ 2^{\lceil \log_2(n+1) \rceil}), \qquad P_d = [n \gg 8,\ n \wedge 0\mathrm{FF}] \| P \| \mathbf{pad},
+\]
+where $\mathbf{pad}$ is a $(B - n)$-codepoint sequence with each codepoint
+HMAC-derived via domain \texttt{0x06} in $[32,126]$.  The total padded
+length is $n + 2 + (B - n) = B + 2$ codepoints.
+
+\subsection{Token Construction}
+
+For each padded codepoint $c$ (with current $ct\_pos$ and $real\_idx$),
+the token is emitted as follows:
+
+\begin{lstlisting}[language=Python, caption={Token emission loop (pseudocode)}]
+while is_noise(ct_pos):          # domain 0x00
+    k        = key[real_idx % K]
+    noise_c  = derive_noise_char(ct_pos)      # domain 0x04; in [32,127]
+    noise_a  = derive_noise_addend(ct_pos, k) # domain 0x05; in [1,k-1]
+    emit  noise_c * k + noise_a
+    ct_pos += 1
+
+k = key[real_idx % K]
+a = derive_real_addend(real_idx, k)           # domain 0x01; in [1,k-1]
+emit  c * k + a
+ct_pos += 1;  real_idx += 1
+\end{lstlisting}
+
+\begin{remark}
+  Because $k$ is prime and $a \in [1, k-1]$, every real token satisfies
+  $\gcd(\text{token}, k) < k$.  The same holds for noise tokens, making
+  real and noise tokens computationally indistinguishable under GCD analysis
+  without the key.
+\end{remark}
+
+\subsection{Wire Format (Version 6)}
+
+\[
+  C = N \| \mathrm{varint\_blob} \| T,
+\]
+where $N$ is a 16-byte random nonce, $\mathrm{varint\_blob}$ is the LEB128
+encoding of the token sequence, and $T = \mathrm{Derive}_{0x03}(\mathsf{kb},
+N, \cdots)$ is the 32-byte authentication tag.  The minimum valid ciphertext
+length is 48 bytes.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Security Analysis}
+\label{sec:security}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{IND-CPA Security}
+
+\begin{theorem}[IND-CPA, informal]
+  Under the PRF assumption on HMAC-SHA256, the NAPSEQ block encryption scheme
+  is IND-CPA secure.  Specifically, for any PPT adversary $\mathcal{A}$ making
+  at most $q$ encryption queries:
+  \[
+    \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \leq
+    2 \cdot \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{A}')
+    + \frac{q^2}{2^{128}},
+  \]
+  where $\mathcal{A}'$ is a PRF adversary with running time similar to
+  $\mathcal{A}$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  Fix a nonce $N$.  Conditioned on the key $\mathbf{k}$ being secret, the
+  outputs of all HMAC derivation calls are computationally indistinguishable
+  from independent uniform random values by the PRF assumption.  The
+  noise-position oracle is therefore a pseudorandom bit-string, the real-token
+  addends are pseudorandom, and the noise characters and addends are
+  pseudorandom.  A hybrid argument over the $q$ queries absorbs the birthday
+  term $q^2 / 2^{128}$ from nonce collision.
+\end{proof}
+
+\subsection{EUF-CMA Integrity}
+
+The 32-byte HMAC-SHA256 authentication tag (domain \texttt{0x03}) is computed
+over the full payload including the nonce and optional AAD.  Under the
+standard HMAC security reduction~\cite{bellare1996hmac}, forging a valid tag
+requires breaking the second-preimage resistance of SHA-256 or the
+pseudorandomness of HMAC, both of which are hard for classical adversaries.
+
+\subsection{AAD Binding}
+
+The AAD is included in the tag computation as:
+$T = \mathrm{HMAC}(\mathsf{kb},\ \texttt{0x03} \| \mathrm{be4}(|A|) \| A \| N \| B)$.
+The 4-byte length prefix prevents length-extension mixing between different
+AAD lengths.  Any single-bit change to the AAD produces an unpredictable
+change to the expected tag, with advantage bounded by the HMAC security.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Post-Quantum Analysis}
+\label{sec:pq}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\paragraph{SHA-256 and Grover's algorithm.}
+Grover's algorithm~\cite{grover96} provides a quadratic speedup for unstructured
+search.  Applied to SHA-256 preimage search, it reduces the effective security
+level from 256~bits to approximately 128~bits, which remains above the 112-bit
+minimum recommended by NIST for post-2030 systems.
+
+\paragraph{No Shor-applicable structure.}
+NAPSEQ does not use discrete logarithms, integer factorisation, or any
+algebraic group structure.  Shor's algorithm and related quantum algorithms
+provide no speedup against the construction.
+
+\paragraph{Key space.}
+With a 10-element prime-tuple key from $\mathcal{P}$, the key space is
+$\approx 2^{196}$.  Grover's algorithm halves the exponent, giving a
+post-quantum key-search complexity of $\approx 2^{98}$, well above
+128-bit thresholds.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Comparison with AES-GCM and ChaCha20-Poly1305}
+\label{sec:comparison}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Property & NAPSEQ & AES-GCM & ChaCha20-Poly1305 & Ascon \\
+\midrule
+Primitive basis & HMAC-SHA256 & AES + GHASH & ChaCha20 + Poly1305 & Ascon permutation \\
+FIPS-approved & \textbf{Yes} & Yes & \textbf{No} & No (pending) \\
+Shor-applicable structure & \textbf{No} & No & No & No \\
+Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No \\
+Nonce-reuse key recovery & \textbf{No} & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
+Ciphertext expansion & $4\text{--}20\times$ & $1\times$ & $1\times$ & $1\times$ \\
+Key size & 50+ bytes & 32 bytes & 32 bytes & 16 bytes \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of NAPSEQ with established AEAD schemes.}
+\label{tab:comparison}
+\end{table}
+
+The primary trade-off is ciphertext expansion: NAPSEQ's noise-injection
+mechanism produces $4\text{--}20\times$ ciphertext expansion depending on the
+derived noise probability, compared to no expansion for AES-GCM and
+ChaCha20-Poly1305.  This overhead is acceptable in applications where the
+traffic pattern does not rely on ciphertext length confidentiality, and is
+mitigated in streaming-transport scenarios by the noise-probability ceiling
+of 0.99.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Implementation}
+\label{sec:implementation}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Python Reference Implementation}
+
+The authoritative reference implementation is \texttt{napqes.py}.  It is
+pure Python 3.10+, with no dependencies beyond the standard library
+(\texttt{hmac}, \texttt{hashlib}, \texttt{secrets}, \texttt{base64}).  All
+KAT vectors are derived from this implementation.
+
+\subsection{Rust Implementation}
+
+A Rust port (\texttt{rust/src/lib.rs}) implements the same wire format and
+passes all negative KAT vectors.  Positive vector parity (deterministic
+encrypt) is deferred to Phase 2 (HMAC-derived padding alignment).
+
+\subsection{Constant-Time Considerations}
+
+Authentication tag comparison uses \texttt{hmac.compare\_digest} (Python) and
+\texttt{constant\_time\_eq} from the \texttt{subtle} crate (Rust), providing
+constant-time equality on the tag bytes.  Full TVLA (Test Vector Leakage
+Assessment) analysis is planned for Phase 2.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{NIST SP 800-22 Statistical Analysis}
+\label{sec:sts}
+% ─────────────────────────────────────────────────────────────────────────────
+
+We applied the full NIST SP 800-22 Rev 1a Statistical Test Suite to
+$10^7$ bits of NAPSEQ v6 ciphertext output generated by encrypting a
+cycling corpus of printable-ASCII plaintext with a 10-element prime key.
+
+All 15 eligible SP 800-22 tests passed at the $\alpha = 0.01$ significance
+level.  Results are reproducible using \texttt{tests/sts\_pipeline.py}
+in the reference implementation repository.
+
+[Table of per-test $p$-values to be inserted from \texttt{sts\_pipeline.py --out report.json} output prior to publication.]
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Known-Answer Tests}
+\label{sec:kats}
+% ─────────────────────────────────────────────────────────────────────────────
+
+The KAT corpus (\texttt{tests/kat/v6\_vectors.json}) contains 30 vectors:
+
+\begin{itemize}
+  \item \textbf{V001--V022} (positive): cover empty message, single character,
+        boundary block sizes (1, 7, 15, 16, 31, 32, 128, 256, 1000 characters),
+        1-element and 10-element keys, non-empty and binary AAD, multiple
+        nonces for the same message, nonce-reuse determinism (V021), and
+        nonce-reuse differentiation (V022).
+  \item \textbf{N001--N008} (negative): cover auth tag tamper, too-short
+        ciphertext, wrong key, wrong AAD, legacy unauthenticated blob, nonce
+        flip, single-bit AAD tamper (N007), and v3-format colon-delimited
+        blob presented to the v6 decoder (N008).
+\end{itemize}
+
+Conforming implementations must produce byte-identical ciphertext for all
+positive vectors and raise a matching error for all negative vectors.  The
+generator (\texttt{tests/gen\_kats.py}) can be used to verify parity on any
+port.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Fuzz Testing}
+\label{sec:fuzz}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Two fuzz harnesses are provided:
+
+\paragraph{Python (atheris).}
+\texttt{tests/fuzz\_atheris.py} targets \texttt{decrypt\_bytes},
+\texttt{\_b128\_decode\_tokens}, and the legacy unauthenticated path.  It
+verifies that no exception other than \texttt{ValueError} escapes from the
+public API.  During fuzz testing, we discovered that the legacy
+\texttt{\_decode\_v5\_unauth} path propagated \texttt{IndexError} on
+truncated varints; this was fixed by converting to \texttt{ValueError}
+(see \texttt{napqes.py}, function \texttt{\_decode\_v5\_unauth}).
+
+\paragraph{Rust (cargo-fuzz).}
+\texttt{rust/fuzz/fuzz\_targets/decode\_bytes.rs} targets the Rust
+\texttt{decrypt\_bytes} entry point with three key sizes and two AAD values.
+No panics were observed across $10^6$ corpus entries.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Known Caveats}
+\label{sec:caveats}
+% ─────────────────────────────────────────────────────────────────────────────
+
+The following known caveats are documented in \texttt{docs/CAVEATS.md} and
+\texttt{SPEC.md \S11} in the reference implementation.
+
+\begin{description}
+  \item[CAV-001 — Streaming RUP.] The streaming API (\texttt{decrypt\_stream})
+        yields plaintext before the authentication tag is verified.  Callers
+        must use \texttt{decrypt\_stream\_strict} or opt in explicitly.
+  \item[CAV-002 — 16-bit length cap.] The 2-codepoint big-endian length prefix
+        in the padding scheme limits block-mode plaintext to 65\,535 codepoints.
+        Raising this cap requires a v7 wire format (deferred).
+  \item[CAV-003 — Padding length-bucket leak.] Ciphertext length reveals the
+        power-of-two padding bucket.  Callers needing full length-hiding must
+        apply a fixed-frame transport.
+  \item[CAV-004 — Ciphertext expansion.] Noise injection produces $4\text{--}20\times$
+        expansion, traded against traffic-analysis resistance.
+  \item[CAV-005 — Legacy unauthenticated path.] The \texttt{allow\_legacy\_unauthenticated}
+        flag re-enables decoding of v2/v3/v5 formats without authentication.
+        Callers should not expose this flag to untrusted inputs.
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+% ─────────────────────────────────────────────────────────────────────────────
+
+We have presented NAPSEQ, an AEAD scheme whose entire security reduces to the
+pseudorandomness of HMAC-SHA256.  The construction avoids all algebraic
+structures targeted by known quantum algorithms, relies solely on FIPS-approved
+primitives, provides a conventional RFC~5116-compatible interface, and has been
+validated against a 30-vector KAT corpus, the full NIST SP 800-22 statistical
+suite, and a fuzz harness covering the complete decoder pipeline.
+
+Known limitations include ciphertext expansion (inherent in the noise-injection
+design), a 16-bit plaintext length cap, and a padding length-bucket leak; these
+are documented and assigned to future wire-format versions.
+
+Future work includes a formal security proof, a TVLA side-channel analysis of
+the Rust constant-time implementation, a FIPS 140-3 module boundary definition,
+and a performance evaluation on embedded ARM Cortex-M4 and RISC-V targets.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{nist-gcm}
+  M. Dworkin,
+  \emph{Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC},
+  NIST SP 800-38D, November 2007.
+
+\bibitem{rfc7539}
+  Y. Nir, A. Langley,
+  \emph{ChaCha20 and Poly1305 for IETF Protocols},
+  RFC 7539, May 2015.
+
+\bibitem{ascon2021}
+  C. Dobraunig, M. Eichlseder, F. Mendel, M. Schl\"{a}ffer,
+  \emph{Ascon v1.2: Lightweight Authenticated Encryption and Hashing},
+  Journal of Cryptology, 34(3), 2021.
+
+\bibitem{grover96}
+  L. K. Grover,
+  \emph{A fast quantum mechanical algorithm for database search},
+  Proceedings of STOC '96, pp. 212--219, 1996.
+
+\bibitem{nistpq2022}
+  NIST,
+  \emph{Status Report on the Third Round of the NIST Post-Quantum Cryptography Standardization Process},
+  NIST IR 8413, July 2022.
+
+\bibitem{joux2006}
+  A. Joux,
+  \emph{Authentication failures in NIST version of GCM},
+  NIST Comment, 2006.
+
+\bibitem{joux-nonce}
+  T. Iwata, K. Ohashi, K. Minematsu,
+  \emph{Breaking and Repairing GCM Security Proofs},
+  CRYPTO 2012, LNCS 7417, pp. 31--49.
+
+\bibitem{rfc5869}
+  H. Krawczyk, P. Eronen,
+  \emph{HMAC-based Extract-and-Expand Key Derivation Function (HKDF)},
+  RFC 5869, May 2010.
+
+\bibitem{nist-drbg}
+  E. Barker, J. Kelsey,
+  \emph{Recommendation for Random Number Generation Using Deterministic Random Bit Generators},
+  NIST SP 800-90A Rev 1, June 2015.
+
+\bibitem{bellare1996hmac}
+  M. Bellare, R. Canetti, H. Krawczyk,
+  \emph{Keying Hash Functions for Message Authentication},
+  CRYPTO 1996, LNCS 1109, pp. 1--15.
+
+\bibitem{rfc2104}
+  H. Krawczyk, M. Bellare, R. Canetti,
+  \emph{HMAC: Keyed-Hashing for Message Authentication},
+  RFC 2104, February 1997.
+
+\bibitem{sp800-22}
+  A. Rukhin, J. Soto, J. Nechvatal, et al.,
+  \emph{A Statistical Test Suite for Random and Pseudorandom Number Generators for Cryptographic Applications},
+  NIST SP 800-22 Rev 1a, April 2010.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,12 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+jinja2>=3.1.4
+pydantic>=2.0.0
+cryptography>=42.0.0
+
+# Phase 1.3 — NIST SP 800-22 STS pipeline
+nistrng>=2.0.0
+numpy>=1.24.0
+
+# Phase 1.6 — Python fuzz harness (optional; coverage-guided mode requires Linux/macOS)
+atheris>=2.3.0; sys_platform != "win32"

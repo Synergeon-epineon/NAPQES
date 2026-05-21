@@ -1,0 +1,88 @@
+name: NAPSEQ CI
+
+on:
+  push:
+    branches: ["main", "dev", "phase-*"]
+  pull_request:
+    branches: ["main", "dev"]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # ── Static analysis ─────────────────────────────────────────────────
+      - name: Ruff lint
+        run: ruff check napqes.py main.py comparator.py tests/
+
+      # ── Claim-traceability linter ────────────────────────────────────────
+      - name: Claim linter (must exit 0)
+        run: python tools/claim_lint.py docs/business/
+
+      # ── KAT vector freshness check ───────────────────────────────────────
+      - name: Verify KAT vectors match current implementation
+        run: python tests/gen_kats.py --check
+
+      # ── Full test suite ──────────────────────────────────────────────────
+      - name: pytest
+        run: pytest tests/ -v --tb=short
+
+  rust-build:
+    name: Rust build (stable)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.toml') }}
+
+      - name: Cargo build
+        working-directory: rust/
+        run: cargo build --release
+
+      - name: Cargo test (includes KAT stubs)
+        working-directory: rust/
+        run: cargo test --release -- --nocapture
+
+  c-build:
+    name: C build & KAT harness
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        working-directory: C/
+        run: make
+
+      - name: Run KAT harness (stubs — must exit 0)
+        working-directory: C/
+        run: make kat-test && ./kat-test
