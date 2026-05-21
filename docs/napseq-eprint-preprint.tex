@@ -38,8 +38,9 @@
 \title{\textbf{NAPSEQ: A Single-Primitive Authenticated Encryption Scheme\\
 Built from HMAC-SHA256}}
 
-\author[1]{[Author Name]}
-\affil[1]{[Organization], [Country]}
+\author[1]{Abdeslam Jakjoud}
+\author[1]{Karim Amor}
+\affil[1]{QAegis, France}
 \date{May 2026 \\ \small{Preprint — submitted to IACR ePrint}}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -449,17 +450,11 @@ The following known caveats are documented in \texttt{docs/CAVEATS.md} and
   \item[CAV-001 — Streaming RUP.] The streaming API (\texttt{decrypt\_stream})
         yields plaintext before the authentication tag is verified.  Callers
         must use \texttt{decrypt\_stream\_strict} or opt in explicitly.
-  \item[CAV-002 — 16-bit length cap.] The 2-codepoint big-endian length prefix
-        in the padding scheme limits block-mode plaintext to 65\,535 codepoints.
-        Raising this cap requires a v7 wire format (deferred).
-  \item[CAV-003 — Padding length-bucket leak.] Ciphertext length reveals the
+  \item[CAV-002 — Padding length-bucket leak.] Ciphertext length reveals the
         power-of-two padding bucket.  Callers needing full length-hiding must
         apply a fixed-frame transport.
-  \item[CAV-004 — Ciphertext expansion.] Noise injection produces $4\text{--}20\times$
+  \item[CAV-003 — Ciphertext expansion.] Noise injection produces $4\text{--}20\times$
         expansion, traded against traffic-analysis resistance.
-  \item[CAV-005 — Legacy unauthenticated path.] The \texttt{allow\_legacy\_unauthenticated}
-        flag re-enables decoding of v2/v3/v5 formats without authentication.
-        Callers should not expose this flag to untrusted inputs.
 \end{description}
 
 % ─────────────────────────────────────────────────────────────────────────────

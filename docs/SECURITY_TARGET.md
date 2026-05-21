@@ -1,12 +1,11 @@
-# NAPSEQ Security Target — Adversary Model & Claim Boundaries
+# NAPQES Security Target — Adversary Model & Claim Boundaries
 
 **Version:** 0.1 (Draft — pending informal cryptographer review)
 **Date:** 2026-05-12
 **Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))
 **Status:** `[DRAFT — not yet reviewed by external cryptographer]`
-**Reference:** [`docs/business/BRD.md`](business/BRD.md) §6 (Honest Constraints & Disclaimers)
 
-> This document describes what NAPSEQ v6 is intended to achieve, what it
+> This document describes what NAPQES v6 is intended to achieve, what it
 > explicitly does not claim, and the conditions under which the security
 > goals are expected to hold. Every claim in this document must be
 > reachable from `napqes.py` line ranges or from `[roadmap]` markers; see
@@ -16,10 +15,10 @@
 
 ## 1. System Summary
 
-NAPSEQ v6 is a symmetric authenticated encryption scheme with associated
+NAPQES v6 is a symmetric authenticated encryption scheme with associated
 data (AEAD). It is built exclusively from HMAC-SHA256 and is intended for
 environments where:
-- Symmetric key material is pre-shared (NAPSEQ does not provide key
+- Symmetric key material is pre-shared (NAPQES does not provide key
   establishment).
 - Message confidentiality, integrity, and authenticity are required.
 - Ciphertext length leakage limited to a power-of-two bucket (see §6.3) is
@@ -120,11 +119,11 @@ implements online-AE.
 
 ## 5. Post-Quantum Considerations
 
-NAPSEQ uses only HMAC-SHA256 (a symmetric construction). The relevant
+NAPQES uses only HMAC-SHA256 (a symmetric construction). The relevant
 quantum adversary is Grover's algorithm, which provides a quadratic speedup
 for brute-force key search.
 
-### 5.1 What NAPSEQ does claim
+### 5.1 What NAPQES does claim
 
 - Against a Grover adversary, a 10-element key drawn from [1M, 9.9M] primes
   (key-space ≈ 2¹⁹⁶) provides approximately **2⁹⁸ security** after Grover.
@@ -134,15 +133,15 @@ for brute-force key search.
 - HMAC-SHA256 output tag is 256 bits; Grover reduces tag forgery work to
   ≈ 2¹²⁸ — remaining above the 128-bit security threshold.
 
-### 5.2 What NAPSEQ does NOT claim
+### 5.2 What NAPQES does NOT claim
 
-- **NAPSEQ is not a post-quantum KEM or signature.** It provides no key
+- **NAPQES is not a post-quantum KEM or signature.** It provides no key
   establishment. Customers requiring FIPS 203 (ML-KEM), 204 (ML-DSA), or
   205 (SLH-DSA) must use those standards.
-- **NAPSEQ has not been submitted to any NIST PQC standardisation process.**
-- **NAPSEQ's "PQ angle" is narrow.** AES-256 in GCM mode also provides
+- **NAPQES has not been submitted to any NIST PQC standardisation process.**
+- **NAPQES's "PQ angle" is narrow.** AES-256 in GCM mode also provides
   ≈ 128-bit post-Grover security and is the NSA CNSA 2.0 symmetric choice
-  for NSS. NAPSEQ's advantage is primarily structural (no AES hardware
+  for NSS. NAPQES's advantage is primarily structural (no AES hardware
   dependency, noise-token confidentiality layer) not a superior PQ security
   bound.
 
@@ -160,7 +159,7 @@ workstream 2.2, TVLA t < 4.5). See `BRD.md` §4.1 F-8, §5 NF-6.
 
 ### 6.2 NIST standardisation
 
-NAPSEQ is **not a NIST-standardised cipher.** It uses FIPS-approved
+NAPQES is **not a NIST-standardised cipher.** It uses FIPS-approved
 sub-primitives (HMAC-SHA256, SHA-256) but the AEAD construction itself has
 not undergone NIST standardisation. See [`docs/PRIMITIVES_ATTESTATION.md`](PRIMITIVES_ATTESTATION.md).
 
@@ -176,14 +175,14 @@ requires a fixed-frame transport layer (see CAV-003).
 
 ### 6.4 FIPS 140-3 module validation
 
-NAPSEQ is **not FIPS 140-3 validated.** It uses FIPS-approved sub-primitives
+NAPQES is **not FIPS 140-3 validated.** It uses FIPS-approved sub-primitives
 and is preparing a pre-attestation memo (`[roadmap]` Phase 3 workstream 3.3).
 FIPS 140-3 module validation is targeted for Phase 4 (workstream 4.1–4.2).
 
 ### 6.5 Formal security proof
 
 As of this revision, no formal symbolic-model or computational proof of
-NAPSEQ's IND-CCA security has been published. A security argument and
+NAPQES's IND-CCA security has been published. A security argument and
 third-party cryptanalysis engagement are Phase 1 deliverables
 (ROADMAP §3 workstreams 1.2, 1.4).
 
@@ -191,13 +190,13 @@ third-party cryptanalysis engagement are Phase 1 deliverables
 
 No third-party formal review has been published. The third-party engagement
 RFP is a Phase 1 commitment (ROADMAP §3 workstream 1.4). Do not represent
-NAPSEQ as externally audited until workstream 1.4 delivers a public report.
+NAPQES as externally audited until workstream 1.4 delivers a public report.
 
 ---
 
 ## 7. Security Assumptions
 
-The security of NAPSEQ v6 depends on:
+The security of NAPQES v6 depends on:
 
 1. **HMAC-SHA256 is a pseudorandom function (PRF).** Specifically, that it
    is computationally infeasible to distinguish HMAC outputs from random
@@ -217,14 +216,14 @@ The security of NAPSEQ v6 depends on:
    but does not immediately allow tag forgery.
 
 5. **No related-key attacks.** Deriving multiple sub-keys from a single
-   master key (e.g. via KDF) is the caller's responsibility; NAPSEQ makes
+   master key (e.g. via KDF) is the caller's responsibility; NAPQES makes
    no claim about related-key security.
 
 ---
 
 ## 8. Out-of-Scope Threats
 
-The following are not addressed by NAPSEQ and require separate controls:
+The following are not addressed by NAPQES and require separate controls:
 
 - Key exchange / key agreement (use ML-KEM or X25519/X448 + HKDF).
 - Entity authentication / identity binding (use digital signatures).
@@ -240,9 +239,9 @@ The following are not addressed by NAPSEQ and require separate controls:
 | Item | Status |
 |---|---|
 | Internal author review | Done (2026-05-12) |
-| Informal external cryptographer review | **Pending — Phase 1 prerequisite** |
-| Third-party engagement (NCC Group / Trail of Bits / Cure53) | **Pending — Phase 1 workstream 1.4** |
-| Publication alongside IACR ePrint preprint | **Pending — Phase 1 workstream 1.2** |
+| Informal external cryptographer review | **In progress** |
+| Third-party engagement (NCC Group / Trail of Bits / Cure53) | **Pending** |
+| Publication alongside IACR ePrint preprint | **In progress** |
 
 This document should be updated when the third-party engagement delivers
 findings. Any "must-fix" items that affect the adversary model (§2) or

@@ -1,4 +1,4 @@
-# NAPSEQ Known Caveats — Issue Triage
+# NAPQES Known Caveats — Issue Triage
 
 **Status:** Phase 0 baseline (2026-05-12)
 **Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))
