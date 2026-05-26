@@ -39,8 +39,14 @@ def _load_vectors():
 
 
 _ALL_VECTORS = _load_vectors()
-_POSITIVE = [v for v in _ALL_VECTORS if v["kind"] == "positive"]
-_NEGATIVE = [v for v in _ALL_VECTORS if v["kind"] == "negative"]
+_POSITIVE = [v for v in _ALL_VECTORS
+             if v["kind"] == "positive" and v.get("api") != "stream_ae"]
+_NEGATIVE = [v for v in _ALL_VECTORS
+             if v["kind"] == "negative" and v.get("api") != "stream_ae"]
+_STREAM_AE_POSITIVE = [v for v in _ALL_VECTORS
+                       if v["kind"] == "positive" and v.get("api") == "stream_ae"]
+_STREAM_AE_NEGATIVE = [v for v in _ALL_VECTORS
+                       if v["kind"] == "negative" and v.get("api") == "stream_ae"]
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +145,7 @@ def test_negative_raises_value_error(vec):
 
 def test_decrypt_str_rejects_v2v3_without_flag():
     """decrypt_str must refuse v2/v3 colon-delimited ciphertext when flag is False (default)."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     # Syntactically valid v2 ciphertext: nonce_hex:noise_p_hex:space-separated tokens
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
     with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
@@ -148,7 +154,7 @@ def test_decrypt_str_rejects_v2v3_without_flag():
 
 def test_decrypt_str_rejects_v2v3_with_flag_false_explicit():
     """Explicit allow_legacy_unauthenticated=False must also block v2/v3 path."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
     with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
         napqes.decrypt_str(fake_v2, key, allow_legacy_unauthenticated=False)
@@ -156,7 +162,7 @@ def test_decrypt_str_rejects_v2v3_with_flag_false_explicit():
 
 def test_decrypt_str_accepts_v2v3_with_flag_true():
     """allow_legacy_unauthenticated=True must allow the v2/v3 path to proceed past the flag check."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     # Syntactically invalid tokens — we just want to confirm the flag check is passed;
     # the subsequent parse/decode may raise for other reasons.
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
@@ -228,7 +234,7 @@ def test_mf003_encrypt_empty_key():
 
 def test_mf003_decrypt_empty_key():
     with pytest.raises(ValueError, match="non-empty"):
-        napqes.decrypt(_DUMMY_NONCE, [65], [])
+        napqes._decrypt(_DUMMY_NONCE, [65], [])
 
 
 def test_mf003_encrypt_bytes_empty_key():
@@ -267,6 +273,63 @@ def test_mf003_decrypt_stream_empty_key():
 def test_mf003_decrypt_stream_strict_empty_key():
     with pytest.raises(ValueError, match="non-empty"):
         napqes.decrypt_stream_strict([_DUMMY_CT], [])
+
+
+# ---------------------------------------------------------------------------
+# Streaming AE KAT tests (encrypt_stream_ae / decrypt_stream_ae)
+# ---------------------------------------------------------------------------
+
+from tests.gen_kats import _encrypt_stream_ae_with_nonce  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "vec", _STREAM_AE_POSITIVE, ids=[v["id"] for v in _STREAM_AE_POSITIVE]
+)
+def test_stream_ae_positive_deterministic(vec):
+    """encrypt_stream_ae with the stored nonce must produce byte-identical output."""
+    key = vec["key"]
+    message = vec["message"]
+    aad = bytes.fromhex(vec["aad_hex"])
+    nonce = bytes.fromhex(vec["nonce_hex"])
+    expected_ct = bytes.fromhex(vec["full_ciphertext_hex"])
+    chunk_size = vec.get("chunk_size", napqes.STREAM_AE_CHUNK_SIZE)
+
+    got = _encrypt_stream_ae_with_nonce(message, key, nonce, aad, chunk_size)
+    assert got == expected_ct, (
+        f"[{vec['id']}] streaming AE ciphertext mismatch.\n"
+        f"  expected: {expected_ct.hex()}\n"
+        f"  got:      {got.hex()}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vec", _STREAM_AE_POSITIVE, ids=[v["id"] for v in _STREAM_AE_POSITIVE]
+)
+def test_stream_ae_positive_decrypt_roundtrip(vec):
+    """decrypt_stream_ae of full_ciphertext_hex must recover the message."""
+    key = vec["key"]
+    message = vec["message"]
+    aad = bytes.fromhex(vec["aad_hex"])
+    full_ct = bytes.fromhex(vec["full_ciphertext_hex"])
+
+    recovered = "".join(napqes.decrypt_stream_ae(iter([full_ct]), key, aad))
+    assert recovered == message, (
+        f"[{vec['id']}] streaming AE roundtrip failed: got {recovered!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vec", _STREAM_AE_NEGATIVE, ids=[v["id"] for v in _STREAM_AE_NEGATIVE]
+)
+def test_stream_ae_negative_raises(vec):
+    """Tampered streaming AE ciphertexts must raise ValueError."""
+    key = vec["key"]
+    aad = bytes.fromhex(vec["aad_hex"])
+    tampered = bytes.fromhex(vec["tampered_hex"])
+    expected_msg = vec.get("expected_exception", "")
+
+    with pytest.raises(ValueError, match=expected_msg):
+        list(napqes.decrypt_stream_ae(iter([tampered]), key, aad))
 
 
 def test_gen_kats_check_mode():

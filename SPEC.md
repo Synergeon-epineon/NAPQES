@@ -35,7 +35,7 @@ Byte values are written as hex (`0x03`) or Python `b'\x03'`.
 *(napqes.py `_key_bytes`, approx. L94–96)*
 
 A NAPSEQ key is an ordered list of K distinct prime integers, each in
-`[1 000 000, 9 999 999]` by default. The list is serialised to a fixed-width
+`[1 000 000, 15 000 000]` by default. The list is serialised to a fixed-width
 byte string:
 
 ```
@@ -45,6 +45,10 @@ key_bytes = key[0].to_bytes(5, 'big') || key[1].to_bytes(5, 'big') || … || key
 Each element occupies exactly 5 bytes (the range fits in 24 bits but is
 stored as 5 bytes for alignment). `key_bytes` is used as the HMAC key
 throughout the session.
+
+> **Key ordering is a security parameter.** `[k_0, k_1, …]` and `[k_1, k_0, …]`
+> are distinct keys that produce non-interoperable ciphertexts. Callers must
+> preserve element order when storing or transmitting key material.
 
 ---
 
@@ -140,6 +144,8 @@ Domain-byte summary:
 | `0x05` | Noise-token addend |
 | `0x06` | Padding codepoint derivation |
 | `0x07` | Varint blob keystream masking |
+| `0x08` | Per-chunk authentication tag (streaming AE) |
+| `0x09` | Final sentinel tag (streaming AE, binds total chunk count) |
 
 ---
 
@@ -284,10 +290,12 @@ Noise tokens are skipped. The unpadded codepoint list is recovered via
 
 *(napqes.py `encrypt_stream`, `decrypt_stream`, approx. L471–651)*
 
-The streaming format uses the **same byte layout** as the block format:
+The streaming format uses the **same byte layout** as the block format,
+including the domain-0x07 XOR keystream mask over the varint blob:
 
 ```
-stream = nonce (16 bytes) || varint_blob (variable) || auth_tag (32 bytes)
+stream = nonce (16 bytes) || masked_blob (variable) || auth_tag (32 bytes)
+masked_blob = varint_blob XOR _varint_keystream(key_bytes, nonce, len(varint_blob))
 ```
 
 Differences from block mode:
@@ -300,7 +308,53 @@ Differences from block mode:
 
 The stream and block APIs are **not cross-compatible**: a block ciphertext
 cannot be decoded with `decrypt_stream` and vice versa, because the padded
-token count differs.
+token count differs (block mode prepends a 2-token length prefix and pads
+to the next power-of-two block size).
+
+---
+
+## 8.1 Streaming AE wire format (v6s-ae) — CAV-001 fix
+
+*(napqes.py `encrypt_stream_ae`, `decrypt_stream_ae`)*
+
+The v6s-ae format adds per-chunk HMAC-SHA256 tags to eliminate RUP (CAV-001).
+`decrypt_stream_ae` verifies each chunk's tag before yielding its plaintext;
+a final sentinel tag authenticates the total chunk count.
+
+```
+stream_ae = nonce (16 bytes)
+            || [uint32_be(chunk_len) || masked_chunk || chunk_tag(32 bytes)] × N
+            || uint32_be(0) || final_tag(32 bytes)
+```
+
+**chunk_tag** for chunk index `i`:
+
+```
+chunk_tag = HMAC(key_bytes,
+    b'\x08' || uint32_be(len(aad)) || aad || nonce || uint32_be(i) || masked_chunk)
+```
+
+**final_tag** (sentinel, `chunk_len = 0`):
+
+```
+final_tag = HMAC(key_bytes,
+    b'\x09' || uint32_be(len(aad)) || aad || nonce || uint32_be(N))
+```
+
+where `N` is the total number of non-sentinel chunks.
+
+The domain-0x07 XOR keystream is applied cumulatively across all chunks
+in the same way as the basic streaming format — the masked bytes are
+identical for equal inputs.
+
+**Security properties:**
+- Per-chunk tags prevent any unverified plaintext from reaching the caller.
+- Chunk index `i` in each tag prevents chunk-reordering attacks.
+- `N` in `final_tag` prevents silent truncation at a chunk boundary.
+- AAD is bound into every tag; cross-session confusion is detected.
+
+**Compatibility:** v6s-ae streams are **not** compatible with `encrypt_stream`
+/ `decrypt_stream`. Each pair must be used together.
 
 ---
 
@@ -341,7 +395,7 @@ See [`docs/CAVEATS.md`](docs/CAVEATS.md) for full triage. Summary:
 
 | ID | Title | Severity | Target |
 |---|---|---|---|
-| CAV-001 | Streaming RUP | Medium | Phase 3 (fix) |
+| CAV-001 | Streaming RUP | Medium | Fixed — use `encrypt_stream_ae` / `decrypt_stream_ae` (§8.1) |
 | CAV-002 | 16-bit length cap | Low | Phase 5 (v7 wire format) |
 | CAV-003 | Padding length-bucket leak | Low | Phase 5 (v7 fixed-frame option) |
 | CAV-004 | Ciphertext expansion bound | Info | No fix planned |

@@ -16,10 +16,10 @@ at that point and update this file to reference the issue number.
 |---|---|
 | **ID** | CAV-001 |
 | **Severity** | High (API misuse could propagate attacker-controlled data before auth fails) |
-| **Affects** | `decrypt_stream` (napqes.py L519–651) |
+| **Affects** | `decrypt_stream` (napqes.py) |
 | **Introduced** | v5 streaming API |
 | **Owner** | TBD |
-| **Target phase** | Phase 3 (workstream 3.6) — replace with online-AE semantics where decrypt never releases plaintext before tag verify |
+| **Status** | **Fixed** — use `encrypt_stream_ae` / `decrypt_stream_ae` (Phase 3 implementation complete) |
 | **Risk retired** | R9 |
 
 **Description.** `decrypt_stream` yields plaintext characters to the caller
@@ -27,17 +27,31 @@ before the HMAC-SHA256 authentication tag at the end of the stream has been
 verified. An active attacker who can truncate or modify the stream causes
 partial plaintext to be emitted before the `ValueError` is raised.
 
-**Current mitigation.** `decrypt_stream` now requires
+**Interim mitigation (still in place).** `decrypt_stream` requires
 `enable_unauthenticated_streaming=True` (keyword-only, default `False`).
 Calling without the flag raises `ValueError` with a message directing the
-caller to `decrypt_stream_strict`. `decrypt_stream_strict` (napqes.py L653–)
-buffers all decrypted characters and only returns after successful tag
-verification — no plaintext escapes on auth failure.
+caller to `decrypt_stream_strict`. `decrypt_stream_strict` buffers all
+decrypted characters and only returns after successful tag verification — no
+plaintext escapes on auth failure.
 
-**Phase 3 fix.** Implement online authenticated encryption (e.g. segment-level
-tags or a sponge construction) so that the streaming decrypt path never holds
-unverified plaintext, allowing true streaming without buffering. Design doc
-in ROADMAP.md §5 step 3.6.
+**Phase 3 fix (implemented).** `encrypt_stream_ae` / `decrypt_stream_ae` in
+`napqes.py` implement a v6s-ae wire format with per-chunk HMAC-SHA256 tags.
+Each chunk (default 1024 bytes of masked_blob) carries its own
+authentication tag computed as:
+
+```
+chunk_tag = HMAC(key_bytes,
+    b'\x08' || uint32_be(len(aad)) || aad || nonce || uint32_be(chunk_idx) || masked_chunk)
+```
+
+`decrypt_stream_ae` verifies the chunk tag before yielding any plaintext from
+that chunk — no unverified plaintext is ever released. A final sentinel tag
+(domain `0x09`) authenticates the total chunk count, preventing silent
+truncation at a chunk boundary. See SPEC.md §8.1 for the full wire format.
+
+**Recommendation.** New code should use `encrypt_stream_ae` /
+`decrypt_stream_ae`. The existing `encrypt_stream` / `decrypt_stream` pair
+is retained for backward compatibility with streams produced before this fix.
 
 ---
 

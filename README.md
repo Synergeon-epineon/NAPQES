@@ -25,7 +25,7 @@ python -m venv .venv
 ```python
 from napqes import encrypt, decrypt
 
-key = [2, 3, 5, 7, 11]         # ordered list of prime integers
+key = [1031, 1033, 1039, 1049, 1051]   # ordered list of prime integers (>= 1024)
 ciphertext = encrypt("hello world", key)
 plaintext  = decrypt(ciphertext, key)
 ```
