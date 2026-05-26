@@ -1,6 +1,6 @@
 # NAPQES Security Target — Adversary Model & Claim Boundaries
 
-**Version:** 0.1 (Draft — pending informal cryptographer review)
+**Version:** 0.1 
 **Date:** 2026-05-12
 **Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))
 **Status:** `[DRAFT — not yet reviewed by external cryptographer]`
@@ -9,7 +9,6 @@
 > explicitly does not claim, and the conditions under which the security
 > goals are expected to hold. Every claim in this document must be
 > reachable from `napqes.py` line ranges or from `[roadmap]` markers; see
-> [`docs/business/README.md`](business/README.md) for the tagging convention.
 
 ---
 
@@ -157,12 +156,21 @@ branches and memory accesses are present in `_is_noise_pos`,
 guarantees are `**[roadmap]**` — gated on the Rust core (Phase 2,
 workstream 2.2, TVLA t < 4.5). See `BRD.md` §4.1 F-8, §5 NF-6.
 
-The Rust core (`rust/src/lib.rs`) uses `subtle::ConstantTimeEq` (RustCrypto
-audited crate) for authentication-tag comparison, replacing the prior
-hand-rolled XOR-accumulate pattern. A dudect empirical constant-time
-smoke-test is planned before review kickoff; see
-[`docs/DUDECT_ATTESTATION.md`](DUDECT_ATTESTATION.md) for methodology and
-status.
+The Rust core (`rust/src/lib.rs`) uses a `ptr::read_volatile` +
+`ptr::write_volatile` + `#[inline(never)]` based comparison (`ct_eq_bytes`)
+for authentication-tag comparison. An initial attempt using
+`subtle::ConstantTimeEq` (v2) was abandoned after a dudect run produced
+t = +411.85 (threshold: 4.5) — LLVM optimised the pure-Rust fold into an
+early-exit branch at `-O3`. The final implementation was confirmed by:
+
+1. **Assembly inspection** — the compiled function is a straight-line sequence
+   of 32 load-XOR-accumulate-store triples with no data-dependent branches.
+2. **Empirical TVLA** — dudect re-run at n = 12.712 M measurements produced
+   max t = +1.134 (threshold: 4.5), tau = +0.00032.  Detection at t = 5 would
+   require ~247 M measurements.
+
+See [`docs/DUDECT_ATTESTATION.md`](DUDECT_ATTESTATION.md) for full run history,
+root-cause analysis, and harness design rationale.
 
 ### 6.2 NIST standardisation
 
