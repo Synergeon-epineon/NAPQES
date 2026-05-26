@@ -527,6 +527,11 @@ def encrypt_bytes(message: str, key: list[int], aad: bytes = b"") -> bytes:
     optional AAD, providing ciphertext integrity and authenticity.
     No encoding overhead; suitable for binary sockets, files, or any
     binary-safe channel.
+
+    **Key ordering is a security parameter.** ``[k0, k1, …]`` and
+    ``[k1, k0, …]`` are distinct keys that produce non-interoperable
+    ciphertexts. Callers must preserve element order when storing or
+    transmitting key material.
     """
     nonce, tokens = encrypt([ord(c) for c in message], key)
     kb = _key_bytes(key)

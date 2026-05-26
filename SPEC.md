@@ -46,6 +46,10 @@ Each element occupies exactly 5 bytes (the range fits in 24 bits but is
 stored as 5 bytes for alignment). `key_bytes` is used as the HMAC key
 throughout the session.
 
+> **Key ordering is a security parameter.** `[k_0, k_1, …]` and `[k_1, k_0, …]`
+> are distinct keys that produce non-interoperable ciphertexts. Callers must
+> preserve element order when storing or transmitting key material.
+
 ---
 
 ## 3. HMAC derivation functions

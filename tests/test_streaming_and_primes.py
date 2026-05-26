@@ -16,9 +16,9 @@ import napqes  # noqa: E402
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
-# Small valid key for fast tests (all primes >= MIN_KEY_PRIME).
-KEY = [1031, 1033, 1039, 1049, 1051]
-KEY2 = [1061, 1063, 1069, 1087, 1091]   # wrong key for negative tests
+# Keys must satisfy MIN_KEY_PRIME = 1_000_000.
+KEY  = [1_000_003, 1_000_033, 1_000_037, 1_000_039, 1_000_081]
+KEY2 = [1_000_099, 1_000_117, 1_000_121, 1_000_133, 1_000_151]  # wrong key for negative tests
 
 
 def _collect_stream(plaintext: str, key: list, aad: bytes = b"") -> list[bytes]:

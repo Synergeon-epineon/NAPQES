@@ -14,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -313,16 +314,6 @@ fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
 
 // ─── Binary / string wrappers (v6 authenticated) ─────────────────────────────
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut d = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        d |= x ^ y;
-    }
-    d == 0
-}
 
 pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Vec<u8> {
     if message.is_empty() {
@@ -408,7 +399,7 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     let payload = &ciphertext[..split];
     let recv_tag = &ciphertext[split..];
     let calc_tag = compute_auth_tag(&kb, aad, payload);
-    if !constant_time_eq(recv_tag, &calc_tag) {
+    if recv_tag.ct_eq(calc_tag.as_ref()).unwrap_u8() == 0 {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
     let nonce = &payload[..NONCE_SIZE];

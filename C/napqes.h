@@ -48,4 +48,12 @@ char *napqes_decrypt_bytes(const uint8_t *ciphertext, size_t ct_len,
                            const uint64_t *key, size_t klen,
                            const uint8_t *aad, size_t aad_len);
 
+/* Deterministic-nonce encrypt for KAT testing.  nonce must be NAPQES_NONCE_SIZE bytes.
+ * Output is byte-identical to the Python/Rust reference given the same nonce. */
+uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
+                                          const uint64_t *key, size_t klen,
+                                          const uint8_t *aad, size_t aad_len,
+                                          const uint8_t *nonce,
+                                          size_t *out_len);
+
 #endif

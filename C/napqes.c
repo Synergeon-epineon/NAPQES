@@ -335,14 +335,13 @@ static uint8_t *varint_keystream_alloc(const uint8_t *kb, size_t klen,
 
 /* ── Core encrypt / decrypt ───────────────────────────────────────────────── */
 
-/* Encrypts a codepoint array; outputs a varint blob (malloc'd) of *blob_len
- * bytes and writes the 16-byte nonce. Returns 0 on success, -1 on failure. */
-static int encrypt_core(const uint32_t *msg, size_t n,
-                        const uint64_t *key, size_t klen,
-                        uint8_t nonce[NAPQES_NONCE_SIZE],
-                        uint8_t **blob_out, size_t *blob_len) {
+/* Deterministic core: encrypts a codepoint array using a caller-supplied nonce.
+ * Outputs a varint blob (malloc'd) of *blob_len bytes. Returns 0 or -1. */
+static int encrypt_core_det(const uint32_t *msg, size_t n,
+                            const uint64_t *key, size_t klen,
+                            const uint8_t nonce[NAPQES_NONCE_SIZE],
+                            uint8_t **blob_out, size_t *blob_len) {
     if (klen == 0) return -1;
-    if (secure_rand_bytes(nonce, NAPQES_NONCE_SIZE) != 0) return -1;
 
     size_t kb_len = 0;
     uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
@@ -393,6 +392,15 @@ static int encrypt_core(const uint32_t *msg, size_t n,
     *blob_out = buf;
     *blob_len = len;
     return 0;
+}
+
+/* Generates a random nonce then delegates to encrypt_core_det. */
+static int encrypt_core(const uint32_t *msg, size_t n,
+                        const uint64_t *key, size_t klen,
+                        uint8_t nonce[NAPQES_NONCE_SIZE],
+                        uint8_t **blob_out, size_t *blob_len) {
+    if (secure_rand_bytes(nonce, NAPQES_NONCE_SIZE) != 0) return -1;
+    return encrypt_core_det(msg, n, key, klen, nonce, blob_out, blob_len);
 }
 
 /* Decrypts a varint blob; returns malloc'd codepoint array of *out_len
@@ -485,6 +493,52 @@ uint8_t *napqes_encrypt_bytes(const char *message,
 
     /* XOR-mask the varint blob with HMAC-CTR keystream (domain 0x07) so that
      * the wire payload is masked_blob, matching Python/Rust. */
+    uint8_t *ks = varint_keystream_alloc(kb, kb_len, nonce, blob_len);
+    if (!ks) { free(kb); free(blob); return NULL; }
+    for (size_t i = 0; i < blob_len; ++i) blob[i] ^= ks[i];
+    free(ks);
+
+    size_t payload_len = NAPQES_NONCE_SIZE + blob_len;
+    size_t total = payload_len + NAPQES_TAG_SIZE;
+    uint8_t *out = (uint8_t *)malloc(total);
+    if (!out) { free(kb); free(blob); return NULL; }
+    memcpy(out, nonce, NAPQES_NONCE_SIZE);
+    memcpy(out + NAPQES_NONCE_SIZE, blob, blob_len);
+    free(blob);
+
+    uint8_t tag[NAPQES_TAG_SIZE];
+    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, tag);
+    free(kb);
+    memcpy(out + payload_len, tag, NAPQES_TAG_SIZE);
+    *out_len = total;
+    return out;
+}
+
+uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
+                                          const uint64_t *key, size_t klen,
+                                          const uint8_t *aad, size_t aad_len,
+                                          const uint8_t *nonce,
+                                          size_t *out_len) {
+    if (!message || !out_len || !key || !nonce) return NULL;
+    size_t n = strlen(message);
+    if (n == 0) { *out_len = 0; uint8_t *e = (uint8_t *)malloc(1); if (e) e[0] = 0; return e; }
+    if (n > 0xFFFF) return NULL;
+
+    uint32_t *cp = (uint32_t *)malloc(n * sizeof(uint32_t));
+    if (!cp) return NULL;
+    for (size_t i = 0; i < n; ++i) cp[i] = (uint8_t)message[i];
+
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    if (encrypt_core_det(cp, n, key, klen, nonce, &blob, &blob_len) != 0) {
+        free(cp); return NULL;
+    }
+    free(cp);
+
+    size_t kb_len = 0;
+    uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
+    if (!kb) { free(blob); return NULL; }
+
     uint8_t *ks = varint_keystream_alloc(kb, kb_len, nonce, blob_len);
     if (!ks) { free(kb); free(blob); return NULL; }
     for (size_t i = 0; i < blob_len; ++i) blob[i] ^= ks[i];

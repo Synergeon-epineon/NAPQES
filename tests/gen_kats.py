@@ -98,6 +98,132 @@ def _encrypt_with_nonce(
 
 
 # ---------------------------------------------------------------------------
+# Deterministic streaming-AE encrypt (bypasses secrets.token_bytes)
+# ---------------------------------------------------------------------------
+
+def _encrypt_stream_ae_with_nonce(
+    message: str,
+    key: list[int],
+    nonce: bytes,
+    aad: bytes = b"",
+    chunk_size: int = napqes.STREAM_AE_CHUNK_SIZE,
+) -> bytes:
+    """Replicate encrypt_stream_ae with a caller-supplied nonce (KAT use only)."""
+    kb = napqes._key_bytes(key)
+    noise_p = napqes._derive_noise_p(kb, nonce)
+    K = len(key)
+    aad_len4 = len(aad).to_bytes(4, "big")
+
+    result = bytearray(nonce)
+
+    ct_pos = 0
+    real_idx = 0
+    ks_gen = napqes._varint_keystream_blocks(kb, nonce)
+    ks_buf: bytearray = bytearray()
+    pending_masked: bytearray = bytearray()
+    chunk_idx = 0
+
+    def _flush_chunk(data: bytes) -> bytes:
+        tag = hmac_mod.new(
+            kb,
+            b"\x08" + aad_len4 + aad + nonce + chunk_idx.to_bytes(4, "big") + data,
+            hashlib.sha256,
+        ).digest()
+        return len(data).to_bytes(4, "big") + data + tag
+
+    for char in message:
+        c = ord(char)
+        buf = bytearray()
+        while True:
+            if napqes._is_noise_pos(kb, nonce, ct_pos, noise_p):
+                k = key[real_idx % K]
+                noise_c = napqes._derive_noise_char(kb, nonce, ct_pos)
+                noise_add = napqes._derive_noise_token_addend(kb, nonce, ct_pos, k)
+                buf.extend(napqes._b128_encode_token(noise_c * k + noise_add))
+                ct_pos += 1
+            else:
+                k = key[real_idx % K]
+                addend = napqes._derive_addend(kb, nonce, real_idx, k)
+                buf.extend(napqes._b128_encode_token(c * k + addend))
+                ct_pos += 1
+                real_idx += 1
+                break
+        raw = bytes(buf)
+        while len(ks_buf) < len(raw):
+            ks_buf.extend(next(ks_gen))
+        masked = bytes(a ^ b for a, b in zip(raw, ks_buf[: len(raw)]))
+        del ks_buf[: len(raw)]
+        pending_masked.extend(masked)
+        while len(pending_masked) >= chunk_size:
+            frame_data = bytes(pending_masked[:chunk_size])
+            del pending_masked[:chunk_size]
+            result.extend(_flush_chunk(frame_data))
+            chunk_idx += 1
+
+    if pending_masked:
+        result.extend(_flush_chunk(bytes(pending_masked)))
+        chunk_idx += 1
+
+    final_tag = hmac_mod.new(
+        kb,
+        b"\x09" + aad_len4 + aad + nonce + chunk_idx.to_bytes(4, "big"),
+        hashlib.sha256,
+    ).digest()
+    result.extend((0).to_bytes(4, "big") + final_tag)
+    return bytes(result)
+
+
+def _build_streaming_ae_positive(
+    vec_id: str,
+    description: str,
+    key: list[int],
+    nonce_index: int,
+    message: str,
+    aad: bytes = b"",
+    chunk_size: int = napqes.STREAM_AE_CHUNK_SIZE,
+) -> dict:
+    nonce = _nonce(nonce_index)
+    full_ct = _encrypt_stream_ae_with_nonce(message, key, nonce, aad, chunk_size)
+    recovered = napqes.decrypt_stream_ae(iter([full_ct]), key, aad)
+    recovered_str = "".join(recovered)
+    assert recovered_str == message, (
+        f"Streaming AE roundtrip failed for {vec_id}: got {recovered_str!r}"
+    )
+    return {
+        "id": vec_id,
+        "kind": "positive",
+        "api": "stream_ae",
+        "description": description,
+        "key": key,
+        "nonce_hex": nonce.hex(),
+        "message": message,
+        "aad_hex": aad.hex(),
+        "chunk_size": chunk_size,
+        "full_ciphertext_hex": full_ct.hex(),
+    }
+
+
+def _build_streaming_ae_negative(
+    vec_id: str,
+    description: str,
+    key: list[int],
+    tampered_hex: str,
+    aad: bytes = b"",
+    expected_exception: str = "Authentication failed",
+) -> dict:
+    return {
+        "id": vec_id,
+        "kind": "negative",
+        "api": "stream_ae",
+        "description": description,
+        "key": key,
+        "aad_hex": aad.hex(),
+        "tampered_hex": tampered_hex,
+        "expected_exception": expected_exception,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Vector definitions
 # ---------------------------------------------------------------------------
 
@@ -452,6 +578,57 @@ def generate() -> list[dict]:
         "N008",
         "v3-format string as raw bytes: rejected by decrypt_bytes (auth tag mismatch)",
         KEY_4, v3_bytes_n8.hex(),
+        expected_exception="Authentication failed",
+    ))
+
+    # ── Streaming AE (encrypt_stream_ae / decrypt_stream_ae) ──────────────
+
+    # SA001: empty message
+    vectors.append(_build_streaming_ae_positive(
+        "SA001", "Streaming AE: empty message produces nonce + sentinel only",
+        KEY_4, idx := idx + 1, "",
+    ))
+
+    # SA002: short message (single chunk)
+    vectors.append(_build_streaming_ae_positive(
+        "SA002", "Streaming AE: short message (single chunk)",
+        KEY_4, idx := idx + 1, "Hello, streaming world!",
+    ))
+
+    # SA003: multi-chunk message (small chunk_size to force >1 frame)
+    vectors.append(_build_streaming_ae_positive(
+        "SA003", "Streaming AE: multi-chunk message (chunk_size=32)",
+        KEY_4, idx := idx + 1, "A" * 200,
+        chunk_size=32,
+    ))
+
+    # SA004: non-empty AAD
+    vectors.append(_build_streaming_ae_positive(
+        "SA004", "Streaming AE: non-empty AAD",
+        KEY_4, idx := idx + 1, "payload with AAD",
+        aad=b"sender=alice",
+    ))
+
+    # SA005: tampered chunk tag → auth failure
+    nonce_sa5 = _nonce(idx := idx + 1)
+    ct_sa5 = _encrypt_stream_ae_with_nonce("tamper-me", KEY_4, nonce_sa5)
+    # Flip the last byte of the first chunk tag (bytes 16+4+blob_len .. +32)
+    # Simplest: flip last byte of the whole stream (hits final_tag)
+    tampered_sa5 = ct_sa5[:-1] + bytes([ct_sa5[-1] ^ 0xFF])
+    vectors.append(_build_streaming_ae_negative(
+        "SA005",
+        "Streaming AE: final tag flipped (last byte XOR 0xFF) → auth failure",
+        KEY_4, tampered_sa5.hex(),
+        expected_exception="Authentication failed",
+    ))
+
+    # SA006: wrong key for decrypt
+    nonce_sa6 = _nonce(idx := idx + 1)
+    ct_sa6 = _encrypt_stream_ae_with_nonce("wrong-key test", KEY_4, nonce_sa6)
+    vectors.append(_build_streaming_ae_negative(
+        "SA006",
+        "Streaming AE: correct ciphertext decrypted with wrong key → auth failure",
+        KEY_1, ct_sa6.hex(),
         expected_exception="Authentication failed",
     ))
 
