@@ -125,6 +125,7 @@ for brute-force key search.
 ### 5.1 What NAPQES does claim
 
 - Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
+- Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
   (key-space ≈ 2¹⁹⁶·⁶) provides approximately **2⁹⁸·³ security** after Grover.
 - The construction avoids algebraic structures (elliptic curves, lattices,
   integer factorisation) that Shor's algorithm or future algebraic quantum
@@ -203,6 +204,15 @@ hop and a one-time-pad argument on the domain-0x07 keystream masking layer.
 A quantitative advantage bound of
 Adv^PRF + q²/2^128 is established.
 
+A full IND-CCA game-hopping reduction following Bellare & Namprempre 2000 is
+in progress and will be added to the companion ePrint preprint prior to final
+third-party report publication. The reduction sketch: INT-CTXT holds because
+any tag forgery constitutes a PRF distinguisher (Adv^PRF advantage); IND-CCA
+then follows from INT-CTXT + IND-CPA via the composition theorem (B&N 2000,
+Theorem 3).
+
+A full IND-CCA proof and the third-party cryptanalysis engagement remain
+Phase 1 deliverables (ROADMAP §3 workstreams 1.2, 1.4).
 A full IND-CCA game-hopping reduction following Bellare & Namprempre 2000 is
 in progress and will be added to the companion ePrint preprint prior to final
 third-party report publication. The reduction sketch: INT-CTXT holds because

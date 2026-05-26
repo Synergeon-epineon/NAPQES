@@ -14,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -318,12 +319,19 @@ fn b128_encode_tokens(tokens: &[u64]) -> Vec<u8> {
 }
 
 fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
+fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < data.len() {
         let mut value: u64 = 0;
         let mut shift: u32 = 0;
         loop {
+            if i >= data.len() {
+                return Err("varint: truncated encoding".into());
+            }
+            if shift >= 64 {
+                return Err("varint: shift overflow (overlong encoding)".into());
+            }
             if i >= data.len() {
                 return Err("varint: truncated encoding".into());
             }
@@ -340,6 +348,7 @@ fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
         }
         tokens.push(value);
     }
+    Ok(tokens)
     Ok(tokens)
 }
 
@@ -437,6 +446,8 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     let masked = &payload[NONCE_SIZE..];
     let ks = varint_keystream(&kb, nonce, masked.len());
     let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
+    let tokens = b128_decode_tokens(&blob)
+        .map_err(|e| format!("varint decode error: {}", e))?;
     let tokens = b128_decode_tokens(&blob)
         .map_err(|e| format!("varint decode error: {}", e))?;
     let codepoints = decrypt(nonce, &tokens, key);
