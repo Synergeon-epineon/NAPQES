@@ -45,13 +45,13 @@ _PROPERTIES = [
     },
     {
         "property":    "Post-quantum security (Grover)",
-        "napseq":      "≈ 95.5 bits (NIST PQ Level II) with small primes — Up to 191 bits with larger primes",
+        "napseq":      "≈ 98.3 bits post-Grover (key-space ≈ 2¹⁹⁶·⁶, 10 primes from [10⁶, 1.5×10⁷])",
         "aes_gcm":     "≈ 128 bits (AES-256 vs Grover)",
         "chacha20":    "≈ 128 bits (ChaCha20-256 vs Grover)",
         "napseq_wins": True,
         "why": (
             "Grover's algorithm gives a quadratic speed-up on key search, halving "
-            "effective key length. NAPSEQ's 191-bit key space → 95.5 bits post-quantum. "
+            "effective key length. NAPSEQ's ≈2¹⁹⁶·⁶ key space → ≈98.3 bits post-Grover. "
             "AES-256 and ChaCha20-256 with 256-bit keys → 128 bits post-quantum. "
             "NAPSEQ trades some Grover margin for the 'no algebraic structure' property."
         ),
@@ -83,7 +83,7 @@ _PROPERTIES = [
     },
     {
         "property":    "Key material",
-        "napseq":      "10 distinct primes from [10⁶, 10⁷] — 50 bytes serialised",
+        "napseq":      "10 distinct primes from [10⁶, 1.5×10⁷] — 50 bytes serialised",
         "aes_gcm":     "256-bit uniform random — 32 bytes",
         "chacha20":    "256-bit uniform random — 32 bytes",
         "napseq_wins": False,

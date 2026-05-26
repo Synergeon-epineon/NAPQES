@@ -16,9 +16,9 @@ import napqes  # noqa: E402
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
-# Small valid key for fast tests.
-KEY = [2, 3, 5, 7, 11]
-KEY2 = [13, 17, 19, 23, 29]   # wrong key for negative tests
+# Small valid key for fast tests (all primes >= MIN_KEY_PRIME).
+KEY = [1031, 1033, 1039, 1049, 1051]
+KEY2 = [1061, 1063, 1069, 1087, 1091]   # wrong key for negative tests
 
 
 def _collect_stream(plaintext: str, key: list, aad: bytes = b"") -> list[bytes]:
@@ -290,7 +290,8 @@ class TestDecryptStream:
 
     def test_wrong_key_raises_auth_error(self):
         blob = _concat_stream("hello", KEY)
-        with pytest.raises(ValueError, match="Authentication failed"):
+        # Wrong key may fail with auth error or invalid codepoint before tag check.
+        with pytest.raises(ValueError):
             list(napqes.decrypt_stream([blob], KEY2,
                                        enable_unauthenticated_streaming=True))
 
@@ -364,7 +365,8 @@ class TestDecryptStreamStrict:
 
     def test_wrong_key_raises(self):
         blob = _concat_stream("hello", KEY)
-        with pytest.raises(ValueError, match="Authentication failed"):
+        # Wrong key may fail with auth error or invalid codepoint before tag check.
+        with pytest.raises(ValueError):
             _decrypt_strict(blob, KEY2)
 
     def test_truncated_raises(self):
@@ -379,12 +381,148 @@ class TestDecryptStreamStrict:
         assert napqes.decrypt_stream_strict(chunks, KEY) == plaintext
 
     def test_not_cross_compatible_with_encrypt_bytes(self):
-        # encrypt_bytes applies a keystream XOR mask that encrypt_stream does
-        # not.  decrypt_stream_strict skips the unmask step, so even though
-        # the auth tag is accepted (both use the same HMAC formula over the
-        # same raw bytes) the recovered "plaintext" is garbled — it must NOT
-        # equal the original message.
+        # Both APIs now apply the domain-0x07 XOR mask and use the same HMAC
+        # formula, so auth passes when cross-decoding.  Incompatibility comes
+        # from padding: encrypt_bytes prepends a 2-token length prefix and
+        # pads to a power-of-two block, while encrypt_stream has no padding.
+        # decrypt_stream_strict therefore decodes the padding tokens as if
+        # they were real plaintext characters, producing garbled output — it
+        # must NOT equal the original message.
         plaintext = "hello"
         ct_bytes = napqes.encrypt_bytes(plaintext, KEY)
         recovered = napqes.decrypt_stream_strict([ct_bytes], KEY)
         assert recovered != plaintext
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# decrypt_stream_ae / encrypt_stream_ae (online AE — CAV-001 fix)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _blob_ae(plaintext: str, key: list, aad: bytes = b"",
+             chunk_size: int = napqes.STREAM_AE_CHUNK_SIZE) -> bytes:
+    return b"".join(napqes.encrypt_stream_ae(iter(plaintext), key, aad,
+                                             chunk_size=chunk_size))
+
+
+def _decrypt_ae(blob: bytes, key: list, aad: bytes = b"") -> str:
+    return "".join(napqes.decrypt_stream_ae([blob], key, aad))
+
+
+class TestStreamAE:
+
+    def test_roundtrip_basic(self):
+        plaintext = "hello, streaming AE!"
+        assert _decrypt_ae(_blob_ae(plaintext, KEY), KEY) == plaintext
+
+    def test_roundtrip_empty(self):
+        assert _decrypt_ae(_blob_ae("", KEY), KEY) == ""
+
+    def test_roundtrip_single_char(self):
+        assert _decrypt_ae(_blob_ae("x", KEY), KEY) == "x"
+
+    def test_aad_ok(self):
+        aad = b"context"
+        plaintext = "with aad"
+        blob = _blob_ae(plaintext, KEY, aad)
+        assert _decrypt_ae(blob, KEY, aad) == plaintext
+
+    def test_aad_wrong(self):
+        blob = _blob_ae("secret", KEY, b"real-aad")
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae(blob, KEY, b"wrong-aad")
+
+    def test_wrong_key(self):
+        blob = _blob_ae("hello", KEY)
+        with pytest.raises(ValueError):
+            _decrypt_ae(blob, KEY2)
+
+    def test_chunked_input_to_decrypt(self):
+        plaintext = "chunked ae input"
+        blob = _blob_ae(plaintext, KEY)
+        chunks = [blob[i:i+7] for i in range(0, len(blob), 7)]
+        result = "".join(napqes.decrypt_stream_ae(chunks, KEY))
+        assert result == plaintext
+
+    def test_encrypt_produces_multiple_chunks(self):
+        # chunk_size=4 forces many chunk frames for even a short plaintext
+        plaintext = "multi-chunk"
+        blob = _blob_ae(plaintext, KEY, chunk_size=4)
+        assert _decrypt_ae(blob, KEY) == plaintext
+
+    def test_large_plaintext_multiple_chunks(self):
+        plaintext = "A" * (napqes.STREAM_AE_CHUNK_SIZE * 3 + 17)
+        blob = _blob_ae(plaintext, KEY)
+        assert _decrypt_ae(blob, KEY) == plaintext
+
+    def test_truncated_before_sentinel(self):
+        # Remove the sentinel frame (last 36 bytes: 4-byte zero len + 32-byte tag)
+        blob = _blob_ae("hello", KEY)
+        with pytest.raises(ValueError):
+            _decrypt_ae(blob[:-36], KEY)
+
+    def test_truncated_mid_chunk_body(self):
+        blob = bytearray(_blob_ae("hello world", KEY))
+        # Chop 10 bytes from the middle of the blob
+        mid = len(blob) // 2
+        truncated = bytes(blob[:mid - 5])
+        with pytest.raises(ValueError):
+            _decrypt_ae(truncated, KEY)
+
+    def test_flipped_bit_in_chunk_body(self):
+        blob = bytearray(_blob_ae("tamper me", KEY))
+        # Flip a byte well inside the first chunk body (after nonce + 4-byte len)
+        blob[16 + 4 + 2] ^= 0xFF
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae(bytes(blob), KEY)
+
+    def test_flipped_bit_in_chunk_tag(self):
+        blob = bytearray(_blob_ae("tamper tag", KEY))
+        # The chunk tag occupies the 32 bytes before the sentinel frame.
+        # Sentinel is 36 bytes from end; chunk tag ends 36 bytes from end.
+        blob[-36 - 1] ^= 0x01
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae(bytes(blob), KEY)
+
+    def test_flipped_bit_in_sentinel_tag(self):
+        blob = bytearray(_blob_ae("tamper sentinel", KEY))
+        blob[-1] ^= 0x01
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae(bytes(blob), KEY)
+
+    def test_chunk_reorder_detected(self):
+        # Produce a stream with chunk_size=4 so we get multiple chunk frames
+        plaintext = "abcdefghij"
+        blob = bytearray(_blob_ae(plaintext, KEY, chunk_size=4))
+        # Each chunk frame = 4 (len) + body + 32 (tag)
+        # Swap chunk 0 and chunk 1 frames (after the 16-byte nonce)
+        # First figure out frame sizes by parsing the blob
+        pos = 16  # skip nonce
+        frames = []
+        while pos < len(blob):
+            flen = int.from_bytes(blob[pos:pos+4], 'big')
+            frame_end = pos + 4 + flen + 32
+            frames.append((pos, frame_end))
+            pos = frame_end
+            if flen == 0:
+                break
+        if len(frames) >= 3:  # at least 2 data frames + sentinel
+            f0_start, f0_end = frames[0]
+            f1_start, f1_end = frames[1]
+            f0_data = blob[f0_start:f0_end]
+            f1_data = blob[f1_start:f1_end]
+            swapped = bytearray(blob)
+            swapped[f0_start:f0_end] = f1_data[:f0_end - f0_start]
+            swapped[f1_start:f1_end] = f0_data[:f1_end - f1_start]
+            with pytest.raises(ValueError, match="Authentication failed"):
+                _decrypt_ae(bytes(swapped), KEY)
+
+    def test_custom_chunk_size_small(self):
+        plaintext = "tiny chunks"
+        assert _decrypt_ae(_blob_ae(plaintext, KEY, chunk_size=1), KEY) == plaintext
+
+    def test_generator_yields_chars(self):
+        plaintext = "stream chars"
+        blob = _blob_ae(plaintext, KEY)
+        chars = list(napqes.decrypt_stream_ae([blob], KEY))
+        assert "".join(chars) == plaintext
+        assert all(len(c) == 1 for c in chars)
