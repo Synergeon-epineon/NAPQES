@@ -139,7 +139,7 @@ def test_negative_raises_value_error(vec):
 
 def test_decrypt_str_rejects_v2v3_without_flag():
     """decrypt_str must refuse v2/v3 colon-delimited ciphertext when flag is False (default)."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     # Syntactically valid v2 ciphertext: nonce_hex:noise_p_hex:space-separated tokens
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
     with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
@@ -148,7 +148,7 @@ def test_decrypt_str_rejects_v2v3_without_flag():
 
 def test_decrypt_str_rejects_v2v3_with_flag_false_explicit():
     """Explicit allow_legacy_unauthenticated=False must also block v2/v3 path."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
     with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
         napqes.decrypt_str(fake_v2, key, allow_legacy_unauthenticated=False)
@@ -156,7 +156,7 @@ def test_decrypt_str_rejects_v2v3_with_flag_false_explicit():
 
 def test_decrypt_str_accepts_v2v3_with_flag_true():
     """allow_legacy_unauthenticated=True must allow the v2/v3 path to proceed past the flag check."""
-    key = [2, 3, 5, 7]
+    key = [1031, 1033, 1039, 1049]
     # Syntactically invalid tokens — we just want to confirm the flag check is passed;
     # the subsequent parse/decode may raise for other reasons.
     fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
@@ -228,7 +228,7 @@ def test_mf003_encrypt_empty_key():
 
 def test_mf003_decrypt_empty_key():
     with pytest.raises(ValueError, match="non-empty"):
-        napqes.decrypt(_DUMMY_NONCE, [65], [])
+        napqes._decrypt(_DUMMY_NONCE, [65], [])
 
 
 def test_mf003_encrypt_bytes_empty_key():
