@@ -181,6 +181,19 @@ static uint64_t derive_noise_token_addend(const uint8_t *kb, size_t klen,
     return ((uint64_t)u32_from_be4(d) % (k_elem - 1)) + 1;
 }
 
+static uint32_t derive_pad_char(const uint8_t *kb, size_t klen,
+                                const uint8_t *nonce, uint32_t pad_idx) {
+    uint8_t idx[4] = {
+        (uint8_t)((pad_idx >> 24) & 0xFF),
+        (uint8_t)((pad_idx >> 16) & 0xFF),
+        (uint8_t)((pad_idx >> 8)  & 0xFF),
+        (uint8_t)(pad_idx         & 0xFF),
+    };
+    uint8_t d[SHA256_DIGEST_SIZE];
+    hmac_with_sep(kb, klen, nonce, 0x06, idx, 4, d);
+    return (u32_from_be4(d) % 95) + 32;
+}
+
 static double derive_noise_p(const uint8_t *kb, size_t klen, const uint8_t *nonce) {
     uint8_t d[32];
     hmac_with_sep(kb, klen, nonce, 0x02, NULL, 0, d);
@@ -246,8 +259,13 @@ static size_t next_block_size(size_t n) {
 }
 
 /* Pads `msg` (len n) into newly-malloc'd codepoint array of length 2+block.
- * Caller frees. Returns NULL on failure. *out_len receives total length. */
-static uint32_t *pad_message(const uint32_t *msg, size_t n, size_t *out_len) {
+ * Caller frees. Returns NULL on failure. *out_len receives total length.
+ * Padding codepoints are HMAC-derived (domain 0x06) to match the Python
+ * reference and enable cross-implementation KATs. */
+static uint32_t *pad_message(const uint32_t *msg, size_t n,
+                             const uint8_t *kb, size_t klen,
+                             const uint8_t *nonce,
+                             size_t *out_len) {
     if (n > 0xFFFF) return NULL;
     size_t block = next_block_size(n);
     size_t total = 2 + block;
@@ -258,7 +276,7 @@ static uint32_t *pad_message(const uint32_t *msg, size_t n, size_t *out_len) {
     if (n) memcpy(out + 2, msg, n * sizeof(uint32_t));
     size_t pad_len = block - n;
     for (size_t i = 0; i < pad_len; ++i) {
-        out[2 + n + i] = 32 + (uint32_t)(secure_rand_u64() % 95);
+        out[2 + n + i] = derive_pad_char(kb, klen, nonce, (uint32_t)i);
     }
     *out_len = total;
     return out;
@@ -292,16 +310,38 @@ static int varint_decode(const uint8_t *in, size_t in_len, size_t *off,
     return -1;
 }
 
+/* HMAC-CTR keystream for XOR-masking the varint blob (domain byte 0x07).
+ * block[i] = HMAC(key_bytes, nonce || 0x07 || uint32_be(i))
+ * Returns block[0]||block[1]||… in a malloc'd buffer; caller uses first
+ * `length` bytes then frees.  Returns NULL on allocation failure. */
+static uint8_t *varint_keystream_alloc(const uint8_t *kb, size_t klen,
+                                       const uint8_t *nonce, size_t length) {
+    if (length == 0) return (uint8_t *)malloc(1);
+    size_t n_blocks = (length + SHA256_DIGEST_SIZE - 1) / SHA256_DIGEST_SIZE;
+    uint8_t *ks = (uint8_t *)malloc(n_blocks * SHA256_DIGEST_SIZE);
+    if (!ks) return NULL;
+    for (uint32_t b = 0; (size_t)b < n_blocks; ++b) {
+        uint8_t blk_be[4] = {
+            (uint8_t)((b >> 24) & 0xFF),
+            (uint8_t)((b >> 16) & 0xFF),
+            (uint8_t)((b >> 8)  & 0xFF),
+            (uint8_t)(b         & 0xFF),
+        };
+        hmac_with_sep(kb, klen, nonce, 0x07, blk_be, 4,
+                      ks + (size_t)b * SHA256_DIGEST_SIZE);
+    }
+    return ks;
+}
+
 /* ── Core encrypt / decrypt ───────────────────────────────────────────────── */
 
-/* Encrypts a codepoint array; outputs a varint blob (malloc'd) of *blob_len
- * bytes and writes the 16-byte nonce. Returns 0 on success, -1 on failure. */
-static int encrypt_core(const uint32_t *msg, size_t n,
-                        const uint64_t *key, size_t klen,
-                        uint8_t nonce[NAPQES_NONCE_SIZE],
-                        uint8_t **blob_out, size_t *blob_len) {
+/* Deterministic core: encrypts a codepoint array using a caller-supplied nonce.
+ * Outputs a varint blob (malloc'd) of *blob_len bytes. Returns 0 or -1. */
+static int encrypt_core_det(const uint32_t *msg, size_t n,
+                            const uint64_t *key, size_t klen,
+                            const uint8_t nonce[NAPQES_NONCE_SIZE],
+                            uint8_t **blob_out, size_t *blob_len) {
     if (klen == 0) return -1;
-    if (secure_rand_bytes(nonce, NAPQES_NONCE_SIZE) != 0) return -1;
 
     size_t kb_len = 0;
     uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
@@ -309,7 +349,7 @@ static int encrypt_core(const uint32_t *msg, size_t n,
     double noise_p = derive_noise_p(kb, kb_len, nonce);
 
     size_t padded_len = 0;
-    uint32_t *padded = pad_message(msg, n, &padded_len);
+    uint32_t *padded = pad_message(msg, n, kb, kb_len, nonce, &padded_len);
     if (!padded) { free(kb); return -1; }
 
     /* Growable byte buffer for varint blob. */
@@ -352,6 +392,15 @@ static int encrypt_core(const uint32_t *msg, size_t n,
     *blob_out = buf;
     *blob_len = len;
     return 0;
+}
+
+/* Generates a random nonce then delegates to encrypt_core_det. */
+static int encrypt_core(const uint32_t *msg, size_t n,
+                        const uint64_t *key, size_t klen,
+                        uint8_t nonce[NAPQES_NONCE_SIZE],
+                        uint8_t **blob_out, size_t *blob_len) {
+    if (secure_rand_bytes(nonce, NAPQES_NONCE_SIZE) != 0) return -1;
+    return encrypt_core_det(msg, n, key, klen, nonce, blob_out, blob_len);
 }
 
 /* Decrypts a varint blob; returns malloc'd codepoint array of *out_len
@@ -438,17 +487,71 @@ uint8_t *napqes_encrypt_bytes(const char *message,
     }
     free(cp);
 
+    size_t kb_len = 0;
+    uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
+    if (!kb) { free(blob); return NULL; }
+
+    /* XOR-mask the varint blob with HMAC-CTR keystream (domain 0x07) so that
+     * the wire payload is masked_blob, matching Python/Rust. */
+    uint8_t *ks = varint_keystream_alloc(kb, kb_len, nonce, blob_len);
+    if (!ks) { free(kb); free(blob); return NULL; }
+    for (size_t i = 0; i < blob_len; ++i) blob[i] ^= ks[i];
+    free(ks);
+
     size_t payload_len = NAPQES_NONCE_SIZE + blob_len;
     size_t total = payload_len + NAPQES_TAG_SIZE;
     uint8_t *out = (uint8_t *)malloc(total);
-    if (!out) { free(blob); return NULL; }
+    if (!out) { free(kb); free(blob); return NULL; }
     memcpy(out, nonce, NAPQES_NONCE_SIZE);
     memcpy(out + NAPQES_NONCE_SIZE, blob, blob_len);
     free(blob);
 
+    uint8_t tag[NAPQES_TAG_SIZE];
+    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, tag);
+    free(kb);
+    memcpy(out + payload_len, tag, NAPQES_TAG_SIZE);
+    *out_len = total;
+    return out;
+}
+
+uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
+                                          const uint64_t *key, size_t klen,
+                                          const uint8_t *aad, size_t aad_len,
+                                          const uint8_t *nonce,
+                                          size_t *out_len) {
+    if (!message || !out_len || !key || !nonce) return NULL;
+    size_t n = strlen(message);
+    if (n == 0) { *out_len = 0; uint8_t *e = (uint8_t *)malloc(1); if (e) e[0] = 0; return e; }
+    if (n > 0xFFFF) return NULL;
+
+    uint32_t *cp = (uint32_t *)malloc(n * sizeof(uint32_t));
+    if (!cp) return NULL;
+    for (size_t i = 0; i < n; ++i) cp[i] = (uint8_t)message[i];
+
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    if (encrypt_core_det(cp, n, key, klen, nonce, &blob, &blob_len) != 0) {
+        free(cp); return NULL;
+    }
+    free(cp);
+
     size_t kb_len = 0;
     uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
-    if (!kb) { free(out); return NULL; }
+    if (!kb) { free(blob); return NULL; }
+
+    uint8_t *ks = varint_keystream_alloc(kb, kb_len, nonce, blob_len);
+    if (!ks) { free(kb); free(blob); return NULL; }
+    for (size_t i = 0; i < blob_len; ++i) blob[i] ^= ks[i];
+    free(ks);
+
+    size_t payload_len = NAPQES_NONCE_SIZE + blob_len;
+    size_t total = payload_len + NAPQES_TAG_SIZE;
+    uint8_t *out = (uint8_t *)malloc(total);
+    if (!out) { free(kb); free(blob); return NULL; }
+    memcpy(out, nonce, NAPQES_NONCE_SIZE);
+    memcpy(out + NAPQES_NONCE_SIZE, blob, blob_len);
+    free(blob);
+
     uint8_t tag[NAPQES_TAG_SIZE];
     compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, tag);
     free(kb);
@@ -475,18 +578,26 @@ char *napqes_decrypt_bytes(const uint8_t *ciphertext, size_t ct_len,
     if (!constant_time_eq(recv_tag, calc_tag, NAPQES_TAG_SIZE)) {
         free(kb); return NULL;
     }
-    free(kb);
+    const uint8_t *nonce  = ciphertext;
+    const uint8_t *masked = ciphertext + NAPQES_NONCE_SIZE;
+    size_t blob_len       = payload_len - NAPQES_NONCE_SIZE;
 
-    const uint8_t *nonce = ciphertext;
-    const uint8_t *blob  = ciphertext + NAPQES_NONCE_SIZE;
-    size_t blob_len      = payload_len - NAPQES_NONCE_SIZE;
+    /* XOR-unmask the masked_blob back to raw varint blob (domain 0x07). */
+    uint8_t *blob = (uint8_t *)malloc(blob_len + 1); /* +1 avoids malloc(0) */
+    if (!blob) { free(kb); return NULL; }
+    uint8_t *ks = varint_keystream_alloc(kb, kb_len, nonce, blob_len);
+    free(kb);
+    if (!ks) { free(blob); return NULL; }
+    for (size_t i = 0; i < blob_len; ++i) blob[i] = masked[i] ^ ks[i];
+    free(ks);
 
     size_t out_len = 0;
     uint32_t *cp = decrypt_core(blob, blob_len, nonce, key, klen, &out_len);
+    free(blob);
     if (!cp) return NULL;
     char *s = (char *)malloc(out_len + 1);
     if (!s) { free(cp); return NULL; }
-    for (size_t i = 0; i < out_len; ++i) s[i] = (char)(cp[i] & 0x7F);
+    for (size_t i = 0; i < out_len; ++i) s[i] = (char)(cp[i] & 0xFF);
     s[out_len] = '\0';
     free(cp);
     return s;

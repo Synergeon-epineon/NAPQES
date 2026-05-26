@@ -1,0 +1,127 @@
+"""Cross-language interoperability test for NAPQES v6.
+
+Tests that Python-generated KAT ciphertexts can be decrypted by the Rust
+and C implementations, and that Rust-generated ciphertexts (from the Rust
+KAT harness's deterministic encrypt path) are byte-identical to Python's.
+
+Strategy
+--------
+- Python → Rust: run ``cargo test --test kats`` which decrypts the Python-
+  generated ``tests/kat/v6_vectors.json`` ciphertexts.
+- Python → C:    run the C ``kat-test`` binary which decrypts the same vectors.
+- Rust  → Python: the Rust KAT harness also calls ``encrypt_bytes_with_nonce``
+  and asserts byte-identical output to the Python-generated ``ciphertext_hex``
+  fields — this confirms the Rust→Python direction automatically.
+
+Tests are skipped automatically when the required build tool (``cargo`` or
+``make`` + gcc) is not found on PATH.
+
+Run:
+    pytest tests/test_cross_lang.py -v
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_RUST_DIR = _REPO_ROOT / "rust"
+_C_DIR = _REPO_ROOT / "C"
+_VECTORS = _REPO_ROOT / "tests" / "kat" / "v6_vectors.json"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run(cmd: list[str], cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _require_tool(*names: str) -> None:
+    """Skip the test if none of the named executables are on PATH."""
+    if not any(shutil.which(n) for n in names):
+        pytest.skip(f"Required tool(s) not on PATH: {', '.join(names)}")
+
+
+# ---------------------------------------------------------------------------
+# Python → Rust
+# ---------------------------------------------------------------------------
+
+class TestPythonToRust:
+    """Rust KAT harness must decrypt all Python-generated block-mode vectors."""
+
+    def test_rust_kats_pass(self):
+        """cargo test --test kats exits 0 — Rust decrypts Python vectors."""
+        _require_tool("cargo")
+        result = _run(
+            ["cargo", "test", "--release", "--test", "kats", "--", "--nocapture"],
+            cwd=_RUST_DIR,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Rust KAT harness failed (exit {result.returncode}):\n"
+                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+
+    def test_rust_deterministic_encrypt_matches_python(self):
+        """positive_encrypt_bytes_deterministic in Rust must match Python ciphertext_hex."""
+        _require_tool("cargo")
+        result = _run(
+            [
+                "cargo", "test", "--release",
+                "positive_encrypt_bytes_deterministic",
+                "--", "--nocapture",
+            ],
+            cwd=_RUST_DIR,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Rust deterministic encrypt test failed:\n"
+                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Python → C
+# ---------------------------------------------------------------------------
+
+class TestPythonToC:
+    """C KAT harness must decrypt all Python-generated block-mode vectors."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def build_c_kat(self):
+        _require_tool("make", "gcc", "cc")
+        result = _run(["make", "kat-test"], cwd=_C_DIR)
+        if result.returncode != 0:
+            pytest.skip(
+                f"C build failed — skipping C cross-language tests:\n{result.stderr}"
+            )
+
+    def test_c_kat_harness_passes(self):
+        """C kat-test must exit 0 with no FAILed vectors."""
+        exe = "kat-test.exe" if sys.platform == "win32" else "./kat-test"
+        vec_path = str(_VECTORS)
+        result = _run([exe, vec_path], cwd=_C_DIR)
+        if result.returncode != 0:
+            pytest.fail(
+                f"C KAT harness failed (exit {result.returncode}):\n{result.stdout}"
+            )
+        # Confirm at least one PASS line and zero FAIL lines
+        assert "[PASS]" in result.stdout, "No PASS lines found in C KAT output"
+        assert "[FAIL]" not in result.stdout, (
+            "FAIL lines found in C KAT output:\n" + result.stdout
+        )

@@ -22,16 +22,16 @@ _STATS  = os.path.abspath(os.path.join(_HERE, "..", "Statistics"))
 sys.path.insert(0, _STATS)
 
 from napqes import (
-    encrypt, decrypt, encrypt_str,
+    encrypt, encrypt_str,
     encrypt_bytes, decrypt_bytes,
     generate_prime_numbers, is_prime,
-    _b128_decode_tokens, _key_bytes, _derive_noise_p,
+    _b128_decode_tokens, _key_bytes, _derive_noise_p, _varint_keystream,
 )
 
 # ─── Demo key (attacker does NOT know this) ───────────────────────────────────
-# Small primes from [100, 300] — deliberately "weak" range to show structural
+# Small primes from [1024, 1200] — deliberately "weak" range to show structural
 # attacks still FAIL thanks to the HMAC-addend mechanism.
-_DEMO_KEY   = [179, 181, 191, 193, 197, 199, 211, 223, 227, 229]
+_DEMO_KEY   = [1031, 1033, 1039, 1049, 1051, 1061, 1063, 1069, 1087, 1091]
 SAMPLE_MSG  = "Hello, World! This is a NAPSEQ cryptographic audit test."
 ENGLISH_MSG = "the quick brown fox jumps over the lazy dog " * 3
 
@@ -46,7 +46,11 @@ def _parse_ct(ct_str: str) -> list[int]:
             return [int(v) for v in token_field.split()]
         return _b128_decode_tokens(bytes.fromhex(token_field))
     raw = base64.b64decode(ct_str)
-    token_blob = raw[16:-32] if len(raw) >= 48 else raw[16:]
+    nonce = raw[:16]
+    masked_blob = raw[16:-32] if len(raw) >= 48 else raw[16:]
+    kb = _key_bytes(_DEMO_KEY)
+    ks = _varint_keystream(kb, nonce, len(masked_blob))
+    token_blob = bytes(a ^ b for a, b in zip(masked_blob, ks))
     return _b128_decode_tokens(token_blob)
 
 
@@ -258,13 +262,13 @@ def _test_ks_old_range():
     details = (
         f"Old default range [100, 1000]: {n} primes\n"
         f"10-element key space (ordered, no repetition): 2^{bits:.0f}\n"
-        "HISTORICAL VULNERABILITY — now fixed by [1M, 9.9M] default range."
+        "HISTORICAL VULNERABILITY — now fixed by [1M, 15M] default range."
     )
     return True, details   # informational
 
 
 def _test_ks_new_range():
-    lo, hi = 1_000_000, 9_999_999
+    lo, hi = 1_000_000, 15_000_000
     n_est  = hi / math.log(hi) - lo / math.log(lo)
     ks = 1.0
     for i in range(10):
@@ -281,7 +285,7 @@ def _test_ks_new_range():
 
 def _test_auth_tag_integrity():
     """Tampered ciphertext must be rejected by the HMAC-SHA256 auth tag."""
-    key  = [179, 181, 191]
+    key  = [1031, 1033, 1039]
     ct   = encrypt_bytes("Authenticate me!", key)
     tampered = ct[:-1] + bytes([(ct[-1] ^ 0xFF)])  # flip last byte of tag
     rejected = False
@@ -351,7 +355,7 @@ _TESTS = [
      "Key-Space Analysis", "INFO", "BF"),
 
     (_test_ks_new_range,
-     "New default [1M, 9.9M] provides ≥128-bit key space",
+     "New default [1M, 15M] provides ≥128-bit key space",
      "Key-Space Analysis", "CRITICAL", "BF"),
 
     (_test_auth_tag_integrity,
@@ -364,30 +368,24 @@ _TESTS = [
 
 def run_nist_tests() -> dict:
     """Run all NAPSEQ compliance tests and return structured results."""
-    
-    
-    all_passed = False
-    while not all_passed:
-        all_passed = True
-        t_total = time.perf_counter()
-        records = []
-        for fn, name, section, severity, model in _TESTS:
-            t0 = time.perf_counter()
-            try:
-                passed, details = fn()
-            except Exception as exc:
-                passed  = False
-                all_passed = False
-                details = f"Unhandled exception: {type(exc).__name__}: {exc}"
-            records.append({
-                "name":       name,
-                "section":    section,
-                "severity":   severity,
-                "model":      model,
-                "passed":     passed,
-                "details":    details,
-                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-            })
+    t_total = time.perf_counter()
+    records = []
+    for fn, name, section, severity, model in _TESTS:
+        t0 = time.perf_counter()
+        try:
+            passed, details = fn()
+        except Exception as exc:
+            passed = False
+            details = f"Unhandled exception: {type(exc).__name__}: {exc}"
+        records.append({
+            "name":       name,
+            "section":    section,
+            "severity":   severity,
+            "model":      model,
+            "passed":     passed,
+            "details":    details,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+        })
 
     # Group by section (preserving order)
     seen: dict[str, list] = {}
@@ -404,9 +402,9 @@ def run_nist_tests() -> dict:
             "elapsed_ms": round((time.perf_counter() - t_total) * 1000, 1),
             "demo_key":   f"[{_DEMO_KEY[0]}, …, {_DEMO_KEY[-1]}] (small-range demo key)",
             "note": (
-                "Tests use a deliberately small demo key from [100, 300] to show that "
+                "Tests use a deliberately small demo key from [1 024, ~1 100] to show that "
                 "structural attacks fail regardless of key size. Production keys use "
-                "[1 000 000, 9 999 999] (≈ 2^191 key space, NIST PQ Level II)."
+                "[1 000 000, 15 000 000] (≈ 2^196.6 key space, ≈2^98.3 post-Grover)."
             ),
         },
     }

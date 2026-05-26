@@ -60,7 +60,11 @@ padding for cross-implementation determinism, and a standard HMAC-SHA256
 authentication tag.  We describe the wire format (version 6, frozen), prove
 IND-CPA security under the PRF assumption on HMAC-SHA256, discuss the
 post-quantum security level, and provide performance measurements and
-implementation notes.  A reference implementation in Python and Rust, together
+implementation notes.  The streaming Release of Unverified Plaintext (RUP) caveat present in
+earlier versions is addressed by a new online-AE streaming format
+(\texttt{encrypt\_stream\_ae}/\texttt{decrypt\_stream\_ae}) that verifies a
+per-chunk HMAC-SHA256 tag before releasing any plaintext to the caller.
+  A reference implementation in Python and Rust, together
 with a 30-vector Known-Answer Test corpus and a NIST SP 800-22 Rev 1a
 statistical analysis, are published at \url{https://github.com/[REPO]}.
 \end{abstract}
@@ -103,9 +107,11 @@ remaining far above all recommended thresholds.
         bits of NAPSEQ ciphertext output (Section~\ref{sec:sts}), a
         30-vector KAT corpus (Section~\ref{sec:kats}), and a fuzz harness
         covering the full decoder pipeline (Section~\ref{sec:fuzz}).
-  \item We discuss known caveats, including the length-bucket leakage,
-        the 16-bit plaintext length cap, and the streaming Release of
-        Unverified Plaintext (RUP) issue (Section~\ref{sec:caveats}).
+  \item We discuss known caveats (Section~\ref{sec:caveats}): the 16-bit
+        plaintext length cap (CAV-002), the padding length-bucket leakage
+        (CAV-003), and the ciphertext expansion bound (CAV-004).  The
+        streaming Release of Unverified Plaintext issue (CAV-001) has been
+        resolved by the online-AE streaming format introduced in this version.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -188,13 +194,16 @@ Domain & Function & Context & Output \\
 \texttt{0x00} & Noise position & $\mathrm{be5}(ct\_pos)$ & Boolean \\
 \texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k_i - 1]$ \\
 \texttt{0x02} & Noise probability & (none) & $[0.75, 0.99]$ \\
-\texttt{0x03} & Auth tag & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathsf{payload}$ & 32 bytes \\
+\texttt{0x03} & Auth tag (block) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathsf{payload}$ & 32 bytes \\
 \texttt{0x04} & Noise character & $\mathrm{be5}(ct\_pos)$ & $[32, 127]$ \\
 \texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k_i - 1]$ \\
 \texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
+\texttt{0x07} & Varint keystream & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
+\texttt{0x08} & Chunk tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| N \| \mathrm{be4}(i) \| \tilde{C}_i$ & 32 bytes \\
+\texttt{0x09} & Final sentinel tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| N \| \mathrm{be4}(n_{\mathrm{chunks}})$ & 32 bytes \\
 \bottomrule
 \end{tabular}
-\caption{Domain-separated HMAC derivation schedule.}
+\caption{Domain-separated HMAC derivation schedule. Domains \texttt{0x08}--\texttt{0x09} are used exclusively by the online-AE streaming format (Section~\ref{sec:streaming-ae}).}
 \label{tab:domains}
 \end{table}
 
@@ -245,12 +254,37 @@ ct_pos += 1;  real_idx += 1
 \subsection{Wire Format (Version 6)}
 
 \[
-  C = N \| \mathrm{varint\_blob} \| T,
+  C = N \| \widetilde{B} \| T,
 \]
-where $N$ is a 16-byte random nonce, $\mathrm{varint\_blob}$ is the LEB128
-encoding of the token sequence, and $T = \mathrm{Derive}_{0x03}(\mathsf{kb},
-N, \cdots)$ is the 32-byte authentication tag.  The minimum valid ciphertext
+where $N$ is a 16-byte random nonce, $\widetilde{B}$ is the domain-\texttt{0x07}
+XOR-masked LEB128 token blob, and
+$T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N \| \widetilde{B})$
+is the 32-byte HMAC-SHA256 authentication tag.  The minimum valid ciphertext
 length is 48 bytes.
+
+\subsection{Online-AE Streaming Format (v6s-ae)}
+\label{sec:streaming-ae}
+
+The basic streaming format (\texttt{encrypt\_stream}) carries a single tag at the
+end of the stream, causing \texttt{decrypt\_stream} to release plaintext before
+the tag is verified (RUP, formerly CAV-001).  The online-AE streaming format
+eliminates this by attaching a per-chunk HMAC-SHA256 tag to each segment of the
+masked varint blob.
+
+\[
+  S = N \;\|\; \Bigl[\,\mathrm{be4}(\ell_i) \| \widetilde{C}_i \| T_i\,\Bigr]_{i=0}^{n-1} \;\|\; \mathrm{be4}(0) \| T_{\mathrm{final}},
+\]
+where each $\widetilde{C}_i$ is at most 1024 bytes of the masked varint blob and:
+\begin{align*}
+  T_i &= \mathrm{HMAC}\!\left(\mathsf{kb},\ \texttt{0x08}
+          \| \mathrm{be4}(|A|) \| A \| N \| \mathrm{be4}(i) \| \widetilde{C}_i\right), \\
+  T_{\mathrm{final}} &= \mathrm{HMAC}\!\left(\mathsf{kb},\ \texttt{0x09}
+          \| \mathrm{be4}(|A|) \| A \| N \| \mathrm{be4}(n)\right).
+\end{align*}
+The sentinel frame has $\ell = 0$; it signals end-of-stream.
+$\texttt{decrypt\_stream\_ae}$ verifies $T_i$ before yielding any plaintext from chunk $i$.
+$T_{\mathrm{final}}$ binds the total chunk count $n$, preventing silent truncation at a
+chunk boundary.  Chunk index $i$ in each $T_i$ prevents chunk-reordering attacks.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Security Analysis}
@@ -408,13 +442,63 @@ Therefore:
 \end{align*}
 \end{proof}
 
-\subsection{EUF-CMA Integrity}
+\subsection{INT-CTXT: Ciphertext Integrity}
 
-The 32-byte HMAC-SHA256 authentication tag (domain \texttt{0x03}) is computed
-over the full payload including the nonce and optional AAD.  Under the
-standard HMAC security reduction~\cite{bellare1996hmac}, forging a valid tag
-requires breaking the second-preimage resistance of SHA-256 or the
-pseudorandomness of HMAC, both of which are hard for classical adversaries.
+\begin{theorem}[INT-CTXT]
+  Under the PRF assumption on HMAC-SHA256, NAPSEQ is INT-CTXT secure.
+  Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
+  encryption queries there exists a PRF adversary $\mathcal{B}_2$ with
+  similar running time such that:
+  \[
+    \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \leq
+    \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+    + \frac{q^2}{2^{128}}.
+  \]
+\end{theorem}
+
+\begin{proof}
+The INT-CTXT experiment requires $\mathcal{A}$ to produce a \emph{fresh}
+valid ciphertext: a tuple $(c^*, aad^*)$ with
+$c^* \notin \{c_1, \ldots, c_q\}$ (the outputs of the $q$ encryption oracle
+calls) such that $\mathrm{NAPSEQ}.\mathsf{Dec}(\mathbf{k}, c^*, aad^*) \neq \bot$.
+
+Write $c^* = (N^*, \widetilde{B}^*, T^*)$.  For $\mathsf{Dec}$ to accept,
+$T^*$ must satisfy:
+\[
+  T^* = \mathrm{HMAC}\!\left(\mathsf{kb},\
+        \texttt{0x03} \| \mathrm{be4}(|aad^*|) \| aad^* \| N^* \| \widetilde{B}^*\right).
+\]
+Let $x^* = \texttt{0x03} \| \mathrm{be4}(|aad^*|) \| aad^* \| N^* \| \widetilde{B}^*$.
+
+\paragraph{Case 1: $N^*$ was not used in any encryption query.}
+All domain-\texttt{0x03} tag inputs from the query phase are prefixed by
+nonces $N_1, \ldots, N_q \neq N^*$, so $x^*$ was never submitted to
+$\mathrm{HMAC}(\mathsf{kb}, \cdot)$ during the query phase.  Producing the
+correct $T^*$ is therefore an HMAC MAC forgery at a fresh input.  We
+construct $\mathcal{B}_2$ that simulates the INT-CTXT experiment for
+$\mathcal{A}$, forwarding all HMAC calls to its own PRF oracle, and uses
+$\mathcal{A}$'s forgery $(x^*, T^*)$ to distinguish $\mathrm{HMAC}(\mathsf{kb},\cdot)$
+from a random function.
+
+\paragraph{Case 2: $N^* = N_i$ for some query $i$.}
+Since $c^* \neq c_i = (N_i, \widetilde{B}_i, T_i)$, either
+$\widetilde{B}^* \neq \widetilde{B}_i$, in which case $x^* \neq x_i$ and
+the argument from Case~1 applies; or $\widetilde{B}^* = \widetilde{B}_i$
+and $T^* \neq T_i$, but then $c^*$ cannot be a valid ciphertext (the tag
+input is identical to $x_i$ yet the tag differs from the correct value),
+so this sub-case cannot contribute to $\mathcal{A}$'s success.
+
+The probability of a nonce collision satisfying $N^* = N_i$ for some $i$
+is at most $q / 2^{128} \leq q^2 / 2^{128}$ by the union bound.
+Combining both cases:
+\[
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  + \frac{q^2}{2^{128}}. \qedhere
+\]
+\end{proof}
 
 \subsection{AAD Binding}
 
@@ -423,6 +507,85 @@ $T = \mathrm{HMAC}(\mathsf{kb},\ \texttt{0x03} \| \mathrm{be4}(|A|) \| A \| N \|
 The 4-byte length prefix prevents length-extension mixing between different
 AAD lengths.  Any single-bit change to the AAD produces an unpredictable
 change to the expected tag, with advantage bounded by the HMAC security.
+
+\subsection{IND-CCA Security}
+\label{sec:ind-cca}
+
+\begin{theorem}[IND-CCA]
+  Under the PRF assumption on HMAC-SHA256, NAPSEQ is IND-CCA secure.
+  Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
+  encryption queries and $q_d$ decryption queries there exist PRF adversaries
+  $\mathcal{B}_1$, $\mathcal{B}_2$ with similar running time such that:
+  \[
+    \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \leq
+    \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+    +
+    \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+    + \frac{(q + q_d)^2}{2^{128}}.
+  \]
+\end{theorem}
+
+\begin{proof}
+We apply the composition theorem of Bellare and
+Namprempre~\cite{bellare2000ae} (B\&N~2000, Theorem~3): a scheme that
+is simultaneously IND-CPA and INT-CTXT is IND-CCA.  We make the argument
+explicit via two hybrid games.
+
+\paragraph{Game $H_0$ (Real IND-CCA).}
+The standard IND-CCA experiment: $\mathcal{A}$ has access to an encryption
+oracle $\mathcal{E}$ and a decryption oracle $\mathcal{D}$.  After receiving
+the challenge ciphertext $c^*$, $\mathcal{A}$ may call $\mathcal{D}$ on
+any $c \neq c^*$.
+
+\paragraph{Game $H_1$ (Decryption oracle stubbed to $\bot$).}
+Identical to $H_0$, except $\mathcal{D}$ always returns $\bot$.
+
+\paragraph{Transition $H_0 \to H_1$.}
+The two games differ only when $\mathcal{A}$ submits a fresh valid
+ciphertext $c \neq c^*$ to $\mathcal{D}$ that would be accepted in $H_0$.
+Any distinguisher between $H_0$ and $H_1$ therefore yields an INT-CTXT
+forger $\mathcal{A}'$ (with $q_d$ forgery attempts):
+\[
+  \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \Pr[\mathcal{A}\text{ wins }H_1]\bigr|
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A}')
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  + \frac{q_d^2}{2^{128}},
+\]
+where the second inequality applies Theorem~2 with $q_d$ queries.
+
+\paragraph{Game $H_1$ reduces to IND-CPA.}
+In $H_1$ the decryption oracle is always $\bot$, providing no information
+to $\mathcal{A}$.  The IND-CCA experiment in $H_1$ is therefore
+computationally equivalent to the IND-CPA experiment, giving:
+\[
+  \Pr\bigl[\mathcal{A}\text{ wins }H_1\bigr]
+  \;\leq\;
+  \tfrac{1}{2}
+  + \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A}'')
+  \;\leq\;
+  \tfrac{1}{2}
+  + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+  + \frac{q^2}{2^{128}},
+\]
+where Theorem~1 is applied to the IND-CPA adversary $\mathcal{A}''$.
+
+\paragraph{Combining.}
+\begin{align*}
+  \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  &= \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \tfrac{1}{2}\bigr| \\
+  &\leq \bigl|\Pr[H_0] - \Pr[H_1]\bigr|
+       + \bigl|\Pr[H_1] - \tfrac{1}{2}\bigr| \\
+  &\leq \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+       + \frac{q_d^2}{2^{128}}
+       + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+       + \frac{q^2}{2^{128}}.
+\end{align*}
+Since $(q^2 + q_d^2) \leq (q + q_d)^2$, this gives the stated bound.
+\qedhere
+\end{proof}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Post-Quantum Analysis}
@@ -572,14 +735,37 @@ The following known caveats are documented in \texttt{docs/CAVEATS.md} and
 \texttt{SPEC.md \S11} in the reference implementation.
 
 \begin{description}
-  \item[CAV-001 — Streaming RUP.] The streaming API (\texttt{decrypt\_stream})
-        yields plaintext before the authentication tag is verified.  Callers
-        must use \texttt{decrypt\_stream\_strict} or opt in explicitly.
-  \item[CAV-002 — Padding length-bucket leak.] Ciphertext length reveals the
-        power-of-two padding bucket.  Callers needing full length-hiding must
-        apply a fixed-frame transport.
-  \item[CAV-003 — Ciphertext expansion.] Noise injection produces $4\text{--}20\times$
-        expansion, traded against traffic-analysis resistance.
+  \item[CAV-001 — Streaming RUP (\textbf{fixed}).] Earlier versions of
+        \texttt{decrypt\_stream} yielded plaintext before the authentication
+        tag was verified, allowing an active attacker to cause unverified data
+        to reach the application.  This is resolved by the online-AE streaming
+        format (Section~\ref{sec:streaming-ae}):
+        \texttt{decrypt\_stream\_ae} verifies each chunk's HMAC-SHA256 tag
+        before releasing any of its plaintext, and a final sentinel tag
+        authenticates the total chunk count.  The legacy
+        \texttt{decrypt\_stream} API is retained with an explicit opt-in gate
+        (\texttt{enable\_unauthenticated\_streaming=True}); new code should use
+        \texttt{encrypt\_stream\_ae} / \texttt{decrypt\_stream\_ae}.
+
+  \item[CAV-002 — 16-bit plaintext length cap (open, low).] The v6 block
+        padding scheme stores the plaintext length as a 2-byte big-endian
+        integer, capping block-mode messages at 65\,535 codepoints.  Exceeding
+        the cap raises \texttt{ValueError} immediately; there is no silent
+        truncation.  Callers requiring larger messages must split at the
+        application layer.  A 4-byte length prefix is planned for the v7 wire
+        format.
+
+  \item[CAV-003 — Padding length-bucket leakage (open, low).] Block-mode
+        ciphertext length reveals the power-of-two padding bucket
+        $\{16, 32, \ldots, 65536\}$, leaking up to $\lceil\log_2 n\rceil$ bits
+        of length information.  Callers needing full length-hiding must layer a
+        fixed-frame transport.  A fixed-frame padding option is planned for the
+        v7 wire format.
+
+  \item[CAV-004 — Ciphertext expansion (informational).] Noise injection
+        produces $4\text{--}20\times$ ciphertext expansion relative to
+        plaintext size.  This is a deliberate confidentiality feature, not a
+        bug; it is documented in all datasheets.  No fix is planned.
 \end{description}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -594,9 +780,14 @@ primitives, provides a conventional RFC~5116-compatible interface, and has been
 validated against a 30-vector KAT corpus, the full NIST SP 800-22 statistical
 suite, and a fuzz harness covering the complete decoder pipeline.
 
-Known limitations include ciphertext expansion (inherent in the noise-injection
-design), a 16-bit plaintext length cap, and a padding length-bucket leak; these
-are documented and assigned to future wire-format versions.
+The streaming Release of Unverified Plaintext issue (CAV-001) has been
+resolved by the online-AE streaming format, which attaches a per-chunk
+HMAC-SHA256 tag and a final sentinel tag, giving \texttt{decrypt\_stream\_ae}
+true online-AE semantics with no plaintext released before verification.
+Remaining open limitations include ciphertext expansion (inherent in the
+noise-injection design, CAV-004), a 16-bit block-mode plaintext length cap
+(CAV-002), and a padding length-bucket leak (CAV-003); these are documented
+and assigned to future wire-format versions.
 
 Future work includes a TVLA side-channel analysis of the Rust constant-time
 implementation, a FIPS 140-3 module boundary definition, and a performance
@@ -655,6 +846,11 @@ evaluation on embedded ARM Cortex-M4 and RISC-V targets.
   M. Bellare, R. Canetti, H. Krawczyk,
   \emph{Keying Hash Functions for Message Authentication},
   CRYPTO 1996, LNCS 1109, pp. 1--15.
+
+\bibitem{bellare2000ae}
+  M. Bellare, C. Namprempre,
+  \emph{Authenticated Encryption: Relations among Notions and Analysis of the Generic Composition Paradigm},
+  ASIACRYPT 2000, LNCS 1976, pp. 531--545.
 
 \bibitem{rfc2104}
   H. Krawczyk, M. Bellare, R. Canetti,
