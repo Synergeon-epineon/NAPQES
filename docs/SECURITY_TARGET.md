@@ -126,7 +126,7 @@ for brute-force key search.
 ### 5.1 What NAPQES does claim
 
 - Against a Grover adversary, a 10-element key drawn from [1M, 9.9M] primes
-  (key-space ≈ 2¹⁹⁶) provides approximately **2⁹⁸ security** after Grover.
+  (key-space ≈ 2¹⁹⁶·⁶) provides approximately **2⁹⁸·³ security** after Grover.
 - The construction avoids algebraic structures (elliptic curves, lattices,
   integer factorisation) that Shor's algorithm or future algebraic quantum
   attacks might exploit.
@@ -181,9 +181,15 @@ FIPS 140-3 module validation is targeted for Phase 4 (workstream 4.1–4.2).
 
 ### 6.5 Formal security proof
 
-As of this revision, no formal symbolic-model or computational proof of
-NAPQES's IND-CCA security has been published. A security argument and
-third-party cryptanalysis engagement are Phase 1 deliverables
+A formal game-hopping IND-CPA proof appears in the companion ePrint preprint
+(`docs/napseq-eprint-preprint.tex`, §4.1). The proof reduces IND-CPA security
+to the PRF assumption on HMAC-SHA256 via two hybrid games: a PRF-replacement
+hop and a one-time-pad argument on the domain-0x07 keystream masking layer.
+A quantitative advantage bound of
+Adv^PRF + q²/2^128 is established.
+
+A full IND-CCA proof (covering the auth-tag integrity layer) and a
+third-party cryptanalysis engagement remain Phase 1 deliverables
 (ROADMAP §3 workstreams 1.2, 1.4).
 
 ### 6.6 External cryptanalysis

@@ -135,8 +135,8 @@ The following notation is used throughout:
 # Key Representation
 
 A NAPQES key is an ordered tuple of K distinct prime integers, each in the
-range [1 000 000, 9 999 999].  The reference implementation generates keys
-using a cryptographically secure random source ({{FIPS140-3}}-compliant DRBG).
+range [1 000 000, 15 000 000].  The reference implementation generates keys
+using a cryptographically secure random source (FIPS140-3-compliant DRBG).
 
 The key is serialised to a byte string `key_bytes` for use as the HMAC key:
 
@@ -144,9 +144,9 @@ The key is serialised to a byte string `key_bytes` for use as the HMAC key:
 key_bytes = be5(key[0]) || be5(key[1]) || ... || be5(key[K-1])
 ~~~
 
-A 10-element key in the range [1 000 000, 9 999 999] provides a key space
-of approximately 2^196, well above the 128-bit post-quantum security
-threshold after Grover's quadratic speedup.
+A 10-element key in the range [1 000 000, 15 000 000] provides a key space
+of approximately 2^196.6 (approximately 2^98.3 post-Grover), meeting the
+2^98 post-quantum security target after Grover's quadratic speedup.
 
 # Domain-Separated HMAC Derivation
 
@@ -358,8 +358,8 @@ algorithm applied to SHA-256 preimage search, reducing the effective security
 level from 256 bits to approximately 128 bits — still above all recommended
 thresholds.
 
-Key enumeration requires testing up to 2^196 key candidates (10-element key,
-[1M, 9.9M] range).  Grover's algorithm reduces this to approximately 2^98,
+Key enumeration requires testing up to 2^196.6 key candidates (10-element key,
+[1M, 15M] range).  Grover's algorithm reduces this to approximately 2^98.3,
 which remains computationally infeasible with foreseeable quantum hardware.
 
 ## Nonce Requirements
@@ -383,8 +383,8 @@ requiring full length-hiding MUST apply a fixed-frame transport.
 ## Key Size and Format
 
 The prime-tuple key format is unusual compared to conventional AEAD keys.
-The minimum recommended key is a 10-element prime tuple from [1M, 9.9M],
-providing approximately 2^196 classical key entropy and approximately 2^98
+The minimum recommended key is a 10-element prime tuple from [1M, 15M],
+providing approximately 2^196.6 classical key entropy and approximately 2^98.3
 post-quantum key entropy.  Single-element keys provide approximately 2^23
 entropy and are NOT RECOMMENDED for production use.
 

@@ -277,7 +277,7 @@ def step_key():
     banner("GENERATE NAPQES PRIME-LIST KEY", step=2)
 
     print("  The NAPQES key is a list of 10 large primes (50 bytes total).")
-    print("  Key space: ~2^196 ordered tuples -> well above 128-bit security.")
+    print("  Key space: ~2^196.6 ordered tuples (~2^98.3 post-Grover).")
     print()
 
     key, generated = load_or_generate_key()

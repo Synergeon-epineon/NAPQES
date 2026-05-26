@@ -259,28 +259,153 @@ length is 48 bytes.
 
 \subsection{IND-CPA Security}
 
-\begin{theorem}[IND-CPA, informal]
+\begin{theorem}[IND-CPA]
   Under the PRF assumption on HMAC-SHA256, the NAPSEQ block encryption scheme
   is IND-CPA secure.  Specifically, for any PPT adversary $\mathcal{A}$ making
-  at most $q$ encryption queries:
+  at most $q$ encryption queries there exists a PRF adversary $\mathcal{B}_1$
+  with similar running time such that:
   \[
     \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
     \leq
-    2 \cdot \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{A}')
-    + \frac{q^2}{2^{128}},
+    \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+    + \frac{q^2}{2^{128}}.
   \]
-  where $\mathcal{A}'$ is a PRF adversary with running time similar to
-  $\mathcal{A}$.
 \end{theorem}
 
-\begin{proof}[Proof sketch]
-  Fix a nonce $N$.  Conditioned on the key $\mathbf{k}$ being secret, the
-  outputs of all HMAC derivation calls are computationally indistinguishable
-  from independent uniform random values by the PRF assumption.  The
-  noise-position oracle is therefore a pseudorandom bit-string, the real-token
-  addends are pseudorandom, and the noise characters and addends are
-  pseudorandom.  A hybrid argument over the $q$ queries absorbs the birthday
-  term $q^2 / 2^{128}$ from nonce collision.
+\begin{proof}
+We prove the bound via a sequence of two hybrid games.
+
+\paragraph{Game $G_0$ (Real Game).}
+This is the standard IND-CPA experiment.  The challenger samples
+$\mathbf{k}=(k_1,\ldots,k_K)$ uniformly from $K$-element ordered tuples
+of distinct primes in~$\mathcal{P}$, computes $\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$,
+and answers up to $q$ chosen-plaintext queries honestly using the real
+$\operatorname{NAPSEQ}.\mathsf{Enc}$ algorithm (which calls
+$F(\mathsf{kb},\cdot)=\operatorname{HMAC\text{-}SHA256}(\mathsf{kb},\cdot)$
+for all internal derivations).  After the query phase,
+$\mathcal{A}$ submits a challenge pair $(m_0,m_1)$ of equal padded length;
+the challenger samples $b\xleftarrow{\$}\{0,1\}$, returns
+$c^*\gets\operatorname{NAPSEQ}.\mathsf{Enc}(\mathbf{k},m_b)$, and
+$\mathcal{A}$ wins if its output $b'=b$.
+
+\paragraph{Game $G_1$ (PRF Replacement).}
+Identical to $G_0$, except the function $F(\mathsf{kb},\cdot)$ is
+replaced by a truly random function $\rho:\{0,1\}^*\to\{0,1\}^{256}$,
+sampled uniformly at the start of the experiment and evaluated lazily.
+Every call that would invoke $\operatorname{HMAC}(\mathsf{kb},x)$ now
+returns $\rho(x)$ instead.
+
+\begin{lemma}\label{lem:prf-hop}
+There exists a PRF adversary $\mathcal{B}_1$, running in time
+$\mathcal{O}(T_{\mathcal{A}})$ with at most $q\cdot L_{\max}$ oracle calls
+(where $L_{\max}$ is an upper bound on the number of HMAC evaluations per
+encryption), such that
+\[
+  \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]\bigr|
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1).
+\]
+\end{lemma}
+
+\begin{proof}
+$\mathcal{B}_1$ is given a function oracle $\mathcal{O}(\cdot)$ that is
+either $F(\mathsf{kb},\cdot)$ (real) or $\rho(\cdot)$ (random).
+$\mathcal{B}_1$ simulates the IND-CPA experiment for $\mathcal{A}$, answering
+every internal HMAC call by forwarding to $\mathcal{O}$.
+If $\mathcal{O}=F(\mathsf{kb},\cdot)$, the simulation is identical to $G_0$;
+if $\mathcal{O}=\rho$, it is identical to $G_1$.
+Hence $\mathcal{B}_1$'s distinguishing advantage equals
+$|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]|$.
+\end{proof}
+
+\paragraph{Nonce collision probability.}
+Let $\mathrm{Coll}$ denote the event that at least two of the $q+1$ nonces
+generated across the $q$ CPA oracle calls and the challenge encryption are
+equal.  Each nonce is drawn independently and uniformly from $\{0,1\}^{128}$,
+so by the union bound:
+\[
+  \Pr[\mathrm{Coll}]
+  \;\leq\;
+  \binom{q+1}{2}\cdot 2^{-128}
+  \;\leq\;
+  \frac{q^2}{2^{128}}.
+\]
+
+\begin{lemma}\label{lem:hiding}
+In $G_1$ conditioned on $\overline{\mathrm{Coll}}$:
+\[
+  \Pr\bigl[\mathcal{A}\text{ wins }G_1\;\big|\;\overline{\mathrm{Coll}}\bigr]
+  \;=\;\tfrac{1}{2}.
+\]
+\end{lemma}
+
+\begin{proof}
+Fix any adversary view $V$ arising from the CPA query phase, which uses
+nonces $N_1,\ldots,N_q$.  Let $N^*$ be the challenge nonce.
+Under $\overline{\mathrm{Coll}}$, $N^*\notin\{N_1,\ldots,N_q\}$.
+
+In $G_1$, every challenge-phase derivation uses an input prefixed by $N^*$
+(e.g., $\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(j))$,
+$\rho(N^*\|\texttt{0x01}\|\mathrm{be5}(j))$, $\rho(N^*\|\texttt{0x02})$,
+and so on for domains \texttt{0x03}--\texttt{0x07}).
+All CPA-phase evaluations used inputs prefixed by some $N_i\neq N^*$.
+Since $\rho$ is a truly random function, its outputs on distinct inputs are
+independent, uniform $256$-bit values.
+Under $\overline{\mathrm{Coll}}$, the challenge inputs are disjoint from
+all CPA-phase inputs, so all challenge $\rho$-outputs are fresh, uniform,
+and independent of~$V$.
+
+In particular, the keystream masking the varint blob (domain~\texttt{0x07}) is:
+\[
+  \mathrm{ks}(N^*)
+  = \rho(N^*\|\texttt{0x07}\|\mathrm{be4}(0))
+    \;\|\;
+    \rho(N^*\|\texttt{0x07}\|\mathrm{be4}(1))
+    \;\|\;\cdots
+  \quad(\text{truncated to }|B|\text{ bytes}),
+\]
+where $B$ denotes the varint-encoded token sequence.
+Each $\rho$-block is fresh and uniform, and domain~\texttt{0x07} is disjoint
+from domains \texttt{0x00}--\texttt{0x06} used to construct $B$, so
+$\mathrm{ks}(N^*)$ is independent of~$B$.  Therefore the masked blob satisfies:
+\[
+  \tilde{B}
+  = B \oplus \mathrm{ks}(N^*)
+  \;\overset{\mathrm{d}}{=}\;
+  \mathrm{Uniform}\bigl(\{0,1\}^{|B|}\bigr),
+\]
+independently of the plaintext bit~$b$ and the view~$V$.
+
+Similarly, the authentication tag
+$T=\rho(N^*\|\texttt{0x03}\|\mathrm{be4}(|aad|)\|aad\|N^*\|\tilde{B})$
+is evaluated at an input that has not appeared in any previous $\rho$
+evaluation (it is prefixed by $N^*$ and uses domain~\texttt{0x03} with a
+distinct suffix), so $T$ is a fresh uniform $32$-byte value independent
+of $b$ and~$V$.
+
+Consequently, $c^*=(N^*,\tilde{B},T)$ is jointly uniformly distributed
+over its domain, independently of~$b$.  The adversary gains no information
+about $b$ from $c^*$, so
+$\Pr[\mathcal{A}\text{ wins }G_1\mid\overline{\mathrm{Coll}}]=\tfrac{1}{2}$.
+\end{proof}
+
+\paragraph{Combining the bounds.}
+\begin{align*}
+  \Pr[\mathcal{A}\text{ wins }G_1]
+  &= \Pr[\mathrm{Coll}]\cdot\Pr[\text{wins}\mid\mathrm{Coll}]
+     +\Pr[\overline{\mathrm{Coll}}]\cdot\Pr[\text{wins}\mid\overline{\mathrm{Coll}}]\\
+  &\leq \Pr[\mathrm{Coll}]+\tfrac{1}{2}
+   \;\leq\; \frac{q^2}{2^{128}}+\tfrac{1}{2}.
+\end{align*}
+Therefore:
+\begin{align*}
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  &= \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\tfrac{1}{2}\bigr| \\
+  &\leq \bigl|\Pr[G_0]-\Pr[G_1]\bigr|
+       +\bigl|\Pr[\mathcal{A}\text{ wins }G_1]-\tfrac{1}{2}\bigr| \\
+  &\leq \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1) + \frac{q^2}{2^{128}}.
+    \qedhere
+\end{align*}
 \end{proof}
 
 \subsection{EUF-CMA Integrity}
@@ -473,9 +598,9 @@ Known limitations include ciphertext expansion (inherent in the noise-injection
 design), a 16-bit plaintext length cap, and a padding length-bucket leak; these
 are documented and assigned to future wire-format versions.
 
-Future work includes a formal security proof, a TVLA side-channel analysis of
-the Rust constant-time implementation, a FIPS 140-3 module boundary definition,
-and a performance evaluation on embedded ARM Cortex-M4 and RISC-V targets.
+Future work includes a TVLA side-channel analysis of the Rust constant-time
+implementation, a FIPS 140-3 module boundary definition, and a performance
+evaluation on embedded ARM Cortex-M4 and RISC-V targets.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \bibliographystyle{plain}

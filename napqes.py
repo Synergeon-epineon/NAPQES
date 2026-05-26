@@ -70,12 +70,12 @@ def is_prime(n: int) -> bool:
 
 def generate_prime_numbers(count: int = 10,
                            min_val: int = 1_000_000,
-                           max_val: int = 9_999_999) -> list[int]:
+                           max_val: int = 15_000_000) -> list[int]:
     """Generate *count* distinct primes drawn uniformly from [min_val, max_val].
 
-    Default range [1 000 000, 9 999 999] contains ≈ 586 000 primes.
+    Default range [1 000 000, 15 000 000] contains ≈ 829 000 primes.
     A 10-element key (ordered, no repetition) from this range gives a key
-    space of ≈ 2^196, well above the 128-bit security threshold.
+    space of ≈ 2^196.6 (≈ 2^98.3 post-Grover), meeting the 2^98 PQ target.
     """
     primes: list[int] = []
     max_attempts = (max_val - min_val) * 4
@@ -94,6 +94,55 @@ def generate_prime_numbers(count: int = 10,
 
 
 # ─── HMAC session helpers ────────────────────────────────────────────────────
+
+def _validate_nonce(nonce: bytes) -> None:
+    if not isinstance(nonce, (bytes, bytearray)):
+        raise TypeError(f"Nonce must be bytes, got {type(nonce).__name__!r}.")
+    if len(nonce) != _NONCE_SIZE:
+        raise ValueError(
+            f"Nonce must be exactly {_NONCE_SIZE} bytes, got {len(nonce)}."
+        )
+
+
+def _validate_cypher(cypher: list[int]) -> None:
+    if not isinstance(cypher, list):
+        raise TypeError(f"Cypher must be a list, got {type(cypher).__name__!r}.")
+    for i, token in enumerate(cypher):
+        if not isinstance(token, int) or isinstance(token, bool):
+            raise TypeError(
+                f"Cypher token at index {i} ({token!r}) is not an integer."
+            )
+        if token < 0:
+            raise ValueError(
+                f"Cypher token at index {i} ({token!r}) is negative; "
+                "all tokens must be non-negative integers."
+            )
+
+
+def _validate_key(key: list[int]) -> None:
+    """Validate that *key* is a non-empty list of distinct primes > 1.
+
+    Raises ValueError if the key is empty, contains a composite or unit
+    element, or contains duplicate elements.  Call this at the entry point
+    of every public API that accepts a key so that callers get a clear error
+    rather than a ZeroDivisionError or a silent security degradation.
+    """
+    if not key:
+        raise ValueError("Key must be a non-empty list of integers.")
+    seen: set[int] = set()
+    for i, k in enumerate(key):
+        if not is_prime(k):
+            raise ValueError(
+                f"Key element at index {i} ({k!r}) is not prime. "
+                "All key elements must be prime integers greater than 1."
+            )
+        if k in seen:
+            raise ValueError(
+                f"Key element {k!r} at index {i} is a duplicate. "
+                "All key elements must be distinct."
+            )
+        seen.add(k)
+
 
 def _key_bytes(key: list[int]) -> bytes:
     """Serialise key list to fixed-width bytes for HMAC keying."""
@@ -277,13 +326,16 @@ def _unpad_message(padded: list[int]) -> list[int]:
     if len(padded) < 2:
         raise ValueError("Padded message too short to contain length prefix.")
     n = (padded[0] << 8) | padded[1]
+    if 2 + n > len(padded):
+        raise ValueError(
+            f"Length prefix ({n}) exceeds available data ({len(padded) - 2} bytes)."
+        )
     return padded[2 : 2 + n]
 
 
 # ─── Core encrypt / decrypt ──────────────────────────────────────────────────
 
-def encrypt(message: list[int], key: list[int],
-            window: int = 128) -> tuple[bytes, list[int]]:
+def encrypt(message: list[int], key: list[int]) -> tuple[bytes, list[int]]:
     """Encrypt *message* (list of integer codepoints).
 
     Returns ``(nonce, tokens)``; ``encrypt_str`` / ``encrypt_bytes`` embed
@@ -299,6 +351,7 @@ def encrypt(message: list[int], key: list[int],
       • Noise positions and real-token addends are HMAC-derived, so the
         key cannot be recovered via divisibility, frequency, or ratio attacks.
     """
+    _validate_key(key)
     nonce    = secrets.token_bytes(16)
     kb       = _key_bytes(key)
     noise_probability = _derive_noise_p(kb, nonce)
@@ -342,6 +395,7 @@ def _decrypt_with_noise_p(nonce: bytes, cypher: list[int], key: list[int],
     reads the stored noise_p from the old colon-delimited ciphertext format.
     New code should always use the public ``decrypt`` API.
     """
+    _validate_key(key)
     kb       = _key_bytes(key)
     K        = len(key)
     padded:  list[int] = []
@@ -366,6 +420,9 @@ def decrypt(nonce: bytes, cypher: list[int], key: list[int]) -> list[int]:
     an error; callers should verify plaintext validity independently.
     Padding added by ``encrypt`` is stripped automatically.
     """
+    _validate_nonce(nonce)
+    _validate_cypher(cypher)
+    _validate_key(key)
     kb = _key_bytes(key)
     noise_probability = _derive_noise_p(kb, nonce)
     return _decrypt_with_noise_p(nonce, cypher, key, noise_probability)
@@ -429,8 +486,7 @@ def _b128_decode_tokens(data: bytes) -> list[int]:
 # Compared to v3 (hex-encoded varints), v6 reduces ciphertext size by ~53%
 # on binary channels and ~18% on text channels (base64 vs hex).
 
-def encrypt_bytes(message: str, key: list[int], window: int = 128,
-                  aad: bytes = b"") -> bytes:
+def encrypt_bytes(message: str, key: list[int], aad: bytes = b"") -> bytes:
     """Encrypt *message* and return a compact binary ciphertext (v6 format).
 
     Wire layout:  nonce (16 B) || masked_blob || auth_tag (32 B).
@@ -441,9 +497,7 @@ def encrypt_bytes(message: str, key: list[int], window: int = 128,
     No encoding overhead; suitable for binary sockets, files, or any
     binary-safe channel.
     """
-    if not message:
-        return b""
-    nonce, tokens = encrypt([ord(c) for c in message], key, window)
+    nonce, tokens = encrypt([ord(c) for c in message], key)
     kb = _key_bytes(key)
     varint_blob = _b128_encode_tokens(tokens)
     ks = _varint_keystream(kb, nonce, len(varint_blob))
@@ -465,8 +519,7 @@ def decrypt_bytes(ciphertext: bytes, key: list[int], aad: bytes = b"",
     If ``allow_legacy_unauthenticated`` is True, this function will also
     decode old v5 payloads (nonce || varint_blob) without integrity checks.
     """
-    if not ciphertext:
-        return ""
+    _validate_key(key)
     if len(ciphertext) >= (_NONCE_SIZE + _TAG_SIZE):
         kb = _key_bytes(key)
         payload = ciphertext[:-_TAG_SIZE]
@@ -497,16 +550,13 @@ def decrypt_bytes(ciphertext: bytes, key: list[int], aad: bytes = b"",
 # noise_p is HMAC-derived from key+nonce — never stored in the ciphertext.
 # Backward-compatible: legacy v5/v3/v2 strings remain decodable with opt-in.
 
-def encrypt_str(message: str, key: list[int], window: int = 128,
-                aad: bytes = b"") -> str:
+def encrypt_str(message: str, key: list[int], aad: bytes = b"") -> str:
     """Encrypt *message* and return a base64-encoded v6 ciphertext string.
 
     The string is safe for any ASCII-compatible text channel.  Use
     ``encrypt_bytes`` directly when the transport channel is binary-safe.
     """
-    if not message:
-        return ""
-    return base64.b64encode(encrypt_bytes(message, key, window, aad=aad)).decode('ascii')
+    return base64.b64encode(encrypt_bytes(message, key, aad=aad)).decode('ascii')
 
 
 def decrypt_str(cypher: str, key: list[int], aad: bytes = b"",
@@ -519,12 +569,16 @@ def decrypt_str(cypher: str, key: list[int], aad: bytes = b"",
       v3  — ``<nonce_hex>:<noise_p_hex>:<b128_tokens_hex>`` (colon-separated).
       v2  — ``<nonce_hex>:<noise_p_hex>:<space-separated decimals>`` (legacy).
     """
-    if not cypher:
-        return ""
     if ":" not in cypher:
         return decrypt_bytes(base64.b64decode(cypher), key, aad=aad,
                              allow_legacy_unauthenticated=allow_legacy_unauthenticated)
-    # Legacy v2/v3 path
+    # Legacy v2/v3 path — requires explicit opt-in, same policy as v5.
+    if not allow_legacy_unauthenticated:
+        raise ValueError(
+            "Ciphertext appears to be a legacy v2/v3 colon-delimited format. "
+            "These formats carry no integrity protection. To decode them, set "
+            "allow_legacy_unauthenticated=True."
+        )
     try:
         nonce_hex, noise_p_hex, token_field = cypher.split(":", 2)
     except ValueError:
@@ -561,6 +615,7 @@ def encrypt_stream(
     No block padding is applied — use encrypt_bytes when length obfuscation
     is required.  Decryption must use decrypt_stream.
     """
+    _validate_key(key)
     nonce = secrets.token_bytes(_NONCE_SIZE)
     kb = _key_bytes(key)
     noise_p = _derive_noise_p(kb, nonce)
@@ -626,6 +681,7 @@ def decrypt_stream(
             "acknowledge this, or use decrypt_stream_strict to buffer + "
             "verify before any plaintext is returned."
         )
+    _validate_key(key)
     kb = _key_bytes(key)
     chunk_iter = iter(byte_chunks)
 

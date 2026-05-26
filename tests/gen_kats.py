@@ -64,8 +64,6 @@ def _encrypt_with_nonce(
     aad: bytes = b"",
 ) -> bytes:
     """Replicate encrypt_bytes with a caller-supplied nonce (KAT use only)."""
-    if not message:
-        return b""
     kb = napqes._key_bytes(key)
     noise_p = napqes._derive_noise_p(kb, nonce)
     padded = napqes._pad_message([ord(c) for c in message], kb, nonce)
@@ -165,17 +163,11 @@ def generate() -> list[dict]:
 
     # ── Positive: boundary / coverage ─────────────────────────────────────
 
-    # V001: empty message — special case, returns empty bytes (no ciphertext)
-    vectors.append({
-        "id": "V001",
-        "kind": "positive",
-        "description": "Empty message produces empty ciphertext",
-        "key": KEY_4,
-        "nonce_hex": "",
-        "message": "",
-        "aad_hex": "",
-        "ciphertext_hex": "",
-    })
+    # V001: empty message — must produce a full authenticated ciphertext
+    vectors.append(_build_positive(
+        "V001", "Empty message produces authenticated ciphertext (not empty bytes)",
+        KEY_4, idx := idx + 1, "",
+    ))
 
     # V002: single printable character
     vectors.append(_build_positive(
@@ -378,9 +370,10 @@ def generate() -> list[dict]:
     # V021: same (key, nonce, message, aad) as V003 → identical ciphertext.
     # Verifies that the construction is fully deterministic given (key, nonce,
     # plaintext); required property for cross-implementation KAT parity.
-    v021_nonce = _nonce(2)  # nonce index 2 = same as V003
+    v003 = next(v for v in vectors if v["id"] == "V003")
+    v021_nonce = bytes.fromhex(v003["nonce_hex"])
     v021_ct = _encrypt_with_nonce("Hello!!", KEY_4, v021_nonce)
-    assert v021_ct.hex() == vectors[2]["ciphertext_hex"], (
+    assert v021_ct.hex() == v003["ciphertext_hex"], (
         "Determinism failure: V021 ciphertext != V003 ciphertext"
     )
     vectors.append({
@@ -400,7 +393,7 @@ def generate() -> list[dict]:
     # V022: same (key, nonce) as V003/V021 but different message → different
     # ciphertext.  Documents that nonce-reuse with a different plaintext yields
     # a different output (semantic-security documentation vector).
-    v022_nonce = _nonce(2)  # same nonce as V003/V021
+    v022_nonce = v021_nonce  # same nonce as V003/V021
     v022_ct = _encrypt_with_nonce("World!!", KEY_4, v022_nonce)
     assert v022_ct.hex() != v021_ct.hex(), (
         "Security failure: same nonce with different message produced identical ciphertext"
@@ -434,6 +427,13 @@ def generate() -> list[dict]:
         KEY_4, ct_n7.hex(),
         aad=aad_n7_bad,
         expected_exception="Authentication failed",
+    ))
+
+    # N009: empty ciphertext must be rejected (not silently return "")
+    vectors.append(_build_negative(
+        "N009", "Empty ciphertext rejected: no nonce, no tag, no authentication",
+        KEY_4, "",
+        expected_exception="not a valid authenticated v6 payload",
     ))
 
     # N008: v3-format colon-delimited string encoded as raw bytes.  When fed

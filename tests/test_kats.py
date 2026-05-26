@@ -56,12 +56,6 @@ def test_positive_encrypt_bytes_deterministic(vec):
     expected_ct = bytes.fromhex(vec["ciphertext_hex"])
     nonce_hex = vec["nonce_hex"]
 
-    if not message:
-        # Empty message: expect empty ciphertext
-        assert napqes.encrypt_bytes("", key, aad=aad) == b""
-        assert expected_ct == b""
-        return
-
     nonce = bytes.fromhex(nonce_hex)
     ct = _encrypt_with_nonce(message, key, nonce, aad=aad)
     assert ct == expected_ct, (
@@ -79,10 +73,6 @@ def test_positive_decrypt_roundtrip(vec):
     aad = bytes.fromhex(vec["aad_hex"])
     ct = bytes.fromhex(vec["ciphertext_hex"])
 
-    if not message:
-        assert napqes.decrypt_bytes(ct, key, aad=aad) == ""
-        return
-
     plaintext = napqes.decrypt_bytes(ct, key, aad=aad)
     assert plaintext == message, (
         f"[{vec['id']}] roundtrip failed: got {plaintext!r}"
@@ -96,10 +86,6 @@ def test_positive_decrypt_str_roundtrip(vec):
     message = vec["message"]
     aad = bytes.fromhex(vec["aad_hex"])
     ct = bytes.fromhex(vec["ciphertext_hex"])
-
-    if not message:
-        assert napqes.decrypt_str("", key, aad=aad) == ""
-        return
 
     ct_b64 = base64.b64encode(ct).decode("ascii")
     plaintext = napqes.decrypt_str(ct_b64, key, aad=aad)
@@ -115,10 +101,6 @@ def test_positive_encrypt_str_roundtrip(vec):
     message = vec["message"]
     aad = bytes.fromhex(vec["aad_hex"])
 
-    if not message:
-        ct_b64 = napqes.encrypt_str("", key, aad=aad)
-        assert ct_b64 == ""
-        return
 
     ct_b64 = napqes.encrypt_str(message, key, aad=aad)
     plaintext = napqes.decrypt_str(ct_b64, key, aad=aad)
@@ -150,6 +132,142 @@ def test_negative_raises_value_error(vec):
 # ---------------------------------------------------------------------------
 # Cross-implementation deterministism check
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# CF-001 regression: v2/v3 colon-delimited path must honour allow_legacy_unauthenticated
+# ---------------------------------------------------------------------------
+
+def test_decrypt_str_rejects_v2v3_without_flag():
+    """decrypt_str must refuse v2/v3 colon-delimited ciphertext when flag is False (default)."""
+    key = [2, 3, 5, 7]
+    # Syntactically valid v2 ciphertext: nonce_hex:noise_p_hex:space-separated tokens
+    fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
+    with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
+        napqes.decrypt_str(fake_v2, key)
+
+
+def test_decrypt_str_rejects_v2v3_with_flag_false_explicit():
+    """Explicit allow_legacy_unauthenticated=False must also block v2/v3 path."""
+    key = [2, 3, 5, 7]
+    fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
+    with pytest.raises(ValueError, match="allow_legacy_unauthenticated"):
+        napqes.decrypt_str(fake_v2, key, allow_legacy_unauthenticated=False)
+
+
+def test_decrypt_str_accepts_v2v3_with_flag_true():
+    """allow_legacy_unauthenticated=True must allow the v2/v3 path to proceed past the flag check."""
+    key = [2, 3, 5, 7]
+    # Syntactically invalid tokens — we just want to confirm the flag check is passed;
+    # the subsequent parse/decode may raise for other reasons.
+    fake_v2 = "aabbccddaabbccddaabbccddaabbccdd:ff:72 69 6e 67"
+    try:
+        napqes.decrypt_str(fake_v2, key, allow_legacy_unauthenticated=True)
+    except ValueError as exc:
+        assert "allow_legacy_unauthenticated" not in str(exc), (
+            "Flag-check error should not appear when flag is True; "
+            f"got: {exc}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cross-implementation determinism check
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# MF-006: Key serialization – 5-byte fixed-width encoding KATs
+# ---------------------------------------------------------------------------
+
+_KEY_BYTES_KATS = [
+    # (description, key, expected_hex)
+    # Trivial cases — verifiable by inspection.
+    ("single prime [2]",  [2], "0000000002"),
+    ("single prime [3]",  [3], "0000000003"),
+    ("two-element [2, 3]", [2, 3], "00000000020000000003"),
+    # KEY_1 = [7_999_993 = 0x7A11F9]
+    ("KEY_1 [7_999_993]", [7_999_993], "00007a11f9"),
+    # KEY_4 individual elements (1_000_003 = 0x0F4243, etc.)
+    ("KEY_4[0] [1_000_003]", [1_000_003], "00000f4243"),
+    ("KEY_4[1] [1_000_033]", [1_000_033], "00000f4261"),
+    ("KEY_4[2] [1_000_037]", [1_000_037], "00000f4265"),
+    ("KEY_4[3] [1_000_039]", [1_000_039], "00000f4267"),
+    # Full KEY_4 — verifies element concatenation order
+    (
+        "KEY_4 full [1_000_003, 1_000_033, 1_000_037, 1_000_039]",
+        [1_000_003, 1_000_033, 1_000_037, 1_000_039],
+        "00000f424300000f426100000f426500000f4267",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "desc,key,expected_hex",
+    _KEY_BYTES_KATS,
+    ids=[row[0] for row in _KEY_BYTES_KATS],
+)
+def test_key_bytes_serialization(desc, key, expected_hex):
+    """_key_bytes must produce 5-byte big-endian encoding for each key element."""
+    result = napqes._key_bytes(key)
+    assert result.hex() == expected_hex, (
+        f"{desc}: expected {expected_hex!r}, got {result.hex()!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MF-003: Zero-length key must raise ValueError, not ZeroDivisionError
+# ---------------------------------------------------------------------------
+
+_DUMMY_NONCE  = b'\x00' * 16
+_DUMMY_CT     = bytes(64)   # 48 B min for v6 auth tag; 64 is safe
+_DUMMY_CT_B64 = base64.b64encode(_DUMMY_CT).decode()
+
+
+def test_mf003_encrypt_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.encrypt([65], [])
+
+
+def test_mf003_decrypt_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.decrypt(_DUMMY_NONCE, [65], [])
+
+
+def test_mf003_encrypt_bytes_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.encrypt_bytes("a", [])
+
+
+def test_mf003_decrypt_bytes_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.decrypt_bytes(_DUMMY_CT, [])
+
+
+def test_mf003_encrypt_str_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.encrypt_str("a", [])
+
+
+def test_mf003_decrypt_str_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.decrypt_str(_DUMMY_CT_B64, [])
+
+
+def test_mf003_encrypt_stream_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        next(napqes.encrypt_stream(["a"], []))
+
+
+def test_mf003_decrypt_stream_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        next(napqes.decrypt_stream(
+            [_DUMMY_CT], [],
+            enable_unauthenticated_streaming=True,
+        ))
+
+
+def test_mf003_decrypt_stream_strict_empty_key():
+    with pytest.raises(ValueError, match="non-empty"):
+        napqes.decrypt_stream_strict([_DUMMY_CT], [])
+
 
 def test_gen_kats_check_mode():
     """gen_kats.py --check must pass: regenerated vectors match checked-in file."""
