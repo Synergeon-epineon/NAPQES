@@ -14,7 +14,6 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -271,6 +270,38 @@ pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Vec<u32> {
     unpad_message(&padded)
 }
 
+// ─── Constant-time tag comparison ────────────────────────────────────────────
+
+/// Compare two equal-length byte slices in constant time.
+///
+/// Three properties together prevent LLVM from generating an early-exit loop:
+///
+/// 1. `#[inline(never)]` — the function is opaque to the caller; LLVM cannot
+///    sink the caller's branch into this function body.
+/// 2. `read_volatile` on every byte — volatile reads cannot be eliminated or
+///    reordered, so all bytes are unconditionally loaded.
+/// 3. `write_volatile` to `diff` after every XOR — the store is an observable
+///    side-effect; skipping any loop iteration would change it, which LLVM is
+///    forbidden to do.  This forces every iteration to run, preventing LLVM
+///    from restructuring the loop into a `cmpb + jne` early-exit sequence.
+///
+/// The resulting assembly is a fixed-count loop: `jne` branches only on the
+/// loop counter (always 32 iterations), never on the tag data.
+#[inline(never)]
+fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        unsafe {
+            diff |= std::ptr::read_volatile(x) ^ std::ptr::read_volatile(y);
+            // The volatile write forces this accumulated value to be
+            // materialised every iteration; LLVM cannot skip iterations.
+            std::ptr::write_volatile(&mut diff, diff);
+        }
+    }
+    diff == 0
+}
+
 // ─── Base-128 varint ─────────────────────────────────────────────────────────
 
 fn b128_encode_tokens(tokens: &[u64]) -> Vec<u8> {
@@ -399,7 +430,7 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     let payload = &ciphertext[..split];
     let recv_tag = &ciphertext[split..];
     let calc_tag = compute_auth_tag(&kb, aad, payload);
-    if recv_tag.ct_eq(calc_tag.as_ref()).unwrap_u8() == 0 {
+    if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
     let nonce = &payload[..NONCE_SIZE];
