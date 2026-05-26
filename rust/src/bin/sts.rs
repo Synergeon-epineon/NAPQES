@@ -787,6 +787,49 @@ fn test_random_excursion_variant(bits: &[u8]) -> Vec<Tr> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// JSON report
+// ════════════════════════════════════════════════════════════════════════════
+
+fn write_json_report(path: &str, results: &[Tr], bits: usize, elapsed_ms: u128) -> std::io::Result<()> {
+    let passed  = results.iter().filter(|r| r.status == Status::Pass).count();
+    let failed  = results.iter().filter(|r| r.status == Status::Fail).count();
+    let skipped = results.iter().filter(|r| r.status == Status::Skip).count();
+    let total   = results.len();
+
+    let mut s = String::with_capacity(4096);
+    s.push_str("{\n");
+    s.push_str("  \"spec\": \"NIST SP 800-22 Rev 1a\",\n");
+    s.push_str("  \"napseq_version\": \"v6\",\n");
+    s.push_str(&format!("  \"bits_tested\": {bits},\n"));
+    s.push_str(&format!("  \"elapsed_ms\": {elapsed_ms},\n"));
+    s.push_str("  \"summary\": {\n");
+    s.push_str(&format!("    \"total\": {total},\n"));
+    s.push_str(&format!("    \"passed\": {passed},\n"));
+    s.push_str(&format!("    \"failed\": {failed},\n"));
+    s.push_str(&format!("    \"skipped\": {skipped}\n"));
+    s.push_str("  },\n");
+    s.push_str("  \"tests\": [\n");
+    for (i, t) in results.iter().enumerate() {
+        let comma = if i + 1 < results.len() { "," } else { "" };
+        let passed_json  = (t.status == Status::Pass).to_string();
+        let skipped_json = (t.status == Status::Skip).to_string();
+        let pv_json = if t.p_value.is_nan() {
+            "null".to_string()
+        } else {
+            format!("{:.8}", t.p_value)
+        };
+        let name_escaped = t.name.replace('"', "\\\"");
+        let note_escaped = t.note.replace('"', "\\\"");
+        s.push_str(&format!(
+            "    {{\"name\": \"{name_escaped}\", \"passed\": {passed_json}, \"skipped\": {skipped_json}, \"p_value\": {pv_json}, \"note\": \"{note_escaped}\"}}{comma}\n"
+        ));
+    }
+    s.push_str("  ]\n}\n");
+
+    std::fs::write(path, s)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Report
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -825,12 +868,16 @@ fn print_report(results: &[Tr], bits: usize, elapsed_ms: u128) {
 // ════════════════════════════════════════════════════════════════════════════
 
 fn main() {
-    let n: usize = std::env::args()
-        .collect::<Vec<_>>()
-        .windows(2)
+    let args: Vec<String> = std::env::args().collect();
+
+    let n: usize = args.windows(2)
         .find(|w| w[0] == "--bits")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(10_000_000);  // 10M recommended: RE/REV need ≥500 cycles
+
+    let out_path: Option<&str> = args.windows(2)
+        .find(|w| w[0] == "--out")
+        .map(|w| w[1].as_str());
 
     eprintln!("[STS] Generating {n} NAPSEQ v6 bits…");
     let t0 = Instant::now();
@@ -855,6 +902,13 @@ fn main() {
 
     let elapsed = t0.elapsed().as_millis();
     print_report(&results, n, elapsed);
+
+    if let Some(path) = out_path {
+        match write_json_report(path, &results, n, elapsed) {
+            Ok(()) => eprintln!("JSON report written to {path}"),
+            Err(e) => eprintln!("ERROR: could not write {path}: {e}"),
+        }
+    }
 
     let any_fail = results.iter().any(|r| r.status == Status::Fail);
     std::process::exit(if any_fail { 1 } else { 0 });

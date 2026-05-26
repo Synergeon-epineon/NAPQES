@@ -402,7 +402,7 @@ def run_nist_tests() -> dict:
             "elapsed_ms": round((time.perf_counter() - t_total) * 1000, 1),
             "demo_key":   f"[{_DEMO_KEY[0]}, …, {_DEMO_KEY[-1]}] (small-range demo key)",
             "note": (
-                "Tests use a deliberately small demo key from [100, 300] to show that "
+                "Tests use a deliberately small demo key from [1 024, ~1 100] to show that "
                 "structural attacks fail regardless of key size. Production keys use "
                 "[1 000 000, 15 000 000] (≈ 2^196.6 key space, ≈2^98.3 post-Grover)."
             ),

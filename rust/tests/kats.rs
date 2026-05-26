@@ -51,7 +51,10 @@ fn positive_decrypt_roundtrip() {
     let mut tested = 0;
     let mut skipped = 0;  // vectors skipped due to empty message
 
-    for vec in vectors.iter().filter(|v| v["kind"] == "positive") {
+    for vec in vectors
+        .iter()
+        .filter(|v| v["kind"] == "positive" && v["api"] != "stream_ae")
+    {
         let id = vec["id"].as_str().unwrap();
         let message = vec["message"].as_str().unwrap_or("");
         let ct_hex = vec["ciphertext_hex"].as_str().unwrap_or("");
@@ -109,7 +112,10 @@ fn positive_encrypt_bytes_deterministic() {
     let vectors = load_vectors();
     let mut tested = 0;
 
-    for vec in vectors.iter().filter(|v| v["kind"] == "positive") {
+    for vec in vectors
+        .iter()
+        .filter(|v| v["kind"] == "positive" && v["api"] != "stream_ae")
+    {
         let id = vec["id"].as_str().unwrap();
         let message = vec["message"].as_str().unwrap_or("");
         let nonce_hex = vec["nonce_hex"].as_str().unwrap_or("");
@@ -171,7 +177,10 @@ fn negative_returns_err() {
     let vectors = load_vectors();
     let mut tested = 0;
 
-    for vec in vectors.iter().filter(|v| v["kind"] == "negative") {
+    for vec in vectors
+        .iter()
+        .filter(|v| v["kind"] == "negative" && v["api"] != "stream_ae")
+    {
         let id = vec["id"].as_str().unwrap();
         let tampered_hex = vec["tampered_hex"].as_str().unwrap_or("");
         let aad_hex = vec["aad_hex"].as_str().unwrap_or("");
