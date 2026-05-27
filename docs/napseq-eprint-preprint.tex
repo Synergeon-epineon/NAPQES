@@ -35,7 +35,7 @@
 }
 
 % ── Metadata ──────────────────────────────────────────────────────────────────
-\title{\textbf{NAPSEQ: A Single-Primitive Authenticated Encryption Scheme\\
+\title{\textbf{NAPQES: A Single-Primitive Authenticated Encryption Scheme\\
 Built from HMAC-SHA256}}
 
 \author[1]{Abdeslam Jakjoud}
@@ -49,9 +49,9 @@ Built from HMAC-SHA256}}
 
 % ── Abstract ─────────────────────────────────────────────────────────────────
 \begin{abstract}
-We present NAPSEQ, an Authenticated Encryption with Associated Data (AEAD)
+We present NAPQES, an Authenticated Encryption with Associated Data (AEAD)
 scheme whose security reduces exclusively to the pseudorandomness of
-HMAC-SHA256.  Unlike AES-GCM and ChaCha20-Poly1305, NAPSEQ does not employ
+HMAC-SHA256.  Unlike AES-GCM and ChaCha20-Poly1305, NAPQES does not employ
 finite-field arithmetic, group operations, or AES S-box permutations, and is
 therefore not subject to Shor's algorithm or hidden-subgroup quantum attacks.
 The construction combines a prime-indexed token cipher, HMAC-derived noise
@@ -84,7 +84,7 @@ Their security, however, ultimately depends on algebraic structures
 whose resilience against quantum adversaries running variants of Shor's
 algorithm is an active research question~\cite{nistpq2022}.
 
-NAPSEQ takes a more conservative approach: the \emph{only} cryptographic
+NAPQES takes a more conservative approach: the \emph{only} cryptographic
 primitive in the construction is HMAC-SHA256, approved under NIST FIPS 198-1
 and FIPS 180-4.  The security of the entire scheme therefore reduces to the
 pseudorandomness of HMAC-SHA256—a well-studied assumption with no known
@@ -94,7 +94,7 @@ remaining far above all recommended thresholds.
 
 \paragraph{Contributions.}
 \begin{enumerate}
-  \item We specify NAPSEQ wire format v6 (Section~\ref{sec:construction}),
+  \item We specify NAPQES wire format v6 (Section~\ref{sec:construction}),
         including the key serialisation, HMAC derivation schedule,
         token construction, padding scheme, and authentication tag.
   \item We prove IND-CPA security (Section~\ref{sec:security}) under the
@@ -104,7 +104,7 @@ remaining far above all recommended thresholds.
         comparison with AES-GCM and ChaCha20-Poly1305
         (Section~\ref{sec:comparison}).
   \item We report NIST SP 800-22 Rev 1a statistical test results on 10 million
-        bits of NAPSEQ ciphertext output (Section~\ref{sec:sts}), a
+        bits of NAPQES ciphertext output (Section~\ref{sec:sts}), a
         30-vector KAT corpus (Section~\ref{sec:kats}), and a fuzz harness
         covering the full decoder pipeline (Section~\ref{sec:fuzz}).
   \item We discuss known caveats (Section~\ref{sec:caveats}): the 16-bit
@@ -125,7 +125,7 @@ over $\mathrm{GF}(2^{128})$.  The Forbidden Attack~\cite{joux2006} and
 nonce-reuse attacks~\cite{joux-nonce} demonstrate that the algebraic structure
 of GHASH can be exploited when the polynomial MAC key is recovered (e.g.,
 under nonce misuse), algebraically recovering the authentication key.
-NAPSEQ uses HMAC-SHA256 for authentication, which does not admit the
+NAPQES uses HMAC-SHA256 for authentication, which does not admit the
 Forbidden Attack.
 
 \paragraph{ChaCha20-Poly1305~\cite{rfc7539}.}
@@ -143,7 +143,7 @@ operations over 64-bit words.  Ascon is not yet in a FIPS-approved family.
 \paragraph{HMAC-based constructions.}
 HKDF~\cite{rfc5869} and HMAC-DRBG~\cite{nist-drbg} demonstrate that
 HMAC-SHA256 is a sufficient basis for key derivation and pseudorandom
-generation.  NAPSEQ extends this philosophy to the full AEAD context.
+generation.  NAPQES extends this philosophy to the full AEAD context.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Construction}
@@ -164,7 +164,7 @@ Throughout this paper:
 
 \subsection{Key}
 
-A NAPSEQ key $\mathbf{k} = (k_1, k_2, \ldots, k_K)$ is an ordered tuple
+A NAPQES key $\mathbf{k} = (k_1, k_2, \ldots, k_K)$ is an ordered tuple
 of $K$ distinct primes drawn uniformly from $\mathcal{P}$ using a
 cryptographically secure DRBG.  The serialised key material is:
 \[
@@ -294,12 +294,12 @@ chunk boundary.  Chunk index $i$ in each $T_i$ prevents chunk-reordering attacks
 \subsection{IND-CPA Security}
 
 \begin{theorem}[IND-CPA]
-  Under the PRF assumption on HMAC-SHA256, the NAPSEQ block encryption scheme
+  Under the PRF assumption on HMAC-SHA256, the NAPQES block encryption scheme
   is IND-CPA secure.  Specifically, for any PPT adversary $\mathcal{A}$ making
   at most $q$ encryption queries there exists a PRF adversary $\mathcal{B}_1$
   with similar running time such that:
   \[
-    \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})
     \leq
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
     + \frac{q^2}{2^{128}}.
@@ -314,12 +314,12 @@ This is the standard IND-CPA experiment.  The challenger samples
 $\mathbf{k}=(k_1,\ldots,k_K)$ uniformly from $K$-element ordered tuples
 of distinct primes in~$\mathcal{P}$, computes $\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$,
 and answers up to $q$ chosen-plaintext queries honestly using the real
-$\operatorname{NAPSEQ}.\mathsf{Enc}$ algorithm (which calls
+$\operatorname{NAPQES}.\mathsf{Enc}$ algorithm (which calls
 $F(\mathsf{kb},\cdot)=\operatorname{HMAC\text{-}SHA256}(\mathsf{kb},\cdot)$
 for all internal derivations).  After the query phase,
 $\mathcal{A}$ submits a challenge pair $(m_0,m_1)$ of equal padded length;
 the challenger samples $b\xleftarrow{\$}\{0,1\}$, returns
-$c^*\gets\operatorname{NAPSEQ}.\mathsf{Enc}(\mathbf{k},m_b)$, and
+$c^*\gets\operatorname{NAPQES}.\mathsf{Enc}(\mathbf{k},m_b)$, and
 $\mathcal{A}$ wins if its output $b'=b$.
 
 \paragraph{Game $G_1$ (PRF Replacement).}
@@ -433,7 +433,7 @@ $\Pr[\mathcal{A}\text{ wins }G_1\mid\overline{\mathrm{Coll}}]=\tfrac{1}{2}$.
 \end{align*}
 Therefore:
 \begin{align*}
-  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})
   &= \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\tfrac{1}{2}\bigr| \\
   &\leq \bigl|\Pr[G_0]-\Pr[G_1]\bigr|
        +\bigl|\Pr[\mathcal{A}\text{ wins }G_1]-\tfrac{1}{2}\bigr| \\
@@ -445,12 +445,12 @@ Therefore:
 \subsection{INT-CTXT: Ciphertext Integrity}
 
 \begin{theorem}[INT-CTXT]
-  Under the PRF assumption on HMAC-SHA256, NAPSEQ is INT-CTXT secure.
+  Under the PRF assumption on HMAC-SHA256, NAPQES is INT-CTXT secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
   encryption queries there exists a PRF adversary $\mathcal{B}_2$ with
   similar running time such that:
   \[
-    \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A})
     \leq
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
     + \frac{q^2}{2^{128}}.
@@ -461,7 +461,7 @@ Therefore:
 The INT-CTXT experiment requires $\mathcal{A}$ to produce a \emph{fresh}
 valid ciphertext: a tuple $(c^*, aad^*)$ with
 $c^* \notin \{c_1, \ldots, c_q\}$ (the outputs of the $q$ encryption oracle
-calls) such that $\mathrm{NAPSEQ}.\mathsf{Dec}(\mathbf{k}, c^*, aad^*) \neq \bot$.
+calls) such that $\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c^*, aad^*) \neq \bot$.
 
 Write $c^* = (N^*, \widetilde{B}^*, T^*)$.  For $\mathsf{Dec}$ to accept,
 $T^*$ must satisfy:
@@ -493,7 +493,7 @@ The probability of a nonce collision satisfying $N^* = N_i$ for some $i$
 is at most $q / 2^{128} \leq q^2 / 2^{128}$ by the union bound.
 Combining both cases:
 \[
-  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A})
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
   + \frac{q^2}{2^{128}}. \qedhere
@@ -512,12 +512,12 @@ change to the expected tag, with advantage bounded by the HMAC security.
 \label{sec:ind-cca}
 
 \begin{theorem}[IND-CCA]
-  Under the PRF assumption on HMAC-SHA256, NAPSEQ is IND-CCA secure.
+  Under the PRF assumption on HMAC-SHA256, NAPQES is IND-CCA secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
   encryption queries and $q_d$ decryption queries there exist PRF adversaries
   $\mathcal{B}_1$, $\mathcal{B}_2$ with similar running time such that:
   \[
-    \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+    \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
     \leq
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
     +
@@ -549,7 +549,7 @@ forger $\mathcal{A}'$ (with $q_d$ forgery attempts):
 \[
   \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \Pr[\mathcal{A}\text{ wins }H_1]\bigr|
   \;\leq\;
-  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPSEQ}}(\mathcal{A}')
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A}')
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
   + \frac{q_d^2}{2^{128}},
@@ -564,7 +564,7 @@ computationally equivalent to the IND-CPA experiment, giving:
   \Pr\bigl[\mathcal{A}\text{ wins }H_1\bigr]
   \;\leq\;
   \tfrac{1}{2}
-  + \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPSEQ}}(\mathcal{A}'')
+  + \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A}'')
   \;\leq\;
   \tfrac{1}{2}
   + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
@@ -574,7 +574,7 @@ where Theorem~1 is applied to the IND-CPA adversary $\mathcal{A}''$.
 
 \paragraph{Combining.}
 \begin{align*}
-  \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPSEQ}}(\mathcal{A})
+  \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
   &= \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \tfrac{1}{2}\bigr| \\
   &\leq \bigl|\Pr[H_0] - \Pr[H_1]\bigr|
        + \bigl|\Pr[H_1] - \tfrac{1}{2}\bigr| \\
@@ -599,7 +599,7 @@ level from 256~bits to approximately 128~bits, which remains above the 112-bit
 minimum recommended by NIST for post-2030 systems.
 
 \paragraph{No Shor-applicable structure.}
-NAPSEQ does not use discrete logarithms, integer factorisation, or any
+NAPQES does not use discrete logarithms, integer factorisation, or any
 algebraic group structure.  Shor's algorithm and related quantum algorithms
 provide no speedup against the construction.
 
@@ -618,7 +618,7 @@ post-quantum key-search complexity of $\approx 2^{98}$, well above
 \centering
 \begin{tabular}{@{}lcccc@{}}
 \toprule
-Property & NAPSEQ & AES-GCM & ChaCha20-Poly1305 & Ascon \\
+Property & NAPQES & AES-GCM & ChaCha20-Poly1305 & Ascon \\
 \midrule
 Primitive basis & HMAC-SHA256 & AES + GHASH & ChaCha20 + Poly1305 & Ascon permutation \\
 FIPS-approved & \textbf{Yes} & Yes & \textbf{No} & No (pending) \\
@@ -629,11 +629,11 @@ Ciphertext expansion & $4\text{--}20\times$ & $1\times$ & $1\times$ & $1\times$ 
 Key size & 50+ bytes & 32 bytes & 32 bytes & 16 bytes \\
 \bottomrule
 \end{tabular}
-\caption{Comparison of NAPSEQ with established AEAD schemes.}
+\caption{Comparison of NAPQES with established AEAD schemes.}
 \label{tab:comparison}
 \end{table}
 
-The primary trade-off is ciphertext expansion: NAPSEQ's noise-injection
+The primary trade-off is ciphertext expansion: NAPQES's noise-injection
 mechanism produces $4\text{--}20\times$ ciphertext expansion depending on the
 derived noise probability, compared to no expansion for AES-GCM and
 ChaCha20-Poly1305.  This overhead is acceptable in applications where the
@@ -672,7 +672,7 @@ Assessment) analysis is planned for Phase 2.
 % ─────────────────────────────────────────────────────────────────────────────
 
 We applied the full NIST SP 800-22 Rev 1a Statistical Test Suite to
-$10^7$ bits of NAPSEQ v6 ciphertext output generated by encrypting a
+$10^7$ bits of NAPQES v6 ciphertext output generated by encrypting a
 cycling corpus of printable-ASCII plaintext with a 10-element prime key.
 
 All 15 eligible SP 800-22 tests passed at the $\alpha = 0.01$ significance
@@ -773,7 +773,7 @@ The following known caveats are documented in \texttt{docs/CAVEATS.md} and
 \label{sec:conclusion}
 % ─────────────────────────────────────────────────────────────────────────────
 
-We have presented NAPSEQ, an AEAD scheme whose entire security reduces to the
+We have presented NAPQES, an AEAD scheme whose entire security reduces to the
 pseudorandomness of HMAC-SHA256.  The construction avoids all algebraic
 structures targeted by known quantum algorithms, relies solely on FIPS-approved
 primitives, provides a conventional RFC~5116-compatible interface, and has been
