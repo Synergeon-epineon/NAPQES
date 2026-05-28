@@ -1,10 +1,12 @@
 # NAPQES Approved-Primitives Pre-Attestation
 
-**Version:** 0.1 (Draft)
-**Date:** 2026-05-12
-**Status:** `[DRAFT — pending compliance counsel sign-off]`
+**Version:** 0.2
+**Date:** 2026-05-28  
+**Status:** Pre-attestation (pending compliance counsel sign-off — see §5 checklist)  
 **References:** FIPS 198-1, FIPS 180-4, NIST SP 800-90B, [`SPEC.md`](../SPEC.md),
-[`docs/SECURITY_TARGET.md`](SECURITY_TARGET.md)
+[`docs/SECURITY_TARGET.md`](SECURITY_TARGET.md),
+[`docs/fips/SECURITY_POLICY.md`](fips/SECURITY_POLICY.md),
+[`docs/DRBG_ATTESTATION.md`](DRBG_ATTESTATION.md)
 
 > **Scope.** This document enumerates every cryptographic call site in the
 > NAPQES Python reference (`napqes.py`) and maps each to the applicable NIST
@@ -120,12 +122,12 @@ procurement responses, subject to counsel sign-off:
 
 ## 5. Sign-off Checklist
 
-- [ ] Review by compliance counsel (target: end of Phase 0 week 4)
-- [ ] Confirm OS entropy source classification for each supported platform
-      (Linux getrandom(), Windows BCryptGenRandom, macOS getentropy())
+- [ ] Review by compliance counsel (target: Phase 3)
+- [x] Confirm OS entropy source classification for each supported platform
+      — documented in [`docs/DRBG_ATTESTATION.md`](DRBG_ATTESTATION.md)
 - [x] Confirm FIPS 198-1 key-length requirement is met for minimum key size
       (K ≥ 7 required; default K = 10 — currently acceptable)
-- [ ] Document key-derivation path if customers use a KDF to generate
-      the prime-key list from a master secret
-- [ ] Add platform-specific notes for embedded targets (Cortex-M, RV32)
-      where the entropy source may differ from the OS CSPRNG
+- [x] Document key-derivation path if customers use a KDF to generate
+      the prime-key list — documented in [`docs/fips/KEY_MANAGEMENT.md`](fips/KEY_MANAGEMENT.md) §4
+- [x] Add platform-specific notes for embedded targets (Cortex-M, RV32)
+      — documented as gap in [`docs/DRBG_ATTESTATION.md`](DRBG_ATTESTATION.md) §5

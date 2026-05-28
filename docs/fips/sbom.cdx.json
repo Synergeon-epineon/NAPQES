@@ -1,0 +1,397 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:napqes-sbom-2026-05-28-v0.1",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-28T00:00:00Z",
+    "tools": [
+      {
+        "vendor": "EPINeon",
+        "name": "manual-sbom-generator",
+        "version": "0.1"
+      }
+    ],
+    "authors": [
+      {
+        "name": "Abdesslam Jakjoud",
+        "email": "a.jakjoud@epineon.ai"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "napqes-cryptographic-module",
+      "name": "NAPQES Cryptographic Module",
+      "version": "0.1.0",
+      "description": "HMAC-SHA256-based AEAD cryptographic module (Rust core). Wire-format v6.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:cargo/napqes@0.1.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/hmac@0.12.1",
+      "name": "hmac",
+      "version": "0.12.1",
+      "description": "Generic implementation of Hash-based Message Authentication Code (HMAC)",
+      "purl": "pkg:cargo/hmac@0.12.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://crates.io/crates/hmac/0.12.1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "Implements FIPS 198-1 HMAC-SHA256 (unvalidated Rust implementation)"
+        },
+        {
+          "name": "fips:standard",
+          "value": "FIPS 198-1"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/sha2@0.10.9",
+      "name": "sha2",
+      "version": "0.10.9",
+      "description": "Pure Rust implementation of the SHA-2 hash function family",
+      "purl": "pkg:cargo/sha2@0.10.9",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://crates.io/crates/sha2/0.10.9"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "Implements FIPS 180-4 SHA-256 (unvalidated Rust implementation)"
+        },
+        {
+          "name": "fips:standard",
+          "value": "FIPS 180-4"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/base64@0.22.1",
+      "name": "base64",
+      "version": "0.22.1",
+      "description": "encodes and decodes base64 as bytes or utf8",
+      "purl": "pkg:cargo/base64@0.22.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://crates.io/crates/base64/0.22.1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "Non-cryptographic encoding utility (RFC 4648 base64)"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/rand@0.8.6",
+      "name": "rand",
+      "version": "0.8.6",
+      "description": "Random number generators and other randomness functionality",
+      "purl": "pkg:cargo/rand@0.8.6",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://crates.io/crates/rand/0.8.6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "DRBG interface — delegates to OS entropy source via getrandom"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/getrandom@0.2.17",
+      "name": "getrandom",
+      "version": "0.2.17",
+      "description": "A small cross-platform library for retrieving random data from system source",
+      "purl": "pkg:cargo/getrandom@0.2.17",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://crates.io/crates/getrandom/0.2.17"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "OS DRBG bridge — getrandom(2) / BCryptGenRandom / getentropy"
+        },
+        {
+          "name": "fips:standard",
+          "value": "SP 800-90B (entropy source interface)"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/rand_core@0.6.4",
+      "name": "rand_core",
+      "version": "0.6.4",
+      "description": "Core random number generator traits and tools for implementation",
+      "purl": "pkg:cargo/rand_core@0.6.4",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/digest@0.10.7",
+      "name": "digest",
+      "version": "0.10.7",
+      "description": "Traits for cryptographic hash functions and message authentication codes",
+      "purl": "pkg:cargo/digest@0.10.7",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:cargo/subtle@2.6.1",
+      "name": "subtle",
+      "version": "2.6.1",
+      "description": "Pure-Rust traits and utilities for constant-time cryptographic implementations",
+      "purl": "pkg:cargo/subtle@2.6.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        },
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "notes": "Pulled in transitively by digest crate. Direct use was abandoned (see DUDECT_ATTESTATION.md); module uses custom ct_eq_bytes instead.",
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "Transitive dependency of digest; not directly used for constant-time comparison"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "napqes-c-sha256",
+      "name": "sha256.c",
+      "version": "in-repo",
+      "description": "Portable SHA-256 and HMAC-SHA256 implementation for the C port",
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "SHA-256 / HMAC-SHA256 for C reference port (non-validated)"
+        },
+        {
+          "name": "fips:standard",
+          "value": "FIPS 180-4, FIPS 198-1"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "napqes-c-base64",
+      "name": "base64.c",
+      "version": "in-repo",
+      "description": "RFC 4648 base64 encoder/decoder for the C port",
+      "properties": [
+        {
+          "name": "fips:role",
+          "value": "Non-cryptographic encoding utility"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "napqes-cryptographic-module",
+      "dependsOn": [
+        "pkg:cargo/hmac@0.12.1",
+        "pkg:cargo/sha2@0.10.9",
+        "pkg:cargo/base64@0.22.1",
+        "pkg:cargo/rand@0.8.6"
+      ]
+    },
+    {
+      "ref": "pkg:cargo/hmac@0.12.1",
+      "dependsOn": [
+        "pkg:cargo/digest@0.10.7"
+      ]
+    },
+    {
+      "ref": "pkg:cargo/sha2@0.10.9",
+      "dependsOn": [
+        "pkg:cargo/digest@0.10.7"
+      ]
+    },
+    {
+      "ref": "pkg:cargo/digest@0.10.7",
+      "dependsOn": [
+        "pkg:cargo/subtle@2.6.1"
+      ]
+    },
+    {
+      "ref": "pkg:cargo/rand@0.8.6",
+      "dependsOn": [
+        "pkg:cargo/rand_core@0.6.4"
+      ]
+    },
+    {
+      "ref": "pkg:cargo/rand_core@0.6.4",
+      "dependsOn": [
+        "pkg:cargo/getrandom@0.2.17"
+      ]
+    }
+  ]
+}
