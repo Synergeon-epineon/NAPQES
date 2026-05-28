@@ -29,11 +29,11 @@ cryptographic operations occur within this boundary. The boundary encloses:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                 NAPQES Cryptographic Module                       │
+│                 NAPQES Cryptographic Module                      │
 │   (libnapqes.so / napqes.dll / libnapqes.dylib)                  │
 │                                                                  │
 │  ┌──────────────────────────────────────────┐                    │
-│  │  Public API (exported symbols)            │                    │
+│  │  Public API (exported symbols)           │                    │
 │  │  ─────────────────────────────────────── │                    │
 │  │  encrypt_bytes / encrypt_str             │                    │
 │  │  decrypt_bytes / decrypt_str             │                    │
@@ -68,13 +68,13 @@ cryptographic operations occur within this boundary. The boundary encloses:
 │  │  Self-test engine (rust/src/self_test.rs)│                    │
 │  │  ─────────────────────────────────────── │                    │
 │  │  run_power_on_self_tests                 │                    │
-│  │  KAT encrypt / KAT decrypt / KAT auth   │                    │
-│  │  Software integrity HMAC check          │                    │
-│  │  CRNG continuity check                  │                    │
+│  │  KAT encrypt / KAT decrypt / KAT auth    │                    │
+│  │  Software integrity HMAC check           │                    │
+│  │  CRNG continuity check                   │                    │
 │  └──────────────────────────────────────────┘                    │
 └──────────────────────────────────────────────────────────────────┘
                     │                        │
-        ┌──────────▼──────────┐   ┌──────────▼────────────┐
+        ┌───────────▼─────────┐   ┌──────────▼────────────┐
         │  OS DRBG (outside   │   │  Caller application   │
         │  module boundary)   │   │  (outside boundary)   │
         │                     │   │                       │
