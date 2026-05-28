@@ -79,9 +79,11 @@ def generate_prime_numbers(count: int = 10,
                            max_val: int = 15_000_000) -> list[int]:
     """Generate *count* distinct primes drawn uniformly from [min_val, max_val].
 
-    Default range [1 000 000, 15 000 000] contains ≈ 829 000 primes.
+    Default range [1 000 000, 15 000 000] contains exactly 892 206 primes
+    (verified by sieve of Eratosthenes, 2026-05-28).
     A 10-element key (ordered, no repetition) from this range gives a key
-    space of ≈ 2^196.6 (≈ 2^98.3 post-Grover), meeting the 2^98 PQ target.
+    space of P(892 206, 10) ≈ 2^197.67 (≈ 2^98.84 post-Grover), meeting
+    the 2^98 PQ target.
     """
     primes: list[int] = []
     max_attempts = (max_val - min_val) * 4

@@ -145,7 +145,7 @@ key_bytes = be5(key[0]) || be5(key[1]) || ... || be5(key[K-1])
 ~~~
 
 A 10-element key in the range [1 000 000, 15 000 000] provides a key space
-of approximately 2^196.6 (approximately 2^98.3 post-Grover), meeting the
+of approximately 2^197.67 (approximately 2^98.84 post-Grover), meeting the
 2^98 post-quantum security target after Grover's quadratic speedup.
 
 # Domain-Separated HMAC Derivation
@@ -358,8 +358,8 @@ algorithm applied to SHA-256 preimage search, reducing the effective security
 level from 256 bits to approximately 128 bits — still above all recommended
 thresholds.
 
-Key enumeration requires testing up to 2^196.6 key candidates (10-element key,
-[1M, 15M] range).  Grover's algorithm reduces this to approximately 2^98.3,
+Key enumeration requires testing up to 2^197.67 key candidates (10-element key,
+[1M, 15M] range).  Grover's algorithm reduces this to approximately 2^98.84,
 which remains computationally infeasible with foreseeable quantum hardware.
 
 ## Nonce Requirements
@@ -384,7 +384,7 @@ requiring full length-hiding MUST apply a fixed-frame transport.
 
 The prime-tuple key format is unusual compared to conventional AEAD keys.
 The minimum recommended key is a 10-element prime tuple from [1M, 15M],
-providing approximately 2^196.6 classical key entropy and approximately 2^98.3
+providing approximately 2^197.67 classical key entropy and approximately 2^98.84
 post-quantum key entropy.  Single-element keys provide approximately 2^23
 entropy and are NOT RECOMMENDED for production use.
 

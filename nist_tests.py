@@ -404,7 +404,7 @@ def run_nist_tests() -> dict:
             "note": (
                 "Tests use a deliberately small demo key from [1 024, ~1 100] to show that "
                 "structural attacks fail regardless of key size. Production keys use "
-                "[1 000 000, 15 000 000] (≈ 2^196.6 key space, ≈2^98.3 post-Grover)."
+                "[1 000 000, 15 000 000] (P(892 206, 10) ≈ 2^197.67 key space, ≈2^98.84 post-Grover)."
             ),
         },
     }
