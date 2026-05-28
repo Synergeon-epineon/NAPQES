@@ -221,7 +221,8 @@ fn generate_bits(n: usize) -> Vec<u8> {
             .copied()
             .collect();
         let msg = std::str::from_utf8(&repeated).unwrap();
-        let ct = napqes::encrypt_bytes(msg, &STS_KEY, b"");
+        let ct = napqes::encrypt_bytes(msg, &STS_KEY, b"")
+            .expect("NAPQES encrypt failed during STS bitstream generation");
         raw.extend_from_slice(&ct);
         chunk_num += 1;
     }

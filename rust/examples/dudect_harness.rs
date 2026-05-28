@@ -55,6 +55,7 @@ fn base_ct() -> &'static Vec<u8> {
             fixed_key(),
             b"",
         )
+        .expect("dudect: encrypt failed")
     })
 }
 
