@@ -126,7 +126,7 @@ for brute-force key search.
 
 - Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
 - Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
-  (key-space ≈ 2¹⁹⁶·⁶) provides approximately **2⁹⁸·³ security** after Grover.
+  (key-space ≈ 2¹⁹⁷·⁶⁷) provides approximately **2⁹⁸·⁸⁴ security** after Grover.
 - The construction avoids algebraic structures (elliptic curves, lattices,
   integer factorisation) that Shor's algorithm or future algebraic quantum
   attacks might exploit.

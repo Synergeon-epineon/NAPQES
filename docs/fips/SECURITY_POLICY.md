@@ -156,7 +156,7 @@ Summary:
 - **Key type:** Ordered tuple of K distinct prime integers in [1 000 000, 15 000 000].
 - **Key serialisation:** `key_bytes = be5(key[0]) || ... || be5(key[K-1])`, K × 5 bytes.
 - **Minimum key length:** K = 7 (35 bytes, 280 bits > FIPS 198-1 §3 minimum of 256 bits).
-- **Recommended key:** K = 10 (50 bytes, 400 bits), ~2^196.6 key space.
+- **Recommended key:** K = 10 (50 bytes, 400 bits), ≈2^197.67 key space.
 - **Key generation:** CSPRNG via `generate_prime_numbers`; caller may also supply externally generated primes.
 - **Key entry/output:** In-memory only; the module provides no key serialisation or wrapping service.
 - **Key zeroization:** Call `zeroize_key(&mut key)` when the key is no longer needed. Uses `ptr::write_volatile` to prevent compiler elision.

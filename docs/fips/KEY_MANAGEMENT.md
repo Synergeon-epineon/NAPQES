@@ -24,7 +24,7 @@ where each `p_i` is a prime in `[1 000 000, 15 000 000]`.
 **Recommended parameters:**
 - K = 10 (default)
 - Range: [1 000 000, 15 000 000]
-- Provides ~2^196.6 classical key entropy (~2^98.3 post-Grover)
+- Provides ≈2^197.67 classical key entropy (≈2^98.84 post-Grover)
 
 **Minimum acceptable parameters:**
 - K = 7 (satisfies FIPS 198-1 §3: key length ≥ HMAC output length, i.e. ≥ 32 bytes)
@@ -151,8 +151,8 @@ disabled swap.
 
 | Parameter | Value | Standard reference |
 |---|---|---|
-| Classical key entropy (K=10) | ~2^196.6 bits | SP 800-57 Pt 1 §5.6: key entropy ≥ security level |
-| Post-quantum key entropy (Grover, K=10) | ~2^98.3 bits | SP 800-57 Pt 1 Rev 5 §5.6.3 |
+| Classical key entropy (K=10) | ≈2^197.67 bits | SP 800-57 Pt 1 §5.6: key entropy ≥ security level |
+| Post-quantum key entropy (Grover, K=10) | ≈2^98.84 bits | SP 800-57 Pt 1 Rev 5 §5.6.3 |
 | Authentication tag | 256 bits (128 post-Grover) | FIPS 198-1 |
 | Minimum key size (FIPS 198-1 §3) | K ≥ 7 (35 bytes) | Satisfied by default K=10 |
 | Maximum key lifetime | Not defined by the module | Caller-determined; rotate periodically |
