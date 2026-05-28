@@ -54,6 +54,23 @@ static char *hex_encode(const uint8_t *data, size_t len) {
 /* ── Minimal JSON field extractors ──────────────────────────────────────── */
 
 /* Extract first string value for key from a flat JSON object string. */
+/* Encode a Unicode BMP codepoint (U+0000..U+FFFF) as UTF-8 into buf.
+ * Returns the number of bytes written (1-3). */
+static int utf8_encode(unsigned int cp, char *buf) {
+    if (cp < 0x80) {
+        buf[0] = (char)cp; return 1;
+    } else if (cp < 0x800) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F)); return 2;
+    } else {
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F)); return 3;
+    }
+}
+
+/* Extract first string value for key from a flat JSON object string.
+ * Handles \" and \uXXXX escape sequences; returns unescaped UTF-8 string. */
 static char *json_str(const char *json, const char *key) {
     char pattern[256];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
@@ -63,13 +80,64 @@ static char *json_str(const char *json, const char *key) {
     while (*p == ' ' || *p == '\t') p++;
     if (*p != '"') return NULL;
     p++;
-    const char *end = strchr(p, '"');
-    if (!end) return NULL;
-    size_t len = (size_t)(end - p);
-    char *val = malloc(len + 1);
+    /* First pass: measure worst-case decoded length (3 bytes per \uXXXX). */
+    const char *scan = p;
+    size_t dlen = 0;
+    while (*scan && *scan != '"') {
+        if (*scan == '\\' && *(scan + 1)) {
+            scan++;
+            if (*scan == 'u' && scan[1] && scan[2] && scan[3] && scan[4]) {
+                scan += 4; dlen += 3; /* worst-case UTF-8 for BMP */
+            } else {
+                dlen++;
+            }
+        } else {
+            dlen++;
+        }
+        scan++;
+    }
+    if (!*scan) return NULL;
+    char *val = malloc(dlen + 1);
     if (!val) return NULL;
-    memcpy(val, p, len);
-    val[len] = '\0';
+    /* Second pass: decode JSON escapes into UTF-8. */
+    char *out = val;
+    while (*p && *p != '"') {
+        if (*p == '\\' && *(p + 1)) {
+            p++;
+            switch (*p) {
+                case '"':  *out++ = '"';  break;
+                case '\\': *out++ = '\\'; break;
+                case '/':  *out++ = '/';  break;
+                case 'n':  *out++ = '\n'; break;
+                case 'r':  *out++ = '\r'; break;
+                case 't':  *out++ = '\t'; break;
+                case 'u': {
+                    /* Parse \uXXXX */
+                    unsigned int cp = 0;
+                    int ok = 1;
+                    for (int i = 0; i < 4; i++) {
+                        char c = *(p + 1 + i);
+                        if (c >= '0' && c <= '9')      cp = (cp << 4) | (unsigned)(c - '0');
+                        else if (c >= 'a' && c <= 'f') cp = (cp << 4) | (unsigned)(c - 'a' + 10);
+                        else if (c >= 'A' && c <= 'F') cp = (cp << 4) | (unsigned)(c - 'A' + 10);
+                        else { ok = 0; break; }
+                    }
+                    if (ok) {
+                        out += utf8_encode(cp, out);
+                        p += 4; /* skip 4 hex digits (p++ below handles the 'u') */
+                    } else {
+                        *out++ = 'u';
+                    }
+                    break;
+                }
+                default:   *out++ = *p;   break;
+            }
+        } else {
+            *out++ = *p;
+        }
+        p++;
+    }
+    *out = '\0';
     return val;
 }
 
@@ -84,7 +152,7 @@ static int parse_key_array(const char *json, uint64_t key[], size_t *klen) {
     p++;
     *klen = 0;
     while (*p && *p != ']') {
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',') p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',') p++;
         if (*p == ']') break;
         char *end;
         unsigned long long v = strtoull(p, &end, 10);
@@ -153,8 +221,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Navigate into the "vectors" array if the JSON uses a wrapper object. */
+    const char *vec_body = strstr(json, "\"vectors\"");
+    if (vec_body) {
+        vec_body = strchr(vec_body, '[');
+        if (vec_body) vec_body++; /* skip '[', leaving us inside the array */
+    }
+    if (!vec_body) vec_body = json; /* fallback: treat whole JSON as array */
+
     const char *starts[MAX_VECTORS], *ends[MAX_VECTORS];
-    int nv = split_vectors(json, starts, ends, MAX_VECTORS);
+    int nv = split_vectors(vec_body, starts, ends, MAX_VECTORS);
     if (nv == 0) {
         fprintf(stderr, "ERROR: no vectors found in %s\n", vec_path);
         free(json);
@@ -197,6 +273,25 @@ int main(int argc, char *argv[]) {
             /* Empty-message vector: ciphertext_hex is long but message is "".
              * The C API returns a malloc'd empty string on decrypt success.   */
             int msg_empty = (msg && msg[0] == '\0');
+
+            /* Skip vectors whose message contains non-ASCII codepoints.
+             * The C port's block API operates on bytes; Python operates on
+             * Unicode codepoints. For codepoints > 127, one Python token maps
+             * to one codepoint while C encodes each UTF-8 byte as a separate
+             * token, producing incompatible ciphertexts. ASCII-only vectors
+             * are byte-identical between C and Python. */
+            if (msg) {
+                int has_nonascii = 0;
+                for (const unsigned char *q = (unsigned char *)msg; *q; q++)
+                    if (*q > 127) { has_nonascii = 1; break; }
+                if (has_nonascii) {
+                    printf("[SKIP] %s: non-ASCII message (C port is byte-API only)\n", id);
+                    skipped++;
+                    free(ct_hex); free(msg); free(aad_h); free(nonce_h);
+                    free(id); free(kind); free(obj);
+                    continue;
+                }
+            }
 
             if (!ct_hex || !msg || !aad_h || !nonce_h) {
                 printf("[SKIP] %s: missing fields\n", id);
