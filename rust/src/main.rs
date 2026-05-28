@@ -5,7 +5,7 @@ fn main() {
     println!("key: {:?}", key);
 
     let msg = "Hello from the Rust port of napqes!";
-    let ct = encrypt_str(msg, &key, b"");
+    let ct = encrypt_str(msg, &key, b"").expect("encrypt failed");
     println!("\nplaintext : {}", msg);
     println!("ciphertext: {}", ct);
 

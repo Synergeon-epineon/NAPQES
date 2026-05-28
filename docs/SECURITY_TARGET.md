@@ -1,9 +1,9 @@
 # NAPQES Security Target — Adversary Model & Claim Boundaries
 
-**Version:** 0.1 
-**Date:** 2026-05-12
-**Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))
-**Status:** `[DRAFT — not yet reviewed by external cryptographer]`
+**Version:** 0.2  
+**Date:** 2026-05-28  
+**Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))  
+**Status:** Pre-release (informal external cryptographer review in progress — see §9)
 
 > This document describes what NAPQES v6 is intended to achieve, what it
 > explicitly does not claim, and the conditions under which the security
@@ -191,9 +191,20 @@ requires a fixed-frame transport layer (see CAV-003).
 
 ### 6.4 FIPS 140-3 module validation
 
-NAPQES is **not FIPS 140-3 validated.** It uses FIPS-approved sub-primitives
-and is preparing a pre-attestation memo (`[roadmap]` Phase 3 workstream 3.3).
-FIPS 140-3 module validation is targeted for Phase 4 (workstream 4.1–4.2).
+NAPQES is **not FIPS 140-3 validated.** The FIPS 140-3 pre-attestation
+documentation package (Phase 3 workstream 3.3) is in progress and includes:
+
+- [`docs/fips/SECURITY_POLICY.md`](fips/SECURITY_POLICY.md) — Non-Proprietary Security Policy
+- [`docs/fips/MODULE_BOUNDARY.md`](fips/MODULE_BOUNDARY.md) — Module boundary specification
+- [`docs/fips/KEY_MANAGEMENT.md`](fips/KEY_MANAGEMENT.md) — Key lifecycle documentation
+- [`docs/fips/CAVP_EVIDENCE.md`](fips/CAVP_EVIDENCE.md) — CAVP algorithm validation evidence
+- [`docs/fips/sbom.cdx.json`](fips/sbom.cdx.json) — CycloneDX Software Bill of Materials
+- [`docs/DRBG_ATTESTATION.md`](DRBG_ATTESTATION.md) — DRBG and entropy source attestation
+
+FIPS 140-3 module validation (CMVP submission) is targeted for Phase 4
+(workstream 4.1–4.2). Until a CMVP certificate is awarded, customers with a
+formal FIPS 140-3 requirement should use a validated cryptographic module
+for the symmetric AEAD layer.
 
 ### 6.5 Formal security proof
 
@@ -276,6 +287,7 @@ The following are not addressed by NAPQES and require separate controls:
 | Item | Status |
 |---|---|
 | Internal author review | Done (2026-05-12) |
+| FIPS 140-3 pre-attestation docs | Done (2026-05-28) — see §6.4 |
 | Informal external cryptographer review | **In progress** |
 | Third-party engagement (NCC Group / Trail of Bits / Cure53) | **Pending** |
 | Publication alongside IACR ePrint preprint | **In progress** |

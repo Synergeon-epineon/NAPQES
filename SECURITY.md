@@ -15,8 +15,10 @@
 Report security issues by e-mail to:
 
 ```
-a.jakjoud@epineon.ai
+security@epineon.com
 ```
+
+(Forwards to the security team. Alternatively: `a.jakjoud@epineon.ai`)
 
 ### PGP Key
 

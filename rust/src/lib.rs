@@ -10,16 +10,37 @@
 //! byte-for-byte, so ciphertexts are interoperable between languages when
 //! the same key, nonce, and AAD are used.
 
+pub mod self_test;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
+use std::sync::Mutex;
 
 type HmacSha256 = Hmac<Sha256>;
 
 pub const NONCE_SIZE: usize = 16;
 pub const TAG_SIZE: usize = 32;
+
+// ─── CRNG conditional self-test ──────────────────────────────────────────────
+
+static PREV_NONCE: Mutex<Option<[u8; NONCE_SIZE]>> = Mutex::new(None);
+
+/// Generate a cryptographically random 16-byte nonce, verifying it differs
+/// from the previous one (FIPS 140-3 continuous RNG test, SP 800-140B §4.9.2).
+fn generate_nonce_with_crng_check() -> Result<[u8; NONCE_SIZE], String> {
+    let mut nonce = [0u8; NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut prev = PREV_NONCE.lock().map_err(|_| "CRNG mutex poisoned".to_string())?;
+    if let Some(prev_nonce) = *prev {
+        if ct_eq_bytes(&nonce, &prev_nonce) {
+            return Err("CRNG failure: consecutive identical nonces — DRBG may be compromised".into());
+        }
+    }
+    *prev = Some(nonce);
+    Ok(nonce)
+}
 
 // ─── Primes ──────────────────────────────────────────────────────────────────
 
@@ -319,19 +340,12 @@ fn b128_encode_tokens(tokens: &[u64]) -> Vec<u8> {
 }
 
 fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
-fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < data.len() {
         let mut value: u64 = 0;
         let mut shift: u32 = 0;
         loop {
-            if i >= data.len() {
-                return Err("varint: truncated encoding".into());
-            }
-            if shift >= 64 {
-                return Err("varint: shift overflow (overlong encoding)".into());
-            }
             if i >= data.len() {
                 return Err("varint: truncated encoding".into());
             }
@@ -349,20 +363,43 @@ fn b128_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
         tokens.push(value);
     }
     Ok(tokens)
-    Ok(tokens)
 }
 
 // ─── Binary / string wrappers (v6 authenticated) ─────────────────────────────
 
 
-pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Vec<u8> {
+pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
     if message.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    let nonce = generate_nonce_with_crng_check()?;
     let codepoints: Vec<u32> = message.chars().map(|c| c as u32).collect();
-    let (nonce, tokens) = encrypt(&codepoints, key);
     let kb = key_bytes(key);
-    let blob = b128_encode_tokens(&tokens);
+    let noise_p = derive_noise_p(&kb, &nonce);
+    let padded = pad_message(&codepoints, &kb, &nonce);
+    let kk = key.len() as u64;
+    let mut cypher: Vec<u64> = Vec::new();
+    let mut real_idx: u64 = 0;
+    let mut ct_pos: u64 = 0;
+    for &c in &padded {
+        loop {
+            if is_noise_pos(&kb, &nonce, ct_pos, noise_p) {
+                let k = key[(real_idx % kk) as usize];
+                let nc = derive_noise_char(&kb, &nonce, ct_pos);
+                let na = derive_noise_token_addend(&kb, &nonce, ct_pos, k);
+                cypher.push(nc * k + na);
+                ct_pos += 1;
+            } else {
+                let k = key[(real_idx % kk) as usize];
+                let addend = derive_addend(&kb, &nonce, real_idx, k);
+                cypher.push(c as u64 * k + addend);
+                ct_pos += 1;
+                real_idx += 1;
+                break;
+            }
+        }
+    }
+    let blob = b128_encode_tokens(&cypher);
     let ks = varint_keystream(&kb, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
@@ -370,7 +407,7 @@ pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(&masked);
     let tag = compute_auth_tag(&kb, aad, &payload);
     payload.extend_from_slice(&tag);
-    payload
+    Ok(payload)
 }
 
 /// Encrypt with a caller-supplied nonce — for deterministic KAT verification.
@@ -448,18 +485,16 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let tokens = b128_decode_tokens(&blob)
         .map_err(|e| format!("varint decode error: {}", e))?;
-    let tokens = b128_decode_tokens(&blob)
-        .map_err(|e| format!("varint decode error: {}", e))?;
     let codepoints = decrypt(nonce, &tokens, key);
     let s: String = codepoints.into_iter().filter_map(char::from_u32).collect();
     Ok(s)
 }
 
-pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> String {
+pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
     if message.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
-    STANDARD.encode(encrypt_bytes(message, key, aad))
+    Ok(STANDARD.encode(encrypt_bytes(message, key, aad)?))
 }
 
 pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
@@ -470,6 +505,21 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
         .decode(cypher.as_bytes())
         .map_err(|e| format!("base64 decode error: {}", e))?;
     decrypt_bytes(&bytes, key, aad)
+}
+
+// ─── Key zeroization ─────────────────────────────────────────────────────────
+
+/// Securely erase key material by overwriting each element with zero.
+///
+/// Uses `ptr::write_volatile` to prevent the compiler from eliding the writes
+/// as dead-code optimisations, consistent with the `ct_eq_bytes` approach.
+/// Call this as soon as the key is no longer needed.
+///
+/// Reference: FIPS 140-3 / SP 800-57 Part 1 Rev 5 §8.3 (key destruction).
+pub fn zeroize_key(key: &mut [u64]) {
+    for x in key.iter_mut() {
+        unsafe { std::ptr::write_volatile(x, 0u64) };
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -490,7 +540,7 @@ mod tests {
     fn roundtrip_bytes() {
         let k = test_key();
         let msg = "Hello, EpiCypher!";
-        let ct = encrypt_bytes(msg, &k, b"");
+        let ct = encrypt_bytes(msg, &k, b"").unwrap();
         let pt = decrypt_bytes(&ct, &k, b"").unwrap();
         assert_eq!(pt, msg);
     }
@@ -500,7 +550,7 @@ mod tests {
         let k = test_key();
         let msg = "Authenticated payload";
         let aad = b"hdr=1";
-        let ct = encrypt_str(msg, &k, aad);
+        let ct = encrypt_str(msg, &k, aad).unwrap();
         let pt = decrypt_str(&ct, &k, aad).unwrap();
         assert_eq!(pt, msg);
     }
@@ -508,14 +558,14 @@ mod tests {
     #[test]
     fn wrong_aad_fails() {
         let k = test_key();
-        let ct = encrypt_bytes("secret", &k, b"good");
+        let ct = encrypt_bytes("secret", &k, b"good").unwrap();
         assert!(decrypt_bytes(&ct, &k, b"bad").is_err());
     }
 
     #[test]
     fn tamper_fails() {
         let k = test_key();
-        let mut ct = encrypt_bytes("secret", &k, b"");
+        let mut ct = encrypt_bytes("secret", &k, b"").unwrap();
         let last = ct.len() - 1;
         ct[last] ^= 0x01;
         assert!(decrypt_bytes(&ct, &k, b"").is_err());
@@ -524,7 +574,14 @@ mod tests {
     #[test]
     fn empty_message_roundtrip() {
         let k = test_key();
-        assert_eq!(decrypt_str(&encrypt_str("", &k, b""), &k, b"").unwrap(), "");
+        assert_eq!(decrypt_str(&encrypt_str("", &k, b"").unwrap(), &k, b"").unwrap(), "");
+    }
+
+    #[test]
+    fn zeroize_key_clears_memory() {
+        let mut k = test_key();
+        zeroize_key(&mut k);
+        assert!(k.iter().all(|&x| x == 0));
     }
 
     #[test]
