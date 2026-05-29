@@ -7,6 +7,13 @@
 #define NAPQES_NONCE_SIZE 16
 #define NAPQES_TAG_SIZE   32
 
+/*
+ * KEY ORDERING IS A SECURITY PARAMETER.
+ * key = {k0, k1, ...} and key = {k1, k0, ...} are *distinct* keys that
+ * produce non-interoperable ciphertexts.  Callers must preserve element
+ * order when storing or transmitting key material.
+ */
+
 /* ── Primes ───────────────────────────────────────────────────────────────── */
 
 int  napqes_is_prime(uint64_t n);

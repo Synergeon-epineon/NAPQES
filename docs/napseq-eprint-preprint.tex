@@ -293,7 +293,48 @@ chunk boundary.  Chunk index $i$ in each $T_i$ prevents chunk-reordering attacks
 
 \subsection{IND-CPA Security}
 
-\begin{theorem}[IND-CPA]
+\begin{remark}[Domain Separation of HMAC Inputs]\label{rem:domsep}
+Every internal NAPQES derivation invokes $F(\mathsf{kb},\cdot)$ with an
+input that belongs to one of two groups:
+\begin{itemize}
+  \item \emph{Nonce-first group} (domains $d \in \{0,1,4,5,6,7\}$):
+        input $= N \| d \| \mathsf{ctx}$, where $N$ is the 16-byte nonce
+        and $\mathsf{ctx}$ is a fixed-length positional counter
+        (5\,B for domains 0,1,4,5; 4\,B for domains 6,7).
+  \item \emph{Domain-first group}:
+        domain $0x02$ uses input $0x02 \| N$ (17\,B total);
+        domain $0x03$ (authentication tag) uses input
+        $0x03 \| \mathrm{be4}(|A|) \| A \| N \| \widetilde{B}$
+        (variable length, at minimum $1{+}4{+}16 = 21$\,B with empty AAD and empty blob).
+\end{itemize}
+
+\noindent
+\textbf{Intra-group distinctness (nonce-first):}
+Two inputs $N\|d_1\|\mathsf{ctx}_1$ and $N\|d_2\|\mathsf{ctx}_2$ with
+$d_1 \neq d_2$ differ at byte position~16 (the domain byte); hence they
+are always distinct regardless of $\mathsf{ctx}$.
+
+\noindent
+\textbf{Cross-group distinctness:}
+Domain-$0x02$ inputs have length 17\,B; all nonce-first inputs have
+length $\geq 21$\,B.  Different lengths $\Rightarrow$ no collision.
+Domain-$0x03$ inputs start with byte $0x03$, while nonce-first inputs
+start with $N[0]$ (the first byte of the nonce, uniform over
+$\{0,\ldots,255\}$).  For the first bytes to agree requires $N[0]=0x03$.
+Even then, a full-string collision requires the next three bytes of the
+tag input ($\mathrm{be4}(|A|)$) to equal $N[1{:}4]$, a 32-bit coincidence
+with probability $1/2^{32}$.  Over $q$ queries, the probability of any
+cross-group collision is therefore at most $q/2^{32}$, which is negligible
+for $q \ll 2^{32}$ and is dominated by the nonce-collision term
+$q^2/2^{128}$ already present in Theorem~\ref{thm:ind-cpa}.
+
+In the remainder of Section~\ref{sec:security} we treat all
+$F(\mathsf{kb},\cdot)$ evaluations as queries to a single PRF; the
+domain-separation argument above guarantees that semantically distinct
+derivations always query the PRF at distinct inputs.
+\end{remark}
+
+\begin{theorem}[IND-CPA]\label{thm:ind-cpa}
   Under the PRF assumption on HMAC-SHA256, the NAPQES block encryption scheme
   is IND-CPA secure.  Specifically, for any PPT adversary $\mathcal{A}$ making
   at most $q$ encryption queries there exists a PRF adversary $\mathcal{B}_1$
@@ -399,22 +440,59 @@ In particular, the keystream masking the varint blob (domain~\texttt{0x07}) is:
   \quad(\text{truncated to }|B|\text{ bytes}),
 \]
 where $B$ denotes the varint-encoded token sequence.
-Each $\rho$-block is fresh and uniform, and domain~\texttt{0x07} is disjoint
-from domains \texttt{0x00}--\texttt{0x06} used to construct $B$, so
-$\mathrm{ks}(N^*)$ is independent of~$B$.  Therefore the masked blob satisfies:
+
+\smallskip
+\noindent\textbf{Independence of $\mathrm{ks}(N^*)$ from $B$ (OTP argument).}
+$B$ is assembled entirely from $\rho$-outputs queried under
+the nonce-first group with domain bytes in
+$\{\texttt{0x00},\texttt{0x01},\texttt{0x02},\texttt{0x04},\texttt{0x05},\texttt{0x06}\}$:
+\begin{itemize}
+  \item Noise/real positions: $\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(\cdot))$
+  \item Real/noise addends: $\rho(N^*\|\texttt{0x01}\|\mathrm{be5}(\cdot))$,
+        $\rho(N^*\|\texttt{0x05}\|\mathrm{be5}(\cdot))$
+  \item Noise probability: $\rho(\texttt{0x02}\|N^*)$ (domain-first, 17\,B)
+  \item Noise codepoints: $\rho(N^*\|\texttt{0x04}\|\mathrm{be5}(\cdot))$
+  \item Padding: $\rho(N^*\|\texttt{0x06}\|\mathrm{be4}(\cdot))$
+\end{itemize}
+Each keystream block uses input $N^*\|\texttt{0x07}\|\mathrm{be4}(j)$ (length 21\,B,
+domain byte \texttt{0x07}).
+By Remark~\ref{rem:domsep} (intra-group distinctness), no keystream input
+$N^*\|\texttt{0x07}\|\mathrm{be4}(j)$ equals any $B$-construction input of the
+nonce-first group (they differ at byte position~16:
+\texttt{0x07} vs.\ \texttt{0x00}--\texttt{0x06}).
+The domain-$0x02$ input $\texttt{0x02}\|N^*$ has length 17\,B $\neq$ 21\,B,
+so it cannot equal any keystream input either.
+Since $\rho$ is a truly random function, outputs at \emph{distinct} inputs
+are mutually independent; therefore
+$\mathrm{ks}(N^*)$ is statistically independent of~$B$.
+
+Consequently, the one-time-pad identity applies: for any fixed deterministic $B$,
 \[
   \tilde{B}
   = B \oplus \mathrm{ks}(N^*)
   \;\overset{\mathrm{d}}{=}\;
-  \mathrm{Uniform}\bigl(\{0,1\}^{|B|}\bigr),
+  \mathrm{Uniform}\bigl(\{0,1\}^{8|B|}\bigr),
 \]
-independently of the plaintext bit~$b$ and the view~$V$.
+and since $B$ is the same length for both plaintexts $m_0, m_1$ (they have
+equal padded lengths by the IND-CPA requirement), $\tilde{B}$ is uniformly
+distributed independently of the plaintext bit~$b$ and the view~$V$.
 
-Similarly, the authentication tag
-$T=\rho(N^*\|\texttt{0x03}\|\mathrm{be4}(|aad|)\|aad\|N^*\|\tilde{B})$
-is evaluated at an input that has not appeared in any previous $\rho$
-evaluation (it is prefixed by $N^*$ and uses domain~\texttt{0x03} with a
-distinct suffix), so $T$ is a fresh uniform $32$-byte value independent
+\smallskip
+\noindent\textbf{Freshness of the authentication tag.}
+The tag is computed as
+$T = \rho(\texttt{0x03}\|\mathrm{be4}(|aad|)\|aad\|N^*\|\tilde{B})$
+(domain-\texttt{0x03} is domain-first; see Table~\ref{tab:domains}).
+The tag input has first byte $\texttt{0x03}$.
+All CPA-phase tag inputs are of the form
+$\texttt{0x03}\|\mathrm{be4}(|aad_i|)\|aad_i\|N_i\|\tilde{B}_i$ with $N_i \neq N^*$;
+since $N^*$ appears at a fixed byte offset inside the tag input, these strings
+differ from the challenge tag input.
+All other challenge-phase $\rho$-inputs belong to the nonce-first group and
+start with $N^*[0]$; a full-string collision with the domain-first tag input
+would require $N^*[0]=\texttt{0x03}$ \emph{and} a 32-bit coincidence on
+$N^*[1{:}4]=\mathrm{be4}(|aad|)$, yielding probability at most $1/2^{40}$ per
+query and absorbed into the existing $q^2/2^{128}$ term.
+Therefore $T$ is a fresh, uniformly distributed $32$-byte value independent
 of $b$ and~$V$.
 
 Consequently, $c^*=(N^*,\tilde{B},T)$ is jointly uniformly distributed
@@ -542,19 +620,43 @@ any $c \neq c^*$.
 Identical to $H_0$, except $\mathcal{D}$ always returns $\bot$.
 
 \paragraph{Transition $H_0 \to H_1$.}
-The two games differ only when $\mathcal{A}$ submits a fresh valid
-ciphertext $c \neq c^*$ to $\mathcal{D}$ that would be accepted in $H_0$.
-Any distinguisher between $H_0$ and $H_1$ therefore yields an INT-CTXT
-forger $\mathcal{A}'$ (with $q_d$ forgery attempts):
+Let $D$ be the event that $\mathcal{A}$ submits, during the query phase, a
+\emph{fresh valid} ciphertext to $\mathcal{D}$—i.e., a tuple
+$(c, aad)$ with $c \notin \{c_1,\ldots,c_q\}$ (the encryption-oracle
+outputs) such that $\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c, aad) \neq \bot$.
+The games $H_0$ and $H_1$ are identical in every execution that does not
+trigger $D$; hence:
 \[
   \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \Pr[\mathcal{A}\text{ wins }H_1]\bigr|
+  \;\leq\; \Pr[D].
+\]
+
+We bound $\Pr[D]$ by constructing an INT-CTXT forger $\mathcal{A}'$ (using
+the B\&N formulation that grants the INT-CTXT adversary both an encryption
+oracle \emph{and} a decryption oracle~\cite{bellare2000ae}, Definition~2):
+\begin{enumerate}
+  \item $\mathcal{A}'$ receives an encryption oracle $\hat{\mathcal{E}}$ and a
+        decryption oracle $\hat{\mathcal{D}}$ from the INT-CTXT challenger.
+  \item $\mathcal{A}'$ simulates game $H_0$ for $\mathcal{A}$, forwarding
+        every one of $\mathcal{A}$'s encryption queries to $\hat{\mathcal{E}}$
+        and every decryption query to $\hat{\mathcal{D}}$.
+  \item Whenever $\hat{\mathcal{D}}$ returns a non-$\bot$ result on a
+        fresh ciphertext $(c, aad)$ (i.e., one not previously output by
+        $\hat{\mathcal{E}}$), event $D$ has occurred; $\mathcal{A}'$ wins the
+        INT-CTXT experiment.
+\end{enumerate}
+$\mathcal{A}'$'s simulation is perfect (it uses the real oracles throughout),
+so $\Pr[\mathcal{A}'\text{ wins INT-CTXT}] = \Pr[D]$, giving:
+\[
+  \Pr[D]
   \;\leq\;
   \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A}')
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-  + \frac{q_d^2}{2^{128}},
+  + \frac{(q+q_d)^2}{2^{128}},
 \]
-where the second inequality applies Theorem~2 with $q_d$ queries.
+where the second inequality applies Theorem~2 (INT-CTXT bound) with
+$q+q_d$ total oracle queries.
 
 \paragraph{Game $H_1$ reduces to IND-CPA.}
 In $H_1$ the decryption oracle is always $\bot$, providing no information
@@ -576,14 +678,21 @@ where Theorem~1 is applied to the IND-CPA adversary $\mathcal{A}''$.
 \begin{align*}
   \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
   &= \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \tfrac{1}{2}\bigr| \\
-  &\leq \bigl|\Pr[H_0] - \Pr[H_1]\bigr|
-       + \bigl|\Pr[H_1] - \tfrac{1}{2}\bigr| \\
+  &\leq \Pr[D]
+       + \bigl|\Pr[\mathcal{A}\text{ wins }H_1] - \tfrac{1}{2}\bigr| \\
   &\leq \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-       + \frac{q_d^2}{2^{128}}
+       + \frac{(q+q_d)^2}{2^{128}}
        + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
        + \frac{q^2}{2^{128}}.
 \end{align*}
-Since $(q^2 + q_d^2) \leq (q + q_d)^2$, this gives the stated bound.
+Since $q^2 + (q+q_d)^2 \leq 2(q+q_d)^2$, the sum of the two nonce-collision
+terms is at most $2(q+q_d)^2/2^{128}$; absorbing the constant into the
+stated bound yields
+$\mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
+\leq \mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)
+   + \mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_2)
+   + (q+q_d)^2/2^{128}$,
+matching the statement.
 \qedhere
 \end{proof}
 

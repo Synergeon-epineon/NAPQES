@@ -29,7 +29,7 @@ from napqes import (
 )
 
 # ─── Demo key (attacker does NOT know this) ───────────────────────────────────
-# Small primes from [1024, 1200] — deliberately "weak" range to show structural
+# Small primes from [1 024, ~1 100] — deliberately "weak" range to show structural
 # attacks still FAIL thanks to the HMAC-addend mechanism.
 _DEMO_KEY   = [1031, 1033, 1039, 1049, 1051, 1061, 1063, 1069, 1087, 1091]
 SAMPLE_MSG  = "Hello, World! This is a NAPSEQ cryptographic audit test."
