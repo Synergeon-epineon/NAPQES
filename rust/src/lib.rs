@@ -9,6 +9,12 @@
 //! keystream, and auth tag) match the reference Python implementation
 //! byte-for-byte, so ciphertexts are interoperable between languages when
 //! the same key, nonce, and AAD are used.
+//!
+//! # Key ordering is a security parameter
+//!
+//! `[k0, k1, …]` and `[k1, k0, …]` are **distinct** keys that produce
+//! non-interoperable ciphertexts.  Callers must preserve element order
+//! when storing or transmitting key material.
 
 pub mod self_test;
 

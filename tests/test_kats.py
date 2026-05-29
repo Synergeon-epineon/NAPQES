@@ -344,3 +344,19 @@ def test_gen_kats_check_mode():
     assert result.returncode == 0, (
         "gen_kats.py --check failed:\n" + result.stdout + result.stderr
     )
+
+
+def test_stream_ae_vectors_loaded():
+    """_STREAM_AE_POSITIVE must contain at least 4 vectors so that streaming-AE
+    security claims are always backed by KAT evidence.  A regression that
+    accidentally removes stream_ae vectors from v6_vectors.json will be caught
+    here immediately rather than silently skipping the parametrised tests."""
+    assert len(_STREAM_AE_POSITIVE) >= 4, (
+        f"Expected ≥4 streaming-AE positive KAT vectors in v6_vectors.json; "
+        f"found {len(_STREAM_AE_POSITIVE)}.  "
+        f"Run 'python tests/gen_kats.py' to regenerate."
+    )
+    assert len(_STREAM_AE_NEGATIVE) >= 2, (
+        f"Expected ≥2 streaming-AE negative KAT vectors; "
+        f"found {len(_STREAM_AE_NEGATIVE)}."
+    )

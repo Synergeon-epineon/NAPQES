@@ -7,6 +7,10 @@ stable.
 
 Known leakage and caveats (see ``docs/CAVEATS.md`` for full triage):
 
+* **Key ordering is a security parameter.** ``[k0, k1, …]`` and
+  ``[k1, k0, …]`` are *distinct* keys that produce non-interoperable
+  ciphertexts. Callers must preserve element order when storing or
+  transmitting key material.
 * **Length-bucket leakage.** ``encrypt_bytes`` / ``encrypt_str`` pad plaintext
   to the next power-of-two block size (min 16). The ciphertext therefore
   reveals which power-of-two bucket the plaintext length falls into. Callers
