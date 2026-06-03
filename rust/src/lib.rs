@@ -17,6 +17,7 @@
 //! when storing or transmitting key material.
 
 pub mod self_test;
+pub mod kem;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};

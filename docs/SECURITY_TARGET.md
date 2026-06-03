@@ -41,26 +41,22 @@ Known-Answer Tests in [`tests/kat/v6_vectors.json`](../tests/kat/v6_vectors.json
 | Key-recovery from ciphertext | Yes (computational) | Key elements are not directly encoded; addends are HMAC-derived and computationally unpredictable without the key |
 | Frequency / divisibility analysis | Yes | Real and noise tokens share the same formula; noise positions are HMAC-derived |
 | Known-plaintext / chosen-plaintext | Yes (under standard HMAC assumptions) | Per-token HMAC-derived addends are computationally unpredictable |
-
+| Quantum adversary (full Grover / Shor) | Yes | See §5 (post-quantum considerations) |
+| Side-channel (timing, power) | yes | Python is not constant-time; but Rust implementation is |
+| Length information beyond power-of-two bucket | partially addressed | Padding leaks bucket but not exact length; see CAV-003 and §6.3 |
 ### 2.2 Threat classes NOT addressed
 
 | Threat | Status | Rationale |
 |---|---|---|
-| Quantum adversary (full Grover / Shor) | Not fully addressed | See §5 (post-quantum considerations) |
-| Side-channel (timing, power) | Not addressed in Python ref | Python is not constant-time; see §6.1 |
 | Nonce reuse | Semantic security degrades | Standard AEAD limitation; callers must use fresh nonces |
 | Key compromise | Not addressed | Key management is out of scope |
-| Streaming RUP: release of unverified plaintext | Gated, not fixed | `decrypt_stream` gated behind opt-in flag; see CAV-001 |
-| Length information beyond power-of-two bucket | Not addressed | Padding leaks bucket; see CAV-003 and §6.3 |
 | Traffic analysis (timing, volume) | Not addressed | Transport-layer concern |
 
 ---
 
 ## 3. Security Goals (Block API)
 
-The block API (`encrypt_bytes` / `decrypt_bytes`, `napqes.py` approx.
-L396–466) targets the following properties under standard computational
-assumptions (HMAC-SHA256 is a pseudorandom function):
+The block API targets the following properties under standard computational assumptions (HMAC-SHA256 is a pseudorandom function):
 
 ### 3.1 Ciphertext indistinguishability (IND-CPA)
 
@@ -124,34 +120,22 @@ for brute-force key search.
 
 ### 5.1 What NAPQES does claim
 
-- Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
-- Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes
-  (key-space ≈ 2¹⁹⁷·⁶⁷) provides approximately **2⁹⁸·⁸⁴ security** after Grover.
-- The construction avoids algebraic structures (elliptic curves, lattices,
-  integer factorisation) that Shor's algorithm or future algebraic quantum
-  attacks might exploit.
-- HMAC-SHA256 output tag is 256 bits; Grover reduces tag forgery work to
-  ≈ 2¹²⁸ — remaining above the 128-bit security threshold.
+- Against a Grover adversary, a 10-element key drawn from [1M, 15M] primes (key-space ≈ 2¹⁹⁷·⁶⁷) provides approximately **2⁹⁸·⁸⁴ security** after Grover.
+- Against a Grover adversary, a 13-element key drawn from [1M, 15M] primes (key-space ≈ 2²⁵⁶·⁹⁷) provides approximately **2¹²⁸·⁵ security** after Grover.
+- The construction avoids algebraic structures (elliptic curves, lattices,   integer factorisation) that Shor's algorithm or future algebraic quantum   attacks might exploit.
+- HMAC-SHA256 output tag is 256 bits; Grover reduces tag forgery work to  ≈ 2¹²⁸ — remaining above the 128-bit security threshold.
 
 ### 5.2 What NAPQES does NOT claim
 
-- **NAPQES is not a post-quantum KEM or signature.** It provides no key
-  establishment. Customers requiring FIPS 203 (ML-KEM), 204 (ML-DSA), or
-  205 (SLH-DSA) must use those standards.
-- **NAPQES has not been submitted to any NIST PQC standardisation process.**
-- **NAPQES's "PQ angle" is narrow.** AES-256 in GCM mode also provides
-  ≈ 128-bit post-Grover security and is the NSA CNSA 2.0 symmetric choice
-  for NSS. NAPQES's advantage is primarily structural (no AES hardware
-  dependency, noise-token confidentiality layer) not a superior PQ security
-  bound.
-
+- **NAPQES is not a post-quantum KEM or signature.** It provides no key  establishment. Customers requiring FIPS 203 (ML-KEM), 204 (ML-DSA), or   205 (SLH-DSA) must use those standards.
+- **NAPQES has not not yet been approved by NIST PQC standardisation process.**
 ---
 
 ## 6. Explicit Non-Claims
 
 ### 6.1 Constant-time implementation
 
-The Python reference is **not** claimed constant-time. Secret-dependent
+The Python reference is **not** claimed constant-time, but Rust implementation **Is**. Secret-dependent
 branches and memory accesses are present in `_is_noise_pos`,
 `_decrypt_with_noise_p`, and the varint decode loop. Constant-time
 guarantees are `**[roadmap]**` — gated on the Rust core (Phase 2,
@@ -170,8 +154,7 @@ early-exit branch at `-O3`. The final implementation was confirmed by:
    max t = +1.134 (threshold: 4.5), tau = +0.00032.  Detection at t = 5 would
    require ~247 M measurements.
 
-See [`docs/DUDECT_ATTESTATION.md`](DUDECT_ATTESTATION.md) for full run history,
-root-cause analysis, and harness design rationale.
+**Conclusion, The rust implementation is constant-time but python isn't**
 
 ### 6.2 NIST standardisation
 
