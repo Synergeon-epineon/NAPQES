@@ -22,6 +22,7 @@
 \newtheorem{lemma}[theorem]{Lemma}
 \newtheorem{definition}[theorem]{Definition}
 \newtheorem{remark}[theorem]{Remark}
+\newtheorem{corollary}[theorem]{Corollary}
 
 % ── Code listing style ────────────────────────────────────────────────────────
 \lstset{
@@ -41,7 +42,7 @@ Built from HMAC-SHA256}}
 \author[1]{Abdeslam Jakjoud}
 \author[1]{Karim Amor}
 \affil[1]{QAegis, France}
-\date{May 2026 \\ \small{Preprint — submitted to IACR ePrint}}
+\date{July 2026 \\ \small{Version 2 --- submitted to IACR ePrint (revises Version 1, May 2026)}}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \begin{document}
@@ -57,17 +58,55 @@ therefore not subject to Shor's algorithm or hidden-subgroup quantum attacks.
 The construction combines a prime-indexed token cipher, HMAC-derived noise
 injection to achieve ciphertext pseudorandomness, HMAC-derived plaintext
 padding for cross-implementation determinism, and a standard HMAC-SHA256
-authentication tag.  We describe the wire format (version 6, frozen), prove
-IND-CPA security under the PRF assumption on HMAC-SHA256, discuss the
-post-quantum security level, and provide performance measurements and
-implementation notes.  The streaming Release of Unverified Plaintext (RUP) caveat present in
-earlier versions is addressed by a new online-AE streaming format
+authentication tag.
+\textbf{As of this version, the primary and recommended NAPQES construction
+is v8}: it keys the arithmetic (token) layer and the HMAC domain-derivation
+layer with two \emph{independently sampled} secrets, $\mathbf{k}$ (a prime
+tuple) and $\mathsf{sk}$ (a uniform 256-bit string), and derives the nonce
+synthetically as $N=\mathrm{HMAC}(\mathsf{sk}, \texttt{0x0A}\|A\|M)$ in the
+manner of AES-GCM-SIV, rather than sampling it independently at random. This
+single change closes three findings that apply to every earlier wire format
+(v1--v7): exact key recovery under nonce reuse, a non-standard
+low-entropy-key PRF hypothesis, and a security-reduction simulation gap.
+We prove IND-CPA, INT-CTXT, and IND-CCA security for v8 under the standard,
+uniform-key PRF assumption on HMAC-SHA256 (Theorems~\ref{thm:ind-cpa-v8},
+\ref{thm:int-ctxt}, \ref{thm:ind-cca}), with no key-entropy or
+key-guessing term, and with nonce misuse degrading gracefully to disclosed
+message-equality leakage instead of key recovery. The legacy, single-secret
+v7 wire format is retained, fully specified, and proved secure under a
+weaker, explicit key-entropy assumption
+(Theorem~\ref{thm:ind-cpa}, Remark~\ref{rem:min-K}) for backward
+compatibility only; it is no longer recommended for new deployments.
+We discuss the post-quantum security level, and provide performance
+measurements and implementation notes. The streaming Release of Unverified
+Plaintext (RUP) caveat present in earlier versions is addressed by an
+online-AE streaming format
 (\texttt{encrypt\_stream\_ae}/\texttt{decrypt\_stream\_ae}) that verifies a
 per-chunk HMAC-SHA256 tag before releasing any plaintext to the caller.
-  A reference implementation in Python and Rust, together
+A reference implementation in Rust (v8) and Python/Rust/C (v7), together
 with a 30-vector Known-Answer Test corpus and a NIST SP 800-22 Rev 1a
 statistical analysis, are published at \url{https://github.com/[REPO]}.
 \end{abstract}
+
+\paragraph{Changes since Version 1 (May 2026).} This version:
+\begin{enumerate}
+  \item promotes the v8 independent-key-schedule, synthetic-nonce
+        construction (Section~\ref{sec:v8}) from an appendix-style fix to
+        the paper's primary, recommended construction, and states
+        standalone IND-CPA/INT-CTXT/IND-CCA theorems for it
+        (Theorem~\ref{thm:ind-cpa-v8} and Corollary~\ref{cor:v8-security});
+  \item retitles the single-secret construction analysed in
+        Sections~\ref{sec:algorithm-triple}--\ref{sec:security} as the
+        \emph{legacy v7 variant}, retained for backward compatibility and
+        historical completeness, and makes explicit that it is no longer
+        the recommended default;
+  \item updates the abstract, comparison table
+        (Table~\ref{tab:comparison}), and conclusion to reflect v8 as the
+        default; no proof, theorem statement, or wire-format byte layout
+        from Version 1 is altered --- every Version 1 result is preserved
+        verbatim and continues to apply to the legacy v7 variant it was
+        proved against.
+\end{enumerate}
 
 \tableofcontents
 \clearpage
@@ -94,15 +133,31 @@ remaining far above all recommended thresholds.
 
 \paragraph{Contributions.}
 \begin{enumerate}
-  \item We specify NAPQES wire format v6 (Section~\ref{sec:construction}),
-        including the key serialisation, HMAC derivation schedule,
-        token construction, padding scheme, and authentication tag.
-  \item We prove IND-CPA security (Section~\ref{sec:security}) under the
-        PRF assumption on HMAC-SHA256, with an explicit key-entropy term
-        accounting for the fact that the HMAC key is a low-entropy,
-        structured prime tuple rather than a uniform bit-string
-        (Theorem~\ref{thm:ind-cpa}, Section~\ref{sec:cvf8-fix}), and show
-        that the authentication tag provides EUF-CMA integrity.
+  \item We specify \textbf{v8}, the primary and recommended NAPQES
+        construction (Section~\ref{sec:v8}): an independent
+        HMAC-domain-derivation secret $\mathsf{sk}$ and arithmetic-layer
+        key $\mathbf{k}$, sampled independently, together with a synthetic,
+        message-bound nonce $N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|A\|M)$.
+        We prove IND-CPA, INT-CTXT, and IND-CCA security for v8
+        (Theorem~\ref{thm:ind-cpa-v8} and Corollary~\ref{cor:v8-security})
+        under the \emph{standard, uniform-key} PRF assumption on
+        HMAC-SHA256, with no key-entropy term, and show that nonce reuse
+        degrades gracefully to disclosed plaintext-equality leakage rather
+        than exact key recovery.
+  \item We fully specify the shared token/wire-format machinery
+        (Section~\ref{sec:construction}) --- key serialisation, HMAC
+        derivation schedule, token construction, padding scheme, and
+        authentication tag --- common to both v8 and the legacy v7 wire
+        format.
+  \item For backward compatibility, we retain the legacy, single-secret
+        v7 construction and its full security analysis
+        (Sections~\ref{sec:algorithm-triple}--\ref{sec:security}): IND-CPA
+        security under the PRF assumption on HMAC-SHA256, with an explicit
+        key-entropy term accounting for the fact that its HMAC key is a
+        low-entropy, structured prime tuple rather than a uniform
+        bit-string (Theorem~\ref{thm:ind-cpa}, Section~\ref{sec:cvf8-fix}),
+        and show that the authentication tag provides EUF-CMA integrity. v7
+        is no longer recommended for new deployments (Section~\ref{sec:v8}).
   \item We provide a post-quantum analysis (Section~\ref{sec:pq}) and a
         comparison with AES-GCM and ChaCha20-Poly1305
         (Section~\ref{sec:comparison}).
@@ -116,7 +171,7 @@ remaining far above all recommended thresholds.
         streaming Release of Unverified Plaintext issue (CAV-001) has been
         resolved by the online-AE streaming format introduced in this version.
   \item We state the normative status of, and selection rule among, the
-        three wire encodings — block-mode v7, the deprecated basic
+        three wire encodings — block-mode (v7/v8), the deprecated basic
         streaming format, and the online-AE streaming format
         (Section~\ref{sec:format-applicability}) — closing audit finding
         CVF7.
@@ -157,6 +212,27 @@ generation.  NAPQES extends this philosophy to the full AEAD context.
 \section{Construction}
 \label{sec:construction}
 % ─────────────────────────────────────────────────────────────────────────────
+
+\begin{remark}[Reading guide: v8 is the recommended default]
+\label{rem:reading-guide}
+Sections~\ref{sec:construction}.1--\ref{sec:construction}.9 below (Notation
+through Wire Format Version 7) specify the token/wire-format machinery ---
+domain-separated HMAC derivation, noise probability, padding, token
+construction, and the masked-blob wire format --- shared verbatim by both
+NAPQES key schedules described in this paper. Section~\ref{sec:algorithm-triple}
+then instantiates that machinery as the formal algorithm triple
+\emph{under the legacy, single-secret v7 key schedule}, in which one secret
+$\mathbf{k}$ keys both the arithmetic layer and every HMAC domain
+derivation; Section~\ref{sec:v8} instantiates the identical machinery under
+an \emph{independent} pair of secrets $(\mathbf{k},\mathsf{sk})$ with a
+synthetic nonce. \textbf{Section~\ref{sec:v8} (v8) is the primary,
+recommended construction as of this version}; Section~\ref{sec:algorithm-triple}
+(v7) is retained, fully specified, and separately proved secure, for
+backward compatibility and historical completeness only. Readers
+interested only in the recommended construction may read
+Sections~\ref{sec:construction}.1--\ref{sec:construction}.9 for the shared
+machinery and then skip directly to Section~\ref{sec:v8}.
+\end{remark}
 
 \subsection{Notation}
 
@@ -687,7 +763,7 @@ one be added, would itself require authentication under the tag before a
 decryptor may act on it — that mechanism is deferred as out of scope for
 this fix.
 
-\subsection{The NAPQES AEAD Algorithm Triple}
+\subsection{The Legacy v7 AEAD Algorithm Triple (Backward Compatibility)}
 \label{sec:algorithm-triple}
 
 \begin{remark}[Audit finding CVF5]
@@ -826,7 +902,7 @@ occurrence of ``$\mathsf{Dec}(\cdot)=\bot$'' or
 should be read as, respectively, ``raises'' or ``does not raise''.
 \end{remark}
 
-\subsection{V8 Key Schedule and Synthetic Nonce (CVF3 / CVF8 / CVF13 fix)}
+\subsection{The NAPQES Construction, Version 2 (Default): Independent Key Schedule and Synthetic Nonce (CVF3 / CVF8 / CVF13 fix)}
 \label{sec:v8}
 
 \begin{remark}[Why v7 cannot close CVF3/CVF8/CVF13 without a key-schedule change]
@@ -990,15 +1066,119 @@ Theorem~\ref{thm:int-ctxt} require --- the simulation gap Remark~\ref{rem:cvf13}
 identified for v7 does not arise for v8.
 \end{lemma}
 
+\begin{theorem}[IND-CPA, v8]\label{thm:ind-cpa-v8}
+Let $\Pi_{v8}=(\mathsf{KeyGen}_{v8},\mathsf{Enc}_{v8},\mathsf{Dec}_{v8})$
+(Definitions~\ref{def:keygen-v8}, \ref{def:synthnonce},
+\ref{def:aead-triple-v8}) be the v8 NAPQES construction, with
+$\mathsf{Encrypt}_{v8}(\mathbf{k},\mathsf{sk},A,M)\triangleq
+\mathsf{Enc}_{v8}(\mathbf{k},\mathsf{sk},A,M)$ its (already randomized,
+via the synthetic nonce) public encryption oracle, and let
+$\mathbf{Exp}^{\mathrm{ind\text{-}cpa}}_{\Pi_{v8},\mathcal{A}}(\lambda)$ be
+Definition~\ref{def:ind-cpa}'s experiment with $\mathsf{Encrypt}$ replaced
+by $\mathsf{Encrypt}_{v8}$ throughout. For any PPT adversary $\mathcal{A}$
+making at most $q$ encryption queries, there exists a PRF adversary
+$\mathcal{B}_1'$ with similar running time such that
+\[
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\Pi_{v8}}(\mathcal{A})
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')
+  + \frac{q^2}{2^{128}},
+\]
+where $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')$
+is the \emph{standard, uniform-key} HMAC-SHA256 PRF advantage --- with
+\textbf{no} key-guessing term $q_F\cdot2^{-H_\infty(\mathbf{k})}$ and no
+PRF-under-non-uniform-$D$ caveat.
+\end{theorem}
+
+\begin{proof}
+Identical to the proof of Theorem~\ref{thm:ind-cpa}, with every occurrence
+of $\mathsf{kb}$ replaced by $\mathsf{sk}$, subject to two changes
+justified by Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} above. First,
+Lemma~\ref{lem:key-guess}'s guessing event $\mathrm{Guess}$ (an adversary
+offline-guessing the HMAC key) no longer applies: by
+Lemma~\ref{lem:v8-cvf8}, $\mathsf{sk}\xleftarrow{\$}\{0,1\}^{256}$ is drawn
+uniformly, so $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')$
+is already the conventional uniform-key advantage the literature states,
+and the term $q_F\cdot2^{-H_\infty(\mathbf{k})}$ is dropped entirely rather
+than merely bounded. Second, the reduction $\mathcal{B}_1'$ constructed in
+Lemma~\ref{lem:prf-hop}'s proof is instantiated exactly as
+Lemma~\ref{lem:v8-cvf13} describes: $\mathcal{B}_1'$ samples its own
+$\mathbf{k}'$ independently via $\mathsf{KeyGen}_{v8}$'s prime-sampling
+step to run the arithmetic layer, and forwards every domain-derivation
+call (including the synthetic-nonce domain \texttt{0x0A}) to its PRF
+oracle --- a construction that Lemma~\ref{lem:v8-cvf13} shows is
+distributed identically to the real/ideal games regardless of
+$\mathcal{B}_1'$ not knowing $\mathsf{sk}^*$, closing the simulation gap
+of Remark~\ref{rem:cvf13} that the analogous v7 reduction is subject to.
+The nonce-collision term $q^2/2^{128}$ carries over unchanged: by
+Lemma~\ref{lem:v8-cvf3}, two queries collide in synthetic nonce only with
+probability at most
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')+2^{-128}$,
+which is already absorbed into the stated PRF term and the $q^2/2^{128}$
+birthday bound over $q$ queries respectively --- no additional term is
+introduced. The hiding argument (Lemma~\ref{lem:hiding}) and the
+traffic-analysis argument (Lemma~\ref{lem:tar}) apply verbatim with
+$\mathsf{kb}\to\mathsf{sk}$, since neither depends on how the nonce is
+generated, only on it being fresh (which the collision bound above
+supplies).
+\end{proof}
+
+\begin{corollary}[INT-CTXT and IND-CCA, v8]\label{cor:v8-security}
+Let $\Pi_{v8}$ be as in Theorem~\ref{thm:ind-cpa-v8}. For any PPT adversary
+making at most $q$ encryption queries, $q_v$ (resp.\ $q_d$)
+verification/decryption queries, there exist PRF adversaries
+$\mathcal{B}_2'$ (resp.\ $\mathcal{B}_1',\mathcal{B}_2'$) with similar
+running time such that
+\[
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\Pi_{v8}}(\mathcal{A})
+  \leq
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2')
+  + \frac{q_v}{2^{256}},
+  \qquad
+  \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\Pi_{v8}}(\mathcal{A})
+  \leq
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')
+  +
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2')
+  + \frac{q^2}{2^{128}}
+  + \frac{q_d}{2^{256}},
+\]
+both against the standard, uniform-key HMAC-SHA256 PRF assumption, with no
+key-entropy term.
+\end{corollary}
+
+\begin{proof}
+Theorem~\ref{thm:int-ctxt}'s proof (Case~1/Case~2) and
+Theorem~\ref{thm:ind-cca}'s Bellare--Namprempre composition
+\cite{bellare2000ae} depend on the shared wire-format/domain-separation
+machinery of Section~\ref{sec:construction} (Remark~\ref{rem:domsep}'s
+injectivity argument, the fixed-width token encoding, and the
+domain-\texttt{0x03} tag) and on Theorem~\ref{thm:ind-cpa}'s IND-CPA bound
+as a black box; neither proof inspects the key-generation or
+nonce-derivation procedure beyond using it as an oracle. Substituting
+$\mathsf{sk}$ for $\mathsf{kb}$ throughout (as in
+Theorem~\ref{thm:ind-cpa-v8}'s proof) and invoking
+Theorem~\ref{thm:ind-cpa-v8} in place of Theorem~\ref{thm:ind-cpa} at the
+one point (Theorem~\ref{thm:ind-cca}'s ``Game $H_1$ reduces to IND-CPA''
+step) where the IND-CPA bound is used, reproduces both proofs verbatim
+with the key-guessing term dropped, exactly as in
+Theorem~\ref{thm:ind-cpa-v8}.
+\end{proof}
+
 \begin{remark}[Scope and residual]
 \label{rem:v8-scope}
-Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} close CVF3, CVF8, and CVF13
-for callers who adopt the v8 key schedule. The v7 wire format, key
-schedule, and their previously-documented residuals (Remarks~\ref{rem:cvf8-kdf},
+Theorem~\ref{thm:ind-cpa-v8} and Corollary~\ref{cor:v8-security} ---
+assembled from Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} --- close CVF3,
+CVF8, and CVF13, and are the security statements this paper recommends new
+deployments rely on. The v7 wire format, key schedule, and their
+previously-documented residuals (Remarks~\ref{rem:cvf8-kdf},
 \ref{rem:cvf8-kdf-erratum}, \ref{rem:cvf13}) are unchanged and remain
-available for backward compatibility; v7 callers who need the stronger
-guarantees above must migrate to $\mathsf{KeyGen}_{v8}$/$\mathsf{Enc}_{v8}$/
-$\mathsf{Dec}_{v8}$. The v8 schedule is implemented in
+available, fully specified and separately proved
+(Section~\ref{sec:algorithm-triple}, Theorem~\ref{thm:ind-cpa}), for
+backward compatibility only; v7 callers who need the stronger guarantees
+above must migrate to $\mathsf{KeyGen}_{v8}$/$\mathsf{Enc}_{v8}$/
+$\mathsf{Dec}_{v8}$. \textbf{This migration is the paper's recommended
+default as of this version.} The v8 schedule is implemented in
 \texttt{rust/src/lib.rs} (\texttt{generate\_v8\_key},
 \texttt{encrypt\_bytes\_v8}, \texttt{decrypt\_bytes\_v8}) with unit tests
 covering round-trip correctness, tamper/AAD-mismatch rejection,
@@ -1017,8 +1197,14 @@ three languages offer the misuse-resistant path.
 Theorem~\ref{thm:ind-cpa} (IND-CPA), the IND-CCA discussion of
 Section~\ref{sec:ind-cca}, and the INT-CTXT theorem below are all stated
 against the formal $(\mathsf{KeyGen}, \mathsf{Enc}, \mathsf{Dec})$ triple of
-Definition~\ref{def:aead-triple} and assume the correctness condition of
-Definition~\ref{def:correctness}; together, INT-CTXT (ciphertext integrity
+Definition~\ref{def:aead-triple} --- \textbf{the legacy v7 single-secret
+construction} (Section~\ref{sec:algorithm-triple}) --- and assume the
+correctness condition of Definition~\ref{def:correctness}; the
+corresponding v8 statements, Theorem~\ref{thm:ind-cpa-v8} and
+Corollary~\ref{cor:v8-security} (Section~\ref{sec:v8}), are proved by
+direct reduction to the theorems in this section and carry the stronger,
+key-entropy-free guarantee that is this paper's recommended default.
+Together, INT-CTXT (ciphertext integrity
 against an adversary with encryption-oracle access) and the underlying
 HMAC-SHA256 tag's collision/forgery resistance are the EUF-CMA-style
 unforgeability goal referenced informally in Section~\ref{sec:intro} —
@@ -2598,7 +2784,8 @@ Primitive basis & HMAC-SHA256 & AES + GHASH & ChaCha20 + Poly1305 & Ascon permut
 FIPS-approved & \textbf{Yes} & Yes & \textbf{No} & No (pending) \\
 Shor-applicable structure & \textbf{No} & No & No & No \\
 Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No \\
-Nonce-reuse key recovery & \textbf{Yes (catastrophic)}\footnotemark & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
+Nonce-reuse key recovery (v7, legacy) & \textbf{Yes (catastrophic)}\footnotemark & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
+Nonce-reuse key recovery (v8, default) & \textbf{No (see Lemma~\ref{lem:v8-cvf3})} & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
 Ciphertext expansion & $4\text{--}20\times$ & $1\times$ & $1\times$ & $1\times$ \\
 Key size & 50+ bytes & 32 bytes & 32 bytes & 16 bytes \\
 \bottomrule
@@ -2639,18 +2826,30 @@ traffic pattern does not rely on ciphertext length confidentiality, and is
 mitigated in streaming-transport scenarios by the noise-probability ceiling
 of 0.99.
 
-\textbf{Nonce-reuse hazard (CVF3).}  Unlike AES-GCM and ChaCha20-Poly1305,
-where nonce reuse degrades confidentiality but does not expose the key,
-NAPQES's affine token construction makes nonce reuse \emph{key-recoverable}
-(see the footnote to Table~\ref{tab:comparison} and \S\ref{sec:nonce-misuse}
-below).  NAPQES therefore does \emph{not} offer an advantage over AES-GCM or
+\textbf{Nonce-reuse hazard (CVF3, legacy v7).}  Unlike AES-GCM and
+ChaCha20-Poly1305, where nonce reuse degrades confidentiality but does not
+expose the key, the \emph{legacy v7} construction's affine token
+construction makes nonce reuse \emph{key-recoverable} (see the footnote to
+Table~\ref{tab:comparison} and \S\ref{sec:nonce-misuse} below). Under v7,
+NAPQES therefore does \emph{not} offer an advantage over AES-GCM or
 ChaCha20-Poly1305 on this property; the 128-bit random nonce makes
-accidental reuse a $\approx 2^{64}$ birthday event, but NAPQES provides no
-misuse resistance, and callers must never supply or reuse an explicit
-nonce in production.
+accidental reuse a $\approx 2^{64}$ birthday event, but v7 provides no
+misuse resistance, and callers of v7 must never supply or reuse an
+explicit nonce in production. \textbf{This hazard does not apply to v8}
+(Section~\ref{sec:v8}, Lemma~\ref{lem:v8-cvf3}): its synthetic,
+message-bound nonce makes nonce reuse across distinct $(A,M)$ pairs a
+negligible HMAC-SHA256-collision event rather than a birthday-bound or
+DRBG-failure event, and repeated queries on an \emph{identical} $(A,M)$
+degrade only to the standard, disclosed MRAE plaintext-equality leak (cf.\
+AES-GCM-SIV) rather than to key recovery. This is the primary practical
+reason v8 is this paper's recommended default.
 
-\subsection{Nonce Reuse Is Key-Recoverable, Not Merely Confidentiality-Losing}
+\subsection{Nonce Reuse Is Key-Recoverable Under Legacy v7, Not Merely Confidentiality-Losing}
 \label{sec:nonce-misuse}
+
+This subsection concerns the \textbf{legacy v7} construction only; see the
+paragraph above and Lemma~\ref{lem:v8-cvf3} for why v8 (the recommended
+default, Section~\ref{sec:v8}) is not subject to this hazard.
 
 For an ordinary stream cipher, reusing a nonce loses confidentiality (the
 XOR of two keystreams is exposed) but not the key.  NAPQES's per-position
@@ -2682,13 +2881,25 @@ internally via a CSPRNG on every call (see \texttt{docs/CAVEATS.md}, CVF3).
 The authoritative reference implementation is \texttt{napqes.py}.  It is
 pure Python 3.10+, with no dependencies beyond the standard library
 (\texttt{hmac}, \texttt{hashlib}, \texttt{secrets}, \texttt{base64}).  All
-KAT vectors are derived from this implementation.
+KAT vectors are derived from this implementation. It currently implements
+the legacy v7 construction only; porting to v8 is tracked as a follow-up
+(Remark~\ref{rem:v8-scope}).
 
 \subsection{Rust Implementation}
 
-A Rust port (\texttt{rust/src/lib.rs}) implements the same wire format and
-passes all negative KAT vectors.  Positive vector parity (deterministic
+A Rust port (\texttt{rust/src/lib.rs}) implements both the legacy v7 wire
+format and the recommended v8 construction
+(\texttt{generate\_v8\_key}, \texttt{encrypt\_bytes\_v8},
+\texttt{decrypt\_bytes\_v8}), and passes all negative KAT vectors for v7.
+v8 unit tests cover round-trip correctness, tamper/AAD-mismatch rejection,
+same-message determinism, and distinct-message nonce distinctness
+(Remark~\ref{rem:v8-scope}). Positive v7 vector parity (deterministic
 encrypt) is deferred to Phase 2 (HMAC-derived padding alignment).
+
+\subsection{C Implementation}
+
+A C port (\texttt{C/napqes.c}) implements the legacy v7 wire format. Like
+the Python implementation, it has not yet been ported to v8.
 
 \subsection{Constant-Time Considerations}
 
@@ -2817,18 +3028,33 @@ primitives, provides a conventional RFC~5116-compatible interface, and has been
 validated against a 30-vector KAT corpus, the full NIST SP 800-22 statistical
 suite, and a fuzz harness covering the complete decoder pipeline.
 
+\textbf{As of this version, v8} --- an independent HMAC-domain-derivation
+secret, an independent arithmetic-layer key, and a synthetic, message-bound
+nonce (Section~\ref{sec:v8}) --- \textbf{is the recommended construction for
+all new deployments}. It is proved IND-CPA, INT-CTXT, and IND-CCA secure
+under the standard, uniform-key PRF assumption on HMAC-SHA256
+(Theorem~\ref{thm:ind-cpa-v8}, Corollary~\ref{cor:v8-security}), with no
+key-entropy term, and it closes the exact-key-recovery-under-nonce-reuse
+hazard that applies to every earlier wire format (Table~\ref{tab:comparison},
+Section~\ref{sec:nonce-misuse}). The legacy, single-secret v7 construction
+remains fully specified and separately proved
+(Theorem~\ref{thm:ind-cpa}, Section~\ref{sec:cvf8-fix}) for backward
+compatibility, but is no longer recommended.
+
 The streaming Release of Unverified Plaintext issue (CAV-001) has been
 resolved by the online-AE streaming format, which attaches a per-chunk
 HMAC-SHA256 tag and a final sentinel tag, giving \texttt{decrypt\_stream\_ae}
 true online-AE semantics with no plaintext released before verification.
 Remaining open limitations include ciphertext expansion (inherent in the
 noise-injection design, CAV-004), a 16-bit block-mode plaintext length cap
-(CAV-002), and a padding length-bucket leak (CAV-003); these are documented
-and assigned to future wire-format versions.
+(CAV-002), a padding length-bucket leak (CAV-003), and the pending Python/C
+ports of v8 (Remark~\ref{rem:v8-scope}); these are documented and tracked
+for future revisions.
 
 Future work includes a TVLA side-channel analysis of the Rust constant-time
-implementation, a FIPS 140-3 module boundary definition, and a performance
-evaluation on embedded ARM Cortex-M4 and RISC-V targets.
+implementation, completing the Python and C ports of v8, a FIPS 140-3 module
+boundary definition, and a performance evaluation on embedded ARM Cortex-M4
+and RISC-V targets.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \bibliographystyle{plain}

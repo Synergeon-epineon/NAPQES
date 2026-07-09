@@ -25,7 +25,8 @@ from napqes import (
     encrypt, encrypt_str,
     encrypt_bytes, decrypt_bytes,
     generate_prime_numbers, is_prime,
-    _b128_decode_tokens, _key_bytes, _derive_noise_p, _varint_keystream,
+    _b128_decode_tokens, _fixed_decode_tokens, _key_bytes, _derive_noise_p,
+    _varint_keystream,
 )
 
 # ─── Demo key (attacker does NOT know this) ───────────────────────────────────
@@ -39,7 +40,12 @@ ENGLISH_MSG = "the quick brown fox jumps over the lazy dog " * 3
 # ─── Ciphertext parsing helpers ──────────────────────────────────────────────
 
 def _parse_ct(ct_str: str) -> list[int]:
-    """Extract integer tokens from any NAPSEQ ciphertext format (v2–v6)."""
+    """Extract integer tokens from any NAPSEQ ciphertext format (v2-v7).
+
+    v6/v7 (base64, no colon) both unmask to the same masked_blob layout;
+    only the token deserialisation differs (LEB128 varint for v6, fixed-width
+    8-byte fields for v7 — see CVF1). Current ``encrypt_str`` output is v7.
+    """
     if ":" in ct_str:
         _, _, token_field = ct_str.split(":", 2)
         if " " in token_field:
@@ -51,7 +57,7 @@ def _parse_ct(ct_str: str) -> list[int]:
     kb = _key_bytes(_DEMO_KEY)
     ks = _varint_keystream(kb, nonce, len(masked_blob))
     token_blob = bytes(a ^ b for a, b in zip(masked_blob, ks))
-    return _b128_decode_tokens(token_blob)
+    return _fixed_decode_tokens(token_blob)
 
 
 def _ct_noise_p(ct_str: str) -> float:
