@@ -1,12 +1,425 @@
 # NAPQES Known Caveats — Issue Triage
 
 **Status:** Phase 0 baseline (2026-05-12)
-**Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))
+**Wire format:** v7 (frozen — see [`SPEC.md`](../SPEC.md)); supersedes v6 as of the CVF1 fix (2026-07-06)
 **Owner placeholders:** replace with GitHub username when repo is published.
 
 This file serves as the issue-tracker stand-in until the repository moves to
 a public host with native issue tracking. Migrate each entry to a GitHub issue
 at that point and update this file to reference the issue number.
+
+---
+
+## CVF1 — Ciphertext byte-length leaks plaintext content (IND-CPA theorem false)
+
+| Field | Value |
+|---|---|
+| **ID** | CVF1 |
+| **Category** | Flaw |
+| **Severity** | Critical (IND-CPA distinguishing advantage ≈ 1) |
+| **Affects** | `encrypt_bytes` / `decrypt_bytes` / `encrypt_str` / `decrypt_str` (napqes.py block mode); `docs/napseq-eprint-preprint.tex` Theorem 1 (IND-CPA) |
+| **Introduced** | v6 (LEB128 token encoding) |
+| **Owner** | TBD |
+| **Status** | **Fixed** (v7 wire format, 2026-07-06) |
+| **Risk retired** | — (new finding from external audit review) |
+
+**Description.** Each token is `token = codepoint × key_element + addend`
+with `key_element ≈ 10⁶–10⁷` (≈ 2²⁰–2²³). The retired v6 format serialised
+tokens with unsigned LEB128 (variable-length) *before* XOR-masking. Because
+the LEB128 byte-length of a value grows with its magnitude, and token
+magnitude scales with the plaintext codepoint, the serialised token blob's
+byte-length — and hence the final ciphertext's byte-length — depended on
+plaintext codepoint *values*, not just the padded codepoint *count*. Two
+plaintexts of equal padded length (same padding bucket, same
+HMAC-derived noise pattern) could still produce ciphertexts of different
+byte-length: e.g. `n` copies of U+0001 (token ≈ 2²⁰, ~3 LEB128 bytes) vs.
+`n` copies of U+FFFF (token ≈ 2³⁶, ~6 LEB128 bytes). The domain-0x07 XOR
+mask is length-preserving, so it does not hide this — the distinguisher
+gives an IND-CPA advantage ≈ 1, even under fresh nonces.
+
+This also invalidated a step of the IND-CPA hiding lemma in
+`docs/napseq-eprint-preprint.tex` (Theorem 1), which asserted "since $B$ is
+the same length for both plaintexts $m_0, m_1$ (they have equal padded
+lengths by the IND-CPA requirement)" without justification: equal padded
+codepoint count does not imply equal serialised byte-length under a
+variable-width encoding.
+
+**Fix (v7 wire format).** Block-mode tokens are now serialised with a
+constant-width, 8-byte big-endian field
+(`napqes._fixed_encode_tokens` / `_fixed_decode_tokens`) instead of LEB128.
+Every token occupies the same number of bytes regardless of magnitude, so
+the serialised blob's length is `token_count * 8` — a function only of the
+token *count*, which is itself a function of the padded codepoint count and
+the HMAC-derived, content-independent noise schedule (domain `0x00`), never
+of codepoint values. This restores the hiding-lemma step: for a fixed
+challenge nonce, equal padded length now provably implies equal blob
+byte-length. See `SPEC.md` §4–§5 and
+`docs/napseq-eprint-preprint.tex` (Section "Wire Format (Version 7 —
+CVF1 fix)" and the erratum remark on the hiding lemma) for the full
+corrected argument.
+
+Legacy v6 ciphertexts remain fully authenticated and readable via explicit
+opt-in (`decrypt_bytes(..., legacy_v6_varint=True)`); they were never
+vulnerable to tampering, only to this length side channel. The fix has been
+applied consistently across the Python reference implementation, the C
+port (`C/napqes.c`), and the Rust core (`rust/src/lib.rs`); all three
+produce byte-identical v7 ciphertexts (verified via
+`tests/kat/v6_vectors.json`, regenerated under the new encoding, and
+`tests/test_cross_lang.py`).
+
+**Not fixed (tracked as a CVF1 follow-up).** `encrypt_stream` /
+`encrypt_stream_ae` (napqes.py streaming API) still serialise tokens as
+LEB128 varints and therefore exhibit the same magnitude-dependent
+byte-length pattern. This does not break an IND-CPA claim for streaming
+mode specifically, because streaming mode already discloses the exact
+plaintext length (no padding is applied there) — but the pattern is present
+and should be closed in a future fix for defence in depth.
+
+---
+
+## CVF3 — Nonce reuse yields key recovery via the length channel (and, more directly, via the affine token structure alone)
+
+| Field | Value |
+|---|---|
+| **ID** | CVF3 |
+| **Category** | Flaw |
+| **Severity** | Critical (key recovery under nonce reuse) |
+| **Affects** | `napqes.py`, `rust/src/lib.rs`, `C/napqes.c` (all block-mode encrypt paths); `docs/napseq-eprint-preprint.tex` Table 4 ("Nonce-reuse key recovery" row) |
+| **Introduced** | v1 (affine token construction: `token = codepoint * key_element + addend`) |
+| **Owner** | TBD |
+| **Status** | **Fully closed for v8** (misuse-resistant synthetic-IV key schedule shipped 2026-07-07, `encrypt_bytes_v8`/`decrypt_bytes_v8`, `rust/src/lib.rs`) — v7's random-nonce API keeps the documented residual below for callers who have not migrated |
+| **Risk retired** | — (new finding from external audit review) |
+
+**Description.** Every internal value NAPQES derives — noise positions
+(domain `0x00`), noise characters (`0x04`), addends (`0x01`, `0x05`),
+padding (`0x06`), and the XOR keystream (`0x07`) — is a deterministic
+function of `(key_bytes, nonce)` alone via
+`Derive_d(kb, N, ctx) = HMAC(kb, d‖N‖ctx)`; nothing else is random. A
+repeated nonce therefore reproduces an identical keystream and identical
+noise/addends (a two-time pad). `docs/napseq-eprint-preprint.tex` Table 4
+advertised `Nonce-reuse key recovery: No` as an advantage over AES-GCM and
+ChaCha20-Poly1305 — this was false.
+
+The audit finding describes one escalation route: under a fixed nonce,
+varying a real-plaintext codepoint `c` at a chosen position and watching
+the (pre-CVF1) LEB128 ciphertext-length channel for the boundary transition
+recovers `k_j` via a binary search, without ever attacking the mask. Since
+the CVF1 fix (fixed-width 8-byte token encoding), this exact length-boundary
+route is closed for the block API — but a strictly more direct route
+remains, and does **not** depend on the length channel at all: the
+domain-`0x07` mask is a plain XOR, so under a reused nonce, XOR-cancelling
+two ciphertexts recovers the plain XOR of their fixed-width token fields
+exactly; combined with one known plaintext codepoint at a given real-token
+position, this yields the *exact* integer token value at that position for
+a second, unknown codepoint. Two such known-plaintext tokens at the same
+position give two equations `t = c*k + a` in the two unknowns `k, a`,
+solved exactly by ordinary linear algebra (`k = (t1-t2)/(c1-c2)`). This
+needs only known-plaintext, not chosen-plaintext, and is unaffected by the
+CVF1 fix. Recovering `k_j` for each of the `K` key-tuple positions (cycled
+via `real_idx mod K`) fully recovers the key. This is strictly worse than
+an ordinary stream cipher's nonce-reuse confidentiality loss, and worse
+than AES-GCM/ChaCha20-Poly1305 losing only their authentication key under
+nonce reuse.
+
+**Fix shipped (2026-07-06).**
+- **Table 4 corrected.** `docs/napseq-eprint-preprint.tex` now states
+  `Nonce-reuse key recovery: Yes (catastrophic)` for NAPQES, with a footnote
+  proving the exact algebraic recovery above, and a new subsection
+  ("Nonce Reuse Is Key-Recoverable, Not Merely Confidentiality-Losing")
+  explaining why this is worse than a standard two-time pad and why the
+  CVF1 fix does not (and cannot) close it. `comparator.py`'s
+  "Nonce-reuse consequence" row and `docs/SECURITY_TARGET.md`'s "Nonce
+  reuse" / "Key-recovery from ciphertext" rows were corrected to match —
+  they previously repeated the same false "HMAC prevents direct algebraic
+  recovery" / "standard AEAD limitation" claims.
+- **Caller-chosen-nonce entry points restricted.** `rust/src/lib.rs`'s
+  `encrypt_bytes_with_nonce` (an explicit-nonce encrypt used only by the
+  FIPS power-on self-test and KAT verification) was `pub`, i.e. part of the
+  crate's public API — any external consumer could call it in production
+  with an attacker-influenced or accidentally-reused nonce. It is now
+  `pub(crate)`; the external `rust/tests/kats.rs` integration test (which
+  required `pub` visibility) was moved in-crate as
+  `rust/src/kat_cross_check.rs` (a `#[cfg(test)]` unit-test module), and
+  `tests/test_cross_lang.py` was updated to invoke
+  `cargo test --lib kat_cross_check` instead of `cargo test --test kats`.
+  Similarly, C's `napqes_encrypt_bytes_with_nonce` (`C/napqes.c` /
+  `C/napqes.h`) is now compiled only when `NAPQES_ENABLE_TEST_NONCE_API` is
+  defined; the default `napqes.o` / `napqes_demo` build does not define it,
+  so the symbol is absent from the production library, and only the
+  `make kat-test` target (which defines the macro) compiles and links it.
+  The Python reference (`napqes.py`) never exposed a public encrypt
+  function accepting a caller-supplied nonce — its one internal nonce-taking
+  helper (`tests/gen_kats.py`'s `_encrypt_with_nonce`) was already
+  underscore-private and test-only, so no change was needed there.
+- Full regression suite re-run after these changes: 245 Python tests (1
+  pre-existing, unrelated skip), 76 Rust unit tests (including the moved
+  `kat_cross_check` module and the FIPS self-test, which still exercises
+  the now-`pub(crate)` `encrypt_bytes_with_nonce` internally), and
+  `tests/test_cross_lang.py`'s Rust↔Python cross-language checks all pass.
+  The C side could not be compiled/verified in this environment (no C
+  toolchain available — same known residual as CVF2).
+
+**Not fixed for v7 — tracked as future work for callers who do not migrate.**
+Correcting the documentation and removing the public misuse entry point
+did not, by itself, change the underlying cryptographic property of the
+*v7* wire format: NAPQES v7 nonce reuse remains catastrophic and
+key-recoverable whenever a nonce is reused, by whatever means (DRBG
+failure, restart-and-replay, a future caller-supplied-nonce API, etc.).
+The 128-bit random nonce makes *accidental* reuse a ≈ 2⁶⁴ birthday event,
+and the Rust core additionally runs a consecutive-nonce CRNG check
+(`generate_nonce_with_crng_check`, SP 800-140B §4.9.2) that catches
+back-to-back identical nonces from a failed DRBG — but this catches only
+the immediately-previous nonce, not reuse across restarts, processes, or
+replayed ciphertext, and no equivalent check exists in the Python or C
+reference implementations.
+
+**Fully closed (2026-07-07) via the v8 key schedule.** `rust/src/lib.rs`
+now ships `generate_v8_key`/`encrypt_bytes_v8`/`decrypt_bytes_v8`, which
+replace the CSPRNG nonce with a synthetic IV (RFC 5297/AES-GCM-SIV style):
+`N = HMAC(sk, 0x0A‖be4(|aad|)‖aad‖message)[0:16]`, keyed by the
+independently-sampled `sk` introduced by the same fix (see CVF8/CVF13
+below). Because the nonce is now a deterministic PRF of `(sk, aad,
+message)`, two *different* `(aad, message)` pairs can only share a nonce
+via an HMAC-SHA256 collision (cryptographically negligible) — the
+affine-cancellation key-recovery route above requires two *different*
+known plaintexts under one *reused* nonce, which the v8 schedule makes
+infeasible by construction rather than merely improbable. This is the
+standard MRAE trade-off (misuse resistance in exchange for determinism):
+re-encrypting the *identical* `(aad, message)` pair under the same v8 key
+reproduces the identical ciphertext, which discloses only plaintext
+equality — never a key-recovery or confidentiality break. See
+`docs/napseq-eprint-preprint.tex`, "V8 Key Schedule and Synthetic Nonce",
+for the full specification and updated security argument.
+
+Callers who need probabilistic ciphertexts even for repeated identical
+messages (rather than misuse resistance) should keep using the v7
+random-nonce API (`encrypt_bytes`), which retains the residual described
+above. The v7 and v8 wire-layouts are byte-shape-identical but **not**
+interoperable with each other (different key schedule, different nonce
+derivation); per the CVF7 format-selection philosophy, callers must agree
+out-of-band on which schedule a given key/ciphertext uses. The Python and
+C reference implementations have not yet been ported to the v8 schedule;
+this is tracked as a follow-up so all three languages offer the
+misuse-resistant path.
+
+---
+
+## CVF8 — IND-CPA bound ignores the actual key entropy and key size
+
+| Field | Value |
+|---|---|
+| **ID** | CVF8 |
+| **Category** | Algorithm |
+| **Severity** | Critical for small `K` (theorem false as stated for `K` below the derived floor); imprecise (non-standard assumption) for the default `K=10` |
+| **Affects** | `docs/napseq-eprint-preprint.tex` Theorem 1 (IND-CPA, `thm:ind-cpa`) |
+| **Introduced** | Original theorem statement (no key-entropy term) |
+| **Owner** | TBD |
+| **Status** | Proof-level correction shipped 2026-07-07; **residual non-standard-assumption fully closed for v8** (2026-07-07, `generate_v8_key`/independent `sk`, `rust/src/lib.rs`) — see "Not fixed" below for v7's remaining scope |
+| **Risk retired** | — (new finding from external audit review) |
+
+**Description.** Theorem 1 bounded the adversary's IND-CPA advantage by
+`Adv^PRF_HMAC-SHA256(B1) + q²/2^128`, with no term depending on `K` or
+`|𝒫|`. The HMAC key `kb = key_bytes(k)` is not a uniform bit-string — its
+min-entropy is `H∞(k) = log2(|𝒫|!/(|𝒫|−K)!)` (≈196 bits for `K=10`, ≈20
+bits for `K=1`) — so the standard uniform-key HMAC-SHA256 PRF conjecture
+does not, by itself, rule out an adversary that recovers `k` by offline
+exhaustive search at cost `≈2^H∞(k)`. For small `K` this search is cheap,
+making the original theorem false as stated for admissible small key
+sizes, and the `≈2^196` key-space figure never entered the bound even at
+the paper's own default `K=10`.
+
+**Fix (proof-level).** Theorem 1 is restated with an explicit key-guessing
+term `q_F·2^(−H∞(k))`, proved via a new key-guessing lemma. A new remark
+states precisely that, once the guessing term is paid for, the residual
+PRF advantage is against the *actual* prime-tuple key distribution — a
+non-standard, weaker assumption than the conventional uniform-key
+conjecture — rather than silently treating the two as equivalent. A
+minimum-key-size remark derives `K≥7` as the floor required for the
+guessing term to be negligible against the paper's own ≈128-bit
+post-Grover target, and states it as a normative requirement. See
+`docs/napseq-eprint-preprint.tex`, Theorem 1 and the subsection
+"CVF8: Minimum Key Size and Removing the Residual Non-Standard
+Assumption" (`sec:cvf8-fix`), for the full corrected argument.
+
+**Not fixed for v7 (tracked as a CVF8 follow-up).** The v7 theorem still
+rests on a non-standard "PRF under the prime-tuple key distribution"
+assumption rather than the conventional uniform-key one, for callers who
+have not migrated to v8. `KeyGen`'s default `K=10` already exceeds the
+derived `K≥7` floor with margin, and no reference implementation
+currently permits configuring `K<7`, so there is no known exploitable gap
+at default v7 settings today.
+
+**Fully closed (2026-07-07) via the v8 key schedule.** The fully rigorous
+fix anticipated above — an HMAC subkey independent of the prime-tuple
+entropy — is now shipped: `rust/src/lib.rs`'s `generate_v8_key` samples a
+256-bit `sk` via CSPRNG *independently* of the prime tuple (not derived
+from it by any function, unlike an HKDF-over-`kb` design, which would
+remain correlated with `k` and would not by itself close CVF13's
+simulation gap below). `encrypt_bytes_v8`/`decrypt_bytes_v8` key every
+domain derivation with this independent `sk`, so `H∞(sk) = 256` exactly
+and the conventional uniform-key HMAC-SHA256 PRF assumption applies
+directly — no key-guessing term, and no non-standard key-distribution
+hypothesis, is needed for v8. See `docs/napseq-eprint-preprint.tex`, "V8
+Key Schedule and Synthetic Nonce", for the restated theorem under the v8
+schedule. The Python and C reference implementations have not yet been
+ported to v8; this is tracked as a follow-up.
+
+---
+
+## CVF9 — INDCPA was never formally defined, and the challenge-equality constraint was ill-specified
+
+| Field | Value |
+|---|---|
+| **ID** | CVF9 |
+| **Category** | Architecture |
+| **Severity** | Theorem 1 was not well-defined (no formal notion, ambiguous length metric, circular use of an unproved precondition) |
+| **Affects** | `docs/napseq-eprint-preprint.tex` Theorem 1 (IND-CPA, `thm:ind-cpa`) and its proof |
+| **Introduced** | Original theorem statement (informal, inline experiment sketch only) |
+| **Owner** | TBD |
+| **Status** | **Fixed** (proof-level correction, 2026-07-07) |
+| **Risk retired** | — (new finding from external audit review) |
+
+**Description.** The paper claimed the scheme "is IND-CPA secure" and
+proved it via "the standard IND-CPA experiment", but no formal IND-CPA
+definition (adversary, oracles, challenge, advantage) appeared anywhere —
+the experiment was only sketched inline inside the proof. The sketch's
+challenge constraint, "`A` submits a challenge pair `(m0,m1)` of equal
+padded length", is non-standard (the textbook constraint is `|m0|=|m1|`,
+equal plaintext length, with no padding precondition) and never states
+which of three genuinely different quantities — codepoint count, on-wire
+byte length, or the padded bucket `B` — "length" refers to. Because the
+metric was undefined, the theorem was not well-defined, and the hiding
+lemma's proof later invoked "equal padded lengths by the IND-CPA
+requirement" as an unproved assumption to close a step that would
+otherwise be circular.
+
+**Fix (proof-level).** `docs/napseq-eprint-preprint.tex` now states a
+formal `Definition~\ref{def:ind-cpa}` (adversary, encryption oracle,
+challenge, advantage) immediately before Theorem 1, using the standard
+constraint `|m0|=|m1|` measured in Unicode codepoints — the only metric
+NAPQES's algorithm triple (`Definition~\ref{def:aead-triple}`) is typed
+against — with no "equal padded length" precondition imposed on the
+adversary. A new remark (`rem:equal-padded-derived`) then *derives* equal
+padded length as a consequence of `|m0|=|m1|`, from the padding formula
+`B = max(16, 2^ceil(log2(n+1)))` being a deterministic function of
+codepoint count alone: this closes the circularity, since the fact the
+proof needs is now proved from the definition rather than assumed
+alongside it. Every subsequent occurrence of "equal padded length" in
+Game `G0`'s challenge step and the hiding lemma's proof now cites this
+derived fact instead of an unproved requirement. A further remark
+(`rem:cvf9-byte-metric`) states the residual scope limitation explicitly:
+the guarantee is with respect to `M`'s codepoint metric only, and does not
+extend to external byte-string encodings of unequal codepoint count but
+equal on-wire byte length — that scenario is cross-referenced to CAV-003
+(padding length-bucket leakage), which was already open and is not
+resolved by this fix.
+
+**Scope of the fix:** `docs/napseq-eprint-preprint.tex` only — a new
+audit-finding remark, a new formal `Definition~\ref{def:ind-cpa}`, two new
+remarks deriving equal padded length and stating the codepoint/byte scope
+limit, and small edits to Theorem 1's statement and proof (Game `G0`'s
+challenge step, the hiding lemma's "equal byte-length of `B`" paragraph)
+to cite the new definition and remarks instead of the old inline,
+ambiguous phrasing. No change to `napqes.py`, `rust/src/lib.rs`, or
+`C/napqes.c`, and no change to the theorem's bound or proof structure:
+this finding is that the security *notion* and one proof step's
+justification were underspecified, not that the underlying argument
+(once the definition is fixed) fails to go through — `|m0|=|m1|` in
+codepoints was already, in substance, what the original argument needed,
+it was just never stated as the formal constraint and was instead
+re-derived informally and circularly at the point of use.
+
+**Not fixed (residual, tracked as a CVF9/CAV-003 cross-reference).** The
+fix formalizes the definition and metric for NAPQES's own message space
+(Unicode codepoint sequences) but does not address CAV-003 (padding
+length-bucket leakage) itself: ciphertext length still reveals the padding
+bucket, so two plaintexts that are equal-length only when measured in
+some other metric (e.g. on-wire byte length of an external encoding) than
+the codepoint metric NAPQES's IND-CPA definition uses are not covered by
+Theorem 1. This is the same open, low-severity gap already tracked as
+CAV-003, now explicitly cross-referenced from the theorem's proof.
+
+**Requested action:** please confirm CVF9 can be marked **Fixed** as a
+proof-level, definitional correction, with the pre-existing CAV-003
+length-bucket gap remaining open and tracked separately.
+
+---
+
+## CVF13 — INTCTXT and INDCPA reductions cannot simulate the encryption oracle without the prime vector k
+
+| Field | Value |
+|---|---|
+| **ID** | CVF13 |
+| **Category** | Architecture |
+| **Severity** | Theorem 1 (IND-CPA), Theorem 2 (INT-CTXT), and Theorem 3 (IND-CCA)'s reductions are not established for the real scheme as written — a simulation gap, not a false bound |
+| **Affects** | `docs/napseq-eprint-preprint.tex` Lemma `lem:prf-hop` (B1), Theorem 2 (`thm:int-ctxt`, B2, Case 1), Theorem 3 (`thm:ind-cca`, composed) |
+| **Introduced** | Original reduction sketches ("forward all HMAC calls to their own PRF oracle") |
+| **Owner** | TBD |
+| **Status** | Proof-level gap documented 2026-07-07; **fully closed for v8** (2026-07-07, decoupled `sk`/`k`, `rust/src/lib.rs`) — v7's reductions retain the documented simulation gap below |
+| **Risk retired** | — (new finding from external audit review) |
+
+**Description.** `B1` and `B2` are described as simulating NAPQES
+encryption for the adversary by forwarding every HMAC call to their PRF
+oracle. This is incomplete: `NAPQES.Enc` also uses the prime vector `k`
+directly, outside of any HMAC call — token emission computes
+`c * k_j + a`, and the addend range `[1, k_j - 1]` depends on the specific
+prime `k_j`. A PRF oracle never reveals its hidden key, so the reduction
+cannot extract `k` from oracle access and cannot run this arithmetic as
+written. Sampling an independent `k'` locally does not repair this: in
+the real-world branch there is no reason the oracle's true key equals
+`key_bytes(k')` for that unrelated `k'`, so the simulation would compute
+arithmetic under `k'` while tags/addends come from an oracle keyed by a
+different, true `k` — an inconsistent hybrid, not the real scheme.
+Conversely, supplying `k'` to the PRF challenger so the two match means
+the reduction already knows the tested key, trivializing (and thus
+invalidating) its "distinguishing advantage." Since the IND-CCA bound
+composes `B1` and `B2`'s advantages (Bellare–Namprempre), it inherits the
+same gap.
+
+**Fix (proof-level).** `docs/napseq-eprint-preprint.tex` adds a new
+remark (`rem:cvf13`) spelling out the gap and both failed repairs, with
+cross-reference pointers at `B1`'s construction, `B2`'s construction, and
+the IND-CCA composition proof. It specifies the concrete resolution:
+reusing the KDF-subkey design already recorded as a residual under CVF8
+(`rem:cvf8-kdf`) — deriving an independent, uniformly-distributed HMAC
+subkey `sk = HKDF(kb)` and keying every domain derivation with `sk`
+instead of `kb`, while `k` is used only for the public arithmetic layer.
+Once `sk` is decoupled from `k`, the reduction may legitimately sample `k`
+locally (no longer correlated with the tested key) while genuinely
+forwarding domain-derivation calls to an oracle keyed by the PRF
+challenger's independent, hidden `sk`, closing the gap under the standard
+uniform-key HMAC-PRF assumption.
+
+**Scope of the fix:** `docs/napseq-eprint-preprint.tex` only — one new
+remark, an updated cross-reference in `rem:cvf8-kdf`, and short pointer
+sentences at the three affected proof steps. No change to any theorem's
+stated bound or game structure. No change to `napqes.py`,
+`rust/src/lib.rs`, or `C/napqes.c`: the KDF-subkey change that would fully
+close this gap is a wire-format and key-schedule change, out of scope for
+a proof-only correction (same boundary as the CVF8 residual).
+
+**Not fixed for v7 (residual, shared with the CVF8 residual above).**
+Without the key-schedule change, v7's Theorems 1–3 reductions still lack
+a valid, fully-specified simulation, for callers who have not migrated.
+
+**Fully closed (2026-07-07) via the v8 key schedule.** `generate_v8_key`
+now samples the arithmetic-layer prime tuple `k` and the HMAC subkey `sk`
+**independently** — `sk` is fresh CSPRNG output, never a function of `k` or
+`key_bytes(k)`. Under this decoupling, a reduction can sample its own
+`k'` locally (identically distributed to `KeyGen`'s output, and never
+required to equal the real `k`, since the CVF4 hiding lemma already shows
+the masked blob is independent of the token structure's content) to run
+the arithmetic layer, while genuinely forwarding every domain-derivation
+call to an external PRF oracle keyed by the real, hidden `sk` — the
+simulation the audit finding showed was impossible under v7's single-key
+schedule. See `docs/napseq-eprint-preprint.tex`, "V8 Key Schedule and
+Synthetic Nonce", for the restated reductions under the v8 schedule. The
+Python and C reference implementations have not yet been ported to v8;
+this is tracked as a follow-up.
+
+**Requested action:** please confirm CVF13 can be marked **Fixed** for
+the v8 key schedule, with v7 retaining the previously-disclosed residual
+for callers who have not migrated.
 
 ---
 
@@ -19,7 +432,7 @@ at that point and update this file to reference the issue number.
 | **Affects** | `decrypt_stream` (napqes.py) |
 | **Introduced** | v5 streaming API |
 | **Owner** | TBD |
-| **Status** | **Fixed** — use `encrypt_stream_ae` / `decrypt_stream_ae` (Phase 3 implementation complete) |
+| **Status** | **Fixed — basic streaming format deprecated and forbidden for new ciphertext (CVF7)**; use `encrypt_stream_ae` / `decrypt_stream_ae` |
 | **Risk retired** | R9 |
 
 **Description.** `decrypt_stream` yields plaintext characters to the caller
@@ -49,9 +462,20 @@ that chunk — no unverified plaintext is ever released. A final sentinel tag
 (domain `0x09`) authenticates the total chunk count, preventing silent
 truncation at a chunk boundary. See SPEC.md §8.1 for the full wire format.
 
-**Recommendation.** New code should use `encrypt_stream_ae` /
-`decrypt_stream_ae`. The existing `encrypt_stream` / `decrypt_stream` pair
-is retained for backward compatibility with streams produced before this fix.
+**Recommendation.** New code MUST use `encrypt_stream_ae` /
+`decrypt_stream_ae`; as of the CVF7 fix (see
+`docs/napseq-eprint-preprint.tex` §sec:format-applicability and
+`SPEC.md` §8), the basic streaming format is **deprecated and forbidden**
+for producing new ciphertext — `encrypt_stream` / `decrypt_stream` are
+retained solely to decrypt streams produced before this fix. No protocol
+may be designed to accept the basic streaming format for new traffic, and
+no application should implement a "try v6s-ae, then fall back to
+`decrypt_stream`" negotiation: the wire layout carries no version/format
+discriminator byte, so such a fallback would recreate the exact
+induced-unsafe-decode hazard this fix closes. Format selection (block vs.
+streaming, v6s-ae vs. the deprecated basic format) is an out-of-band API
+contract agreed by both endpoints, not something inferred from ciphertext
+bytes.
 
 ---
 
@@ -63,22 +487,24 @@ is retained for backward compatibility with streams produced before this fix.
 | **Severity** | Low (hard error; no silent truncation) |
 | **Affects** | `_pad_message` (napqes.py L174–195); `encrypt_bytes`, `encrypt_str` |
 | **Owner** | TBD |
-| **Target phase** | Phase 3 step 3.7 (v7 wire-format design); Phase 5 step 5.4 (ship) |
+| **Target phase** | Deferred; requires a future wire-format bump (v8+) |
 | **Risk retired** | R10 (partial) |
 
-**Description.** The v6 padding scheme stores the plaintext length as a
+**Description.** The padding scheme stores the plaintext length as a
 2-byte big-endian integer (`len_hi, len_lo`) at the head of the padded
 block. This caps block-mode plaintext at `MAX_PLAINTEXT_CODEPOINTS = 0xFFFF`
 (65535) codepoints. Exceeding the cap raises `ValueError` immediately —
-there is no silent truncation.
+there is no silent truncation. This is unrelated to and unaffected by the
+v7/CVF1 token-encoding fix, which changed token serialisation width, not
+the length-prefix width.
 
 **Current mitigation.** Named constant `napqes.MAX_PLAINTEXT_CODEPOINTS`
 exported at module level; error message references it and `docs/CAVEATS.md`.
 Callers needing larger messages must split at the application layer.
 
-**Phase 3/5 fix.** v7 wire format raises the length prefix to 4 bytes
-(cap 2³²). v6 wire format remains the compliance anchor; v7 ships behind a
-feature flag only after ≥ 2 customers are blocked by the current cap.
+**Future fix.** A future wire-format version could raise the length prefix
+to 4 bytes (cap 2³²), shipped behind a feature flag only after ≥ 2
+customers are blocked by the current cap.
 
 ---
 
@@ -97,15 +523,18 @@ feature flag only after ≥ 2 customers are blocked by the current cap.
 block size (minimum 16). A passive observer seeing ciphertext length can
 therefore infer which power-of-two bucket `{16, 32, 64, …, 65536}` the
 plaintext length falls into, disclosing up to `⌈log₂(n)⌉` bits of length
-information.
+information. This is a distinct, deliberate leak from **CVF1** (fixed): CVF1
+was about ciphertext length leaking codepoint *values* even *within* the
+same bucket; CAV-003 is about the bucket boundary itself, which is an
+accepted design trade-off.
 
 **Current mitigation.** Leakage is disclosed in BRD.md §6 item 5,
 module docstring (napqes.py L11–14), and SPEC.md §6. Customers requiring
 full length-hiding must layer a fixed-frame transport.
 
-**Phase 5 option.** v7 wire format includes a documented fixed-frame
-padding option that hides plaintext length entirely. Ship only if customers
-request it.
+**Future option.** A future wire format could include a documented
+fixed-frame padding option that hides plaintext length entirely. Ship only
+if customers request it.
 
 ---
 
@@ -128,7 +557,16 @@ Noise tokens (HMAC-derived probability ∈ [0.75, 0.99]) inflate ciphertext
 further. Plus 16-byte nonce + 32-byte tag overhead.
 
 Compared to AES-GCM the expansion is substantial (typically 8–20×). This is
-by design — noise tokens are a confidentiality feature, not compression.
+by design — noise tokens are a **traffic-analysis-resistance / ciphertext
+length-decorrelation feature, not a content-confidentiality feature**, and
+not compression. Per-message content confidentiality (IND-CPA) rests
+entirely on the domain-`0x07` keystream and the domain-`0x03` HMAC tag; the
+noise/prime-token layer's genuine, distinct contribution is that ciphertext
+byte length is a function of `(key, nonce, padded length)` only — via the
+noise-position oracle (`0x00`) and noise probability (`0x02`) — and does
+not correlate with plaintext content. See `docs/audit_mitigation_responses.md`
+(CVF4) for the full analysis; this line previously overstated the layer's
+role as a confidentiality primitive, which the audit correctly flagged.
 The v6 binary format is ~53% smaller than the legacy v3 hex encoding.
 
 **No fix planned.** Expansion is a core property of the design. Document

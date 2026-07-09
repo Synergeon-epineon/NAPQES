@@ -1,4 +1,10 @@
-"""Generate deterministic Known-Answer Test vectors for NAPSEQ v6.
+"""Generate deterministic Known-Answer Test vectors for NAPSEQ block mode.
+
+Block-mode (``api`` absent or ``"block"``) vectors use the v7 fixed-width
+token wire format (post-CVF1 fix, see docs/CAVEATS.md); streaming-AE
+(``api == "stream_ae"``) vectors are unaffected and still use LEB128 tokens.
+The output file is still named ``v6_vectors.json`` for path stability across
+CI/docs/tooling references, even though block-mode vectors are now v7.
 
 Run:
     python tests/gen_kats.py                  # write tests/kat/v6_vectors.json
@@ -63,7 +69,12 @@ def _encrypt_with_nonce(
     nonce: bytes,
     aad: bytes = b"",
 ) -> bytes:
-    """Replicate encrypt_bytes with a caller-supplied nonce (KAT use only)."""
+    """Replicate encrypt_bytes with a caller-supplied nonce (KAT use only).
+
+    Uses the v7 fixed-width token encoding (post-CVF1 fix, see
+    docs/CAVEATS.md) — the same encoding ``napqes.encrypt_bytes`` uses by
+    default.
+    """
     kb = napqes._key_bytes(key)
     noise_p = napqes._derive_noise_p(kb, nonce)
     padded = napqes._pad_message([ord(c) for c in message], kb, nonce)
@@ -89,7 +100,7 @@ def _encrypt_with_nonce(
                 real_idx += 1
                 break
 
-    varint_blob = napqes._b128_encode_tokens(cypher)
+    varint_blob = napqes._fixed_encode_tokens(cypher)
     ks = napqes._varint_keystream(kb, nonce, len(varint_blob))
     masked_blob = bytes(a ^ b for a, b in zip(varint_blob, ks))
     payload = nonce + masked_blob
@@ -126,7 +137,7 @@ def _encrypt_stream_ae_with_nonce(
     def _flush_chunk(data: bytes) -> bytes:
         tag = hmac_mod.new(
             kb,
-            b"\x08" + aad_len4 + aad + nonce + chunk_idx.to_bytes(4, "big") + data,
+            b"\x08" + nonce + aad_len4 + aad + chunk_idx.to_bytes(4, "big") + data,
             hashlib.sha256,
         ).digest()
         return len(data).to_bytes(4, "big") + data + tag
@@ -166,7 +177,7 @@ def _encrypt_stream_ae_with_nonce(
 
     final_tag = hmac_mod.new(
         kb,
-        b"\x09" + aad_len4 + aad + nonce + chunk_idx.to_bytes(4, "big"),
+        b"\x09" + nonce + aad_len4 + aad + chunk_idx.to_bytes(4, "big"),
         hashlib.sha256,
     ).digest()
     result.extend((0).to_bytes(4, "big") + final_tag)
@@ -426,7 +437,7 @@ def generate() -> list[dict]:
     vectors.append(_build_negative(
         "N002", "Ciphertext shorter than minimum (nonce+tag = 48 bytes)",
         KEY_4, (b"\x00" * 20).hex(),
-        expected_exception="not a valid authenticated v6 payload",
+        expected_exception="not a valid authenticated v7 payload",
     ))
 
     # N003: correct ciphertext but wrong key → tag mismatch
@@ -559,7 +570,7 @@ def generate() -> list[dict]:
     vectors.append(_build_negative(
         "N009", "Empty ciphertext rejected: no nonce, no tag, no authentication",
         KEY_4, "",
-        expected_exception="not a valid authenticated v6 payload",
+        expected_exception="not a valid authenticated v7 payload",
     ))
 
     # N008: v3-format colon-delimited string encoded as raw bytes.  When fed

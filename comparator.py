@@ -70,15 +70,21 @@ _PROPERTIES = [
     },
     {
         "property":    "Nonce-reuse consequence",
-        "napseq":      "Semantic security lost — key NOT recoverable algebraically",
+        "napseq":      "CRITICAL — encryption key fully recoverable (see CVF3)",
         "aes_gcm":     "CRITICAL — authentication key fully recoverable (Forbidden Attack)",
         "chacha20":    "CRITICAL — keystream reuse + auth key recoverable",
-        "napseq_wins": True,
+        "napseq_wins": False,
         "why": (
             "In AES-GCM and ChaCha20-Poly1305, reusing a nonce under the same key "
             "exposes the polynomial authentication key via simple GCD / linear algebra. "
-            "In NAPSEQ, nonce reuse leaks keystream structure but HMAC prevents direct "
-            "algebraic recovery of the master key."
+            "In NAPSEQ every internal value (noise positions, addends, keystream) is a "
+            "deterministic function of (key, nonce) only, and the real-token map "
+            "c -> c*k+a is an exact affine function. Under a reused nonce, two "
+            "known-plaintext tokens at the same position yield k and a exactly via "
+            "ordinary linear algebra (XOR-cancel the shared keystream, then solve "
+            "k = (t1-t2)/(c1-c2)) — this recovers the encryption key itself, which is "
+            "strictly worse than AES-GCM/ChaCha20-Poly1305 losing only their "
+            "authentication key. See docs/audit_mitigation_responses.md (CVF3)."
         ),
     },
     {

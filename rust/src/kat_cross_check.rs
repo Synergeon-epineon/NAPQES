@@ -1,18 +1,25 @@
-//! Rust KAT harness for NAPSEQ v6 (Phase 0, workstream 0.1 / ROADMAP §2.B8).
+//! Rust KAT cross-check for NAPSEQ v7 (Phase 0, workstream 0.1 / ROADMAP §2.B8).
 //!
 //! Reads `tests/kat/v6_vectors.json` from the repo root, exercises both the
 //! deterministic `encrypt_bytes_with_nonce` API (exact byte comparison) and
 //! the `decrypt_bytes` API for positive vectors, and asserts that negative
 //! vectors return an `Err`.
 //!
+//! This module lives inside the crate (rather than as an external
+//! `tests/kats.rs` integration test) because `encrypt_bytes_with_nonce` is
+//! `pub(crate)`, not part of the public API — see the CVF3 fix in
+//! `docs/CAVEATS.md`: an explicit, caller-chosen nonce is a key-recovery
+//! hazard for NAPQES, so the deterministic-nonce entry point must not be
+//! reachable from outside the crate. Only unit tests compiled with
+//! `#[cfg(test)]` (this module) and the FIPS power-on self-test
+//! (`crate::self_test`) may call it.
+//!
 //! Run:
-//!   cargo test --test kats -- --nocapture
+//!   cargo test --lib kat_cross_check -- --nocapture
 
-use napqes::{decrypt_bytes, encrypt_bytes_with_nonce, NONCE_SIZE};
+use crate::{decrypt_bytes, encrypt_bytes_with_nonce, NONCE_SIZE};
 use serde_json::Value;
 use std::path::Path;
-
-// serde_json is added as a dev-dependency in Cargo.toml by Phase 0 setup.
 
 fn load_vectors() -> Vec<Value> {
     // Path is relative to the Cargo workspace root (repo root / rust/).

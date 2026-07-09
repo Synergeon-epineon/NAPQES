@@ -98,8 +98,11 @@ remaining far above all recommended thresholds.
         including the key serialisation, HMAC derivation schedule,
         token construction, padding scheme, and authentication tag.
   \item We prove IND-CPA security (Section~\ref{sec:security}) under the
-        standard PRF assumption on HMAC-SHA256 and show that the
-        authentication tag provides EUF-CMA integrity.
+        PRF assumption on HMAC-SHA256, with an explicit key-entropy term
+        accounting for the fact that the HMAC key is a low-entropy,
+        structured prime tuple rather than a uniform bit-string
+        (Theorem~\ref{thm:ind-cpa}, Section~\ref{sec:cvf8-fix}), and show
+        that the authentication tag provides EUF-CMA integrity.
   \item We provide a post-quantum analysis (Section~\ref{sec:pq}) and a
         comparison with AES-GCM and ChaCha20-Poly1305
         (Section~\ref{sec:comparison}).
@@ -112,6 +115,11 @@ remaining far above all recommended thresholds.
         (CAV-003), and the ciphertext expansion bound (CAV-004).  The
         streaming Release of Unverified Plaintext issue (CAV-001) has been
         resolved by the online-AE streaming format introduced in this version.
+  \item We state the normative status of, and selection rule among, the
+        three wire encodings — block-mode v7, the deprecated basic
+        streaming format, and the online-AE streaming format
+        (Section~\ref{sec:format-applicability}) — closing audit finding
+        CVF7.
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -158,9 +166,76 @@ Throughout this paper:
   \item $\mathrm{HMAC}(K, M)$ denotes HMAC-SHA256 keyed with $K$ over message $M$.
   \item $\mathrm{be5}(x)$ denotes the 5 least-significant bytes of integer $x$,
         big-endian encoded.
-  \item $\mathrm{varint}(x)$ denotes unsigned LEB128 encoding of non-negative integer $x$.
+  \item $\mathrm{be8}(x)$ denotes the 8-byte big-endian encoding of integer $x$
+        (the fixed-width token field introduced by the CVF1 fix; see
+        Section~\ref{sec:construction} "Wire Format (Version 7)").
+  \item $\mathrm{varint}(x)$ denotes unsigned LEB128 encoding of non-negative
+        integer $x$, defined precisely in Definition~\ref{def:leb128} below.
+        \textbf{Retired for block-mode tokens as of the CVF1 fix}
+        (Section~\ref{sec:construction}); still used by the streaming format
+        and by legacy v6 ciphertext decoding.
   \item $\mathcal{P}$ denotes the set of prime integers in $[10^6, 9.9 \times 10^6]$.
 \end{itemize}
+
+\begin{remark}[Audit finding CVF17: LEB128 used without a definition or normative reference]
+\label{rem:cvf17}
+The notation above previously stated only that $\mathrm{varint}(x)$ is
+``unsigned LEB128 encoding of non-negative integer $x$,'' without ever
+defining LEB128 or citing a normative reference for it. As written, the
+byte layout, the continuation-bit convention, and whether a canonical
+(minimal-length) encoding is required were all left implicit, so the wire
+format could not be reproduced from the specification alone. Beyond being
+undefined, variable-length LEB128 decoding is error-prone in ways that
+have security relevance for a decoder (overlong/non-canonical encodings,
+continuation-bit handling, unbounded length); those concrete decoding
+hazards are tracked as a separate implementation-level finding and are not
+the subject of this remark. Definition~\ref{def:leb128} below states the
+encoding explicitly and specifies canonicality and rejection rules for
+decoding.
+\end{remark}
+
+\begin{definition}[Unsigned LEB128 encoding]
+\label{def:leb128}
+For a non-negative integer $x$, write $x$ in base $2^7$ as
+$x = \sum_{i=0}^{\ell-1} g_i \cdot 2^{7i}$ with each \emph{group}
+$g_i \in [0, 127]$, where $\ell$ is chosen minimally (i.e.\ $g_{\ell-1} \neq 0$,
+except $\ell = 1$ and $g_0 = 0$ when $x = 0$). The encoding
+$\mathrm{varint}(x)$ is the $\ell$-byte sequence $b_0 \| b_1 \| \cdots \|
+b_{\ell-1}$ (\emph{little-endian group order}: the least-significant
+7-bit group is emitted first) where
+\[
+  b_i = g_i \;\lor\; \bigl(\texttt{0x80} \text{ if } i < \ell-1 \text{ else } \texttt{0x00}\bigr),
+\]
+i.e.\ each byte carries 7 data bits in its low-order bits, and the
+high-order (8th) bit is a \emph{continuation flag}: set to $1$ if another
+group follows and $0$ on the final byte. Decoding reverses this: read
+bytes, accumulating $\mathrm{group}(b_i) = b_i \,\&\, \texttt{0x7F}$
+left-shifted by $7i$ into the result, until a byte with the continuation
+flag clear is read.
+
+\textbf{Canonicality.} A conforming decoder accepts \emph{only} the
+canonical, minimal-length encoding: the unique $\ell$ satisfying
+$2^{7(\ell-1)} \leq x < 2^{7\ell}$ for $x>0$ (equivalently, $b_{\ell-1} \neq
+\texttt{0x00}$), or the single byte \texttt{0x00} for $x=0$. Decoding
+\textbf{MUST reject}:
+\begin{enumerate}
+  \item \emph{Non-canonical (overlong) encodings} --- any encoding using
+        more bytes than the minimal $\ell$ above, including a trailing
+        group $g_{\ell-1} = 0$ appended after what would otherwise be the
+        final byte;
+  \item \emph{Inputs exceeding the maximum permitted integer width} ---
+        this specification bounds every $\mathrm{varint}$-encoded value to
+        $x < 2^{64}$ (consistent with the $\mathrm{be8}$ fixed-width field
+        it replaces for block-mode tokens, Section~\ref{sec:wire-format-v7}),
+        so a conforming decoder rejects any input requiring more than
+        $\lceil 64/7 \rceil = 10$ groups, and truncated input (a
+        continuation-flagged byte with no following byte).
+\end{enumerate}
+These rules make the mapping between integers and their encodings a
+bijection on $[0, 2^{64})$, eliminating the ambiguity (multiple valid
+encodings of the same integer) that overlong LEB128 encodings would
+otherwise introduce.
+\end{definition}
 
 \subsection{Key}
 
@@ -177,13 +252,48 @@ ordered tuple provides a key space of:
   \frac{|\mathcal{P}|!}{(|\mathcal{P}|-10)!} \approx 1.1 \times 10^{58} \approx 2^{196}.
 \]
 
+The relevant security quantity for Theorem~\ref{thm:ind-cpa} below is not
+the raw bit-length $8\cdot 5K = 40K$ of $\mathsf{key\_bytes}$, but the
+\emph{min-entropy} of $\mathbf{k}$ as sampled by $\mathsf{KeyGen}$:
+\[
+  H_\infty(\mathbf{k}) \;=\; \log_2\!\left(\frac{|\mathcal{P}|!}{(|\mathcal{P}|-K)!}\right)
+  \;\approx\; K\log_2|\mathcal{P}|,
+\]
+i.e.\ exactly $\log_2$ of the ordered-tuple key-space size above
+($\approx 196$ bits for $K=10$, $\approx 19$ bits for $K=1$). Because
+$\mathsf{kb}$ is a deterministic, injective encoding of $\mathbf{k}$,
+$H_\infty(\mathsf{kb}) = H_\infty(\mathbf{k})$: injective post-processing
+of a random variable never increases its min-entropy above the source's,
+and here it does not decrease it either (Remark~\ref{rem:min-K} discusses
+the one place this is not quite free --- HMAC's own key-length handling
+for $5K>64$ bytes). This distinction --- $H_\infty(\mathbf{k}) \ll 40K$ ---
+is the subject of audit finding \textbf{CVF8} below.
+
 \subsection{Domain-Separated HMAC Derivation}
+
+\begin{remark}[CVF2 fix: unified domain-first layout]
+An earlier revision of this construction used a \emph{nonce-first} layout
+$N \| d \| \mathsf{ctx}$ for domains $\{0,1,2,4,5,6,7\}$ but a
+\emph{domain-first}, AAD-binding layout for the authentication-tag and
+streaming-AE domains ($\{3,8,9\}$). Because Table~\ref{tab:domains} and this
+section stated only the nonce-first formula, reading the wire-format tag
+definition (Section~\ref{sec:wire-format-v7}) through that formula silently
+dropped the AAD from the modelled HMAC input, and Remark~\ref{rem:domsep}
+had to reason about the two layouts as separate groups, producing a
+probabilistic cross-group collision term instead of an unconditional
+separation argument. This was audit finding \textbf{CVF2}. The fix below
+unifies all ten domains onto a single domain-first layout, after which
+Remark~\ref{rem:domsep} needs only a single, unconditional injectivity
+argument.
+\end{remark}
 
 All internal values are computed as:
 \[
-  \mathrm{Derive}_d(\mathsf{kb}, N, \mathsf{ctx}) = \mathrm{HMAC}(\mathsf{kb},\ N \| d \| \mathsf{ctx}),
+  \mathrm{Derive}_d(\mathsf{kb}, N, \mathsf{ctx}) = \mathrm{HMAC}(\mathsf{kb},\ d \| N \| \mathsf{ctx}),
 \]
-where $d \in \{0,1,\ldots,6\}$ is a 1-byte domain separator.
+where $d \in \{0,1,\ldots,9\}$ is a 1-byte domain separator and every
+variable-width field inside $\mathsf{ctx}$ is length-prefixed (e.g.
+$\mathrm{be4}(|A|) \| A$ for AAD $A$).
 
 \begin{table}[h]
 \centering
@@ -194,16 +304,16 @@ Domain & Function & Context & Output \\
 \texttt{0x00} & Noise position & $\mathrm{be5}(ct\_pos)$ & Boolean \\
 \texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k_i - 1]$ \\
 \texttt{0x02} & Noise probability & (none) & $[0.75, 0.99]$ \\
-\texttt{0x03} & Auth tag (block) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathsf{payload}$ & 32 bytes \\
+\texttt{0x03} & Auth tag (block) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \widetilde{B}$ & 32 bytes \\
 \texttt{0x04} & Noise character & $\mathrm{be5}(ct\_pos)$ & $[32, 127]$ \\
 \texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k_i - 1]$ \\
 \texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
 \texttt{0x07} & Varint keystream & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
-\texttt{0x08} & Chunk tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| N \| \mathrm{be4}(i) \| \tilde{C}_i$ & 32 bytes \\
-\texttt{0x09} & Final sentinel tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| N \| \mathrm{be4}(n_{\mathrm{chunks}})$ & 32 bytes \\
+\texttt{0x08} & Chunk tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathrm{be4}(i) \| \tilde{C}_i$ & 32 bytes \\
+\texttt{0x09} & Final sentinel tag (stream AE) & $\mathrm{be4}(\lvert aad \rvert) \| aad \| \mathrm{be4}(n_{\mathrm{chunks}})$ & 32 bytes \\
 \bottomrule
 \end{tabular}
-\caption{Domain-separated HMAC derivation schedule. Domains \texttt{0x08}--\texttt{0x09} are used exclusively by the online-AE streaming format (Section~\ref{sec:streaming-ae}).}
+\caption{Domain-separated HMAC derivation schedule (CVF2 fix: unified domain-first layout, $\mathrm{Derive}_d(\mathsf{kb},N,\mathsf{ctx}) = \mathrm{HMAC}(\mathsf{kb}, d\|N\|\mathsf{ctx})$ for every domain; the nonce $N$ is applied uniformly by $\mathrm{Derive}_d$ and so is omitted from the Context column above). Domains \texttt{0x08}--\texttt{0x09} are used exclusively by the online-AE streaming format (Section~\ref{sec:streaming-ae}).}
 \label{tab:domains}
 \end{table}
 
@@ -221,46 +331,252 @@ Let $n = \lvert P \rvert$ (plaintext length in codepoints).  Define:
 \[
   B = \max(16,\ 2^{\lceil \log_2(n+1) \rceil}), \qquad P_d = [n \gg 8,\ n \wedge 0\mathrm{FF}] \| P \| \mathbf{pad},
 \]
-where $\mathbf{pad}$ is a $(B - n)$-codepoint sequence with each codepoint
-HMAC-derived via domain \texttt{0x06} in $[32,126]$.  The total padded
-length is $n + 2 + (B - n) = B + 2$ codepoints.
+where $\mathbf{pad} = (\mathbf{pad}_0, \ldots, \mathbf{pad}_{B-n-1})$ is a
+$(B - n)$-codepoint sequence, each codepoint HMAC-derived via domain
+\texttt{0x06} as made precise by Definition~\ref{def:padcodepoint} below.
+The total padded length is $n + 2 + (B - n) = B + 2$ codepoints.
+
+\begin{remark}[Audit finding CVF18: the padding-codepoint derivation formula was missing]
+\label{rem:cvf18}
+The text above previously named domain \texttt{0x06} and its output range
+$[32,126]$ (Table~\ref{tab:domains}) but never stated how the 32-byte
+output of $\mathrm{Derive}_{0x06}(\mathsf{kb}, N, \mathrm{be4}(pad\_idx))$
+is reduced to a single codepoint in $[32,126]$ --- which bytes are taken
+and what mapping is applied. Without that formula the padding is not
+reproducible from the specification alone, and an unstated reduction into
+a 95-value range is exactly the kind of construction that can introduce
+modulo bias if done naively. Definition~\ref{def:padcodepoint} below
+states the formula explicitly, matching the reference implementation
+(\texttt{napqes.py}'s \texttt{\_pad\_message}), and Remark~\ref{rem:modbias}
+is extended to cover its bias.
+\end{remark}
+
+\begin{definition}[Padding codepoint --- domain \texttt{0x06}]
+\label{def:padcodepoint}
+Let $w = \mathrm{Derive}_{0x06}(\mathsf{kb}, N, \mathrm{be4}(pad\_idx))[0{:}4]_{\mathrm{be32}} \in [0, 2^{32})$,
+i.e.\ the first 4 bytes of the 32-byte HMAC output, interpreted as an
+unsigned big-endian integer (the same $[0{:}n]_{\mathrm{be}k}$ convention
+used by Definitions~\ref{def:noisechar}--\ref{def:realaddend}). Then
+\[
+  \mathbf{pad}_{pad\_idx} = (w \bmod 95) + 32 \ \in [32, 126].
+\]
+\end{definition}
 
 \subsection{Token Construction}
 
+\begin{remark}[Audit finding CVF6: token-emission pseudocode's helper primitives were undefined]
+\label{rem:cvf6}
+The token-emission loop below invokes four helper primitives ---
+\texttt{is\_noise} (domain \texttt{0x00}), \texttt{derive\_noise\_char}
+(\texttt{0x04}), \texttt{derive\_noise\_addend} (\texttt{0x05}), and
+\texttt{derive\_real\_addend} (\texttt{0x01}) --- that were previously named
+only by Table~\ref{tab:domains}'s context/range columns, with no formula
+stating how the 32-byte $\mathrm{Derive}_d$ output is reduced to the
+required Boolean decision or bounded integer. As written, the pseudocode
+could not be executed and the token construction was not reproducible from
+the paper alone --- and the exact reduction (and hence any modulo bias) was
+unspecified for every one of these primitives. This was audit finding
+\textbf{CVF6}. Definitions~\ref{def:isnoise}--\ref{def:realaddend} below
+give each primitive as an explicit, byte-exact reduction of
+$\mathrm{Derive}_d(\mathsf{kb},N,\mathsf{ctx})$, matching the reference
+implementations exactly, and Remark~\ref{rem:modbias} bounds the resulting
+modulo bias for each. This is a specification-completeness fix only --- no
+algorithm or wire-format change; the reference implementations already
+implemented exactly the formulas given below.
+\end{remark}
+
 For each padded codepoint $c$ (with current $ct\_pos$ and $real\_idx$),
-the token is emitted as follows:
+the token is emitted by the loop below, which invokes the four helper
+primitives \texttt{is\_noise}, \texttt{derive\_noise\_char},
+\texttt{derive\_noise\_addend}, and \texttt{derive\_real\_addend}.
+Definitions~\ref{def:isnoise}--\ref{def:realaddend} give each primitive
+as an explicit reduction of $\mathrm{Derive}_d(\mathsf{kb},N,\mathsf{ctx})$
+(Table~\ref{tab:domains}) into its target range, so that the loop is
+fully specified and reproducible byte-for-byte.
+
+Throughout, $[0{:}n]_{\mathrm{be}k}$ denotes the first $n$ bytes of a
+32-byte HMAC-SHA256 digest, interpreted as an unsigned big-endian integer
+in $[0, 2^{k})$ where $k = 8n$ (e.g.\ $[0{:}4]_{\mathrm{be32}} \in
+[0,2^{32})$, matching the $[0{:}8]_{\mathrm{be64}}$ convention already used
+for the noise probability $t$ above).
+
+\begin{definition}[\texttt{is\_noise} --- domain \texttt{0x00}]
+\label{def:isnoise}
+Let $u = \mathrm{Derive}_{0x00}(\mathsf{kb}, N, \mathrm{be5}(ct\_pos))[0{:}8]_{\mathrm{be64}} / 2^{64} \in [0,1)$
+and let $p$ be the noise probability of the previous subsection. Then
+\[
+  \texttt{is\_noise}(ct\_pos) = \mathbf{1}[\,u < p\,].
+\]
+This is a strict-inequality threshold test on a 64-bit fraction, not a
+modular reduction, so it carries no modulo bias; the only deviation from a
+continuous uniform draw is the $2^{-64}$ discretisation granularity, which
+is cryptographically negligible.
+\end{definition}
+
+\begin{definition}[\texttt{derive\_noise\_char} --- domain \texttt{0x04}]
+\label{def:noisechar}
+Let $w = \mathrm{Derive}_{0x04}(\mathsf{kb}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \in [0,2^{32})$. Then
+\[
+  \texttt{derive\_noise\_char}(ct\_pos) = (w \bmod 96) + 32 \ \in [32,127].
+\]
+\end{definition}
+
+\begin{definition}[\texttt{derive\_noise\_addend} --- domain \texttt{0x05}]
+\label{def:noiseaddend}
+Let $v = \mathrm{Derive}_{0x05}(\mathsf{kb}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \in [0,2^{32})$. Then, for key element $k$,
+\[
+  \texttt{derive\_noise\_addend}(ct\_pos, k) = (v \bmod (k-1)) + 1 \ \in [1, k-1].
+\]
+\end{definition}
+
+\begin{definition}[\texttt{derive\_real\_addend} --- domain \texttt{0x01}]
+\label{def:realaddend}
+Let $v = \mathrm{Derive}_{0x01}(\mathsf{kb}, N, \mathrm{be5}(real\_idx))[0{:}4]_{\mathrm{be32}} \in [0,2^{32})$. Then, for key element $k$,
+\[
+  \texttt{derive\_real\_addend}(real\_idx, k) = (v \bmod (k-1)) + 1 \ \in [1, k-1].
+\]
+\end{definition}
+
+\begin{remark}[Modulo bias of the finite-range reductions]
+\label{rem:modbias}
+Definitions~\ref{def:padcodepoint}, \ref{def:noisechar}--\ref{def:realaddend}
+reduce a value $v$ drawn (pseudo-)uniformly from $[0,2^{32})$ into $[0,m)$ via
+$v \bmod m$ before shifting into the target range. For any modulus
+$m \le 2^{32}$, every residue class occurs either
+$\lfloor 2^{32}/m \rfloor$ or $\lceil 2^{32}/m \rceil$ times among the
+$2^{32}$ possible values of $v$, so each residue's probability deviates
+from the ideal $1/m$ by at most $2^{-32}$ in absolute terms, i.e.\ by a
+factor of at most $m/2^{32}$ relative to $1/m$. For
+\texttt{derive\_noise\_char} ($m = 96$), this bound gives a relative
+deviation below $3 \times 2^{-26} < 2^{-24}$. For the padding codepoint
+(Definition~\ref{def:padcodepoint}, $m = 95$; audit finding CVF18,
+Remark~\ref{rem:cvf18}), the same bound gives a relative deviation below
+$95/2^{32} < 2^{-25}$. For \texttt{derive\_noise\_addend} and
+\texttt{derive\_real\_addend}, $m = k - 1$ with $k \in \mathcal{P}
+\subset [10^6, 9.9\times 10^6] \subset [0, 2^{24})$, giving a relative
+deviation below $2^{24}/2^{32} = 2^{-8}$. In all cases the bias is
+statistically dominated by, and computationally no more exploitable
+than, the underlying PRF advantage against HMAC-SHA256, and is therefore
+negligible for the security claims of Section~\ref{sec:security}; no
+rejection sampling is required.
+\end{remark}
 
 \begin{lstlisting}[language=Python, caption={Token emission loop (pseudocode)}]
-while is_noise(ct_pos):          # domain 0x00
+while is_noise(ct_pos):          # Definition 1, domain 0x00
     k        = key[real_idx % K]
-    noise_c  = derive_noise_char(ct_pos)      # domain 0x04; in [32,127]
-    noise_a  = derive_noise_addend(ct_pos, k) # domain 0x05; in [1,k-1]
+    noise_c  = derive_noise_char(ct_pos)      # Definition 2, domain 0x04; in [32,127]
+    noise_a  = derive_noise_addend(ct_pos, k) # Definition 3, domain 0x05; in [1,k-1]
     emit  noise_c * k + noise_a
     ct_pos += 1
 
 k = key[real_idx % K]
-a = derive_real_addend(real_idx, k)           # domain 0x01; in [1,k-1]
+a = derive_real_addend(real_idx, k)           # Definition 4, domain 0x01; in [1,k-1]
 emit  c * k + a
 ct_pos += 1;  real_idx += 1
 \end{lstlisting}
 
-\begin{remark}
-  Because $k$ is prime and $a \in [1, k-1]$, every real token satisfies
-  $\gcd(\text{token}, k) < k$.  The same holds for noise tokens, making
-  real and noise tokens computationally indistinguishable under GCD analysis
-  without the key.
+\begin{remark}[Retracted: the GCD claim below was vacuous (audit finding CVF4)]
+  An earlier revision claimed that, because $k$ is prime and
+  $a \in [1, k-1]$, every real token satisfies $\gcd(\text{token}, k) < k$,
+  and that the same holds for noise tokens, making real and noise tokens
+  ``computationally indistinguishable under GCD analysis without the key.''
+  This is vacuous: since $k$ is prime and every addend
+  $a \in [1, k-1]$ by construction (Table~\ref{tab:domains}, domains
+  \texttt{0x01}/\texttt{0x05}), $\gcd(a, k) = 1$ unconditionally, and
+  $\gcd(\text{token}, k) = \gcd(c \cdot k + a,\ k) = \gcd(a, k) = 1$ for
+  \emph{every} token --- real or noise, with or without the key. The
+  statement requires no HMAC output and no noise-schedule design to hold,
+  so it establishes no indistinguishability property and is removed. The
+  layer's genuine, distinct contribution --- length-decorrelation from
+  plaintext content, not GCD-level structural indistinguishability --- is
+  stated and proved in Lemma~\ref{lem:tar} below.
 \end{remark}
 
-\subsection{Wire Format (Version 6)}
+\subsection{Wire Format (Version 7 --- CVF1 fix)}
+\label{sec:wire-format-v7}
 
+\begin{remark}[Audit finding CVF1 and the fix below]
+Version 6 of this construction encoded each token with
+$\mathrm{varint}(\cdot)$ (LEB128). Because $\mathrm{token} = c \cdot k + a$,
+the LEB128 byte-length of a token grows with the plaintext codepoint $c$: a
+codepoint near 1 yields a $\approx 2^{20}$ token ($\approx 3$ LEB128 bytes),
+while a codepoint near $2^{16}-1$ yields a $\approx 2^{36}$ token
+($\approx 6$ LEB128 bytes). Two plaintexts with equal padded codepoint
+count but different codepoint values therefore produced token blobs
+$B_0, B_1$ of \emph{different byte-length} with overwhelming probability,
+so the masked ciphertext $\widetilde{B}$ leaked plaintext content through
+its length alone --- an IND-CPA distinguishing advantage $\approx 1$. This
+invalidated the ``$B$ is the same length for both plaintexts'' step of the
+hiding lemma (Lemma~\ref{lem:hiding} below). The fix, described here, is to
+replace $\mathrm{varint}(\cdot)$ with a fixed-width encoding so that
+$\lvert B \rvert$ is a function only of the token \emph{count}, which in
+turn is a function of the padded codepoint count and the HMAC-derived,
+content-independent noise schedule (domain \texttt{0x00}) --- never of
+codepoint values. Lemma~\ref{lem:hiding} is restated and re-proved below
+under this v7 encoding; Section~\ref{sec:hiding-lemma-erratum} discusses the
+v6 argument's error precisely.
+\end{remark}
+
+Each token is serialised as $\mathrm{be8}(\mathrm{token})$ instead of
+$\mathrm{varint}(\mathrm{token})$:
+\[
+  B = \mathrm{be8}(\mathrm{token}[0]) \| \mathrm{be8}(\mathrm{token}[1]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N-1]),
+\]
+so $\lvert B \rvert = 8N$ where $N$ (real $+$ noise tokens) depends only on
+the padded codepoint count and $(\mathsf{kb}, N_{\text{once}})$ via the
+noise-position oracle (domain \texttt{0x00}) --- not on codepoint values.
+The overall ciphertext is unchanged in shape:
 \[
   C = N \| \widetilde{B} \| T,
 \]
-where $N$ is a 16-byte random nonce, $\widetilde{B}$ is the domain-\texttt{0x07}
-XOR-masked LEB128 token blob, and
-$T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N \| \widetilde{B})$
-is the 32-byte HMAC-SHA256 authentication tag.  The minimum valid ciphertext
-length is 48 bytes.
+where $N$ is a 16-byte random nonce and $\widetilde{B}$ is the
+domain-\texttt{0x07} XOR-masked fixed-width token blob, defined explicitly
+as
+\[
+  \widetilde{B} \;=\; B \,\oplus\, \mathrm{ks}_{0x07}(N)\bigl[0 : \lvert B \rvert\bigr],
+  \qquad
+  \mathrm{ks}_{0x07}(N) \;=\; \mathrm{Derive}_{0x07}(\mathsf{kb}, N, \mathrm{be4}(0)) \,\|\,
+  \mathrm{Derive}_{0x07}(\mathsf{kb}, N, \mathrm{be4}(1)) \,\|\, \cdots,
+\]
+i.e.\ the encode-then-mask order is: (1) assemble the fixed-width token
+blob $B$ from the token vector $(\mathrm{token}[0], \ldots,
+\mathrm{token}[N-1])$ produced by the token-construction loop above
+(Definitions~\ref{def:isnoise}--\ref{def:realaddend}); (2) generate the
+domain-\texttt{0x07} keystream $\mathrm{ks}_{0x07}(N)$ as the
+concatenation of 32-byte $\mathrm{Derive}_{0x07}$ blocks indexed
+$0, 1, 2, \ldots$ (Table~\ref{tab:domains}), generating only as many
+blocks as needed to cover $\lvert B \rvert$ bytes and truncating the final
+block to the remaining length; (3) XOR the two byte strings of equal
+length $\lvert B \rvert$. This equation is proved to yield a value
+statistically independent of, and (for fixed $N$) uniformly distributed
+given, $B$ in the ``Independence of $\mathrm{ks}(N^*)$ from $B$'' argument
+of Lemma~\ref{lem:hiding}'s proof, which this definition forward-references.
+\begin{remark}[Audit finding CVF19: $\widetilde{B}$ used without a defining equation at its point of introduction]
+\label{rem:cvf19}
+This subsection previously introduced $\widetilde{B}$ only in prose ---
+``the domain-\texttt{0x07} XOR-masked fixed-width token blob'' --- with no
+defining equation at this point; the relation
+$\widetilde{B} = B \oplus \mathrm{ks}_{0x07}(N)$, the encode-then-mask
+operation order, and the keystream length/truncation rule were stated
+only later, inside Lemma~\ref{lem:hiding}'s proof
+(Section~\ref{sec:hiding-lemma-erratum} and surrounding text). As a
+result, $C = N \| \widetilde{B} \| T$ could not be reproduced from this
+section alone. The equation above closes that gap by stating the
+definition explicitly here, with forward references to the token
+construction (Definitions~\ref{def:isnoise}--\ref{def:realaddend}) and the
+domain-\texttt{0x07} keystream construction it depends on.
+\end{remark}
+\[
+  T = \mathrm{Derive}_{0x03}\bigl(\mathsf{kb},\ N,\ \mathrm{be4}(|A|) \| A \| \widetilde{B}\bigr)
+\]
+is the 32-byte HMAC-SHA256 authentication tag, with $A$ the (possibly empty)
+AAD (CVF2 fix: this tag definition now matches Table~\ref{tab:domains}
+exactly and explicitly binds $A$, whereas an earlier revision's inline
+formula, $T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N \| \widetilde{B})$, omitted
+the AAD and was — read through the then-stated nonce-first
+$\mathrm{Derive}_d$ formula — inconsistent with the AAD-binding tag the
+reference code actually computed). The minimum valid ciphertext length is
+48 bytes.
 
 \subsection{Online-AE Streaming Format (v6s-ae)}
 \label{sec:streaming-ae}
@@ -274,59 +590,483 @@ masked varint blob.
 \[
   S = N \;\|\; \Bigl[\,\mathrm{be4}(\ell_i) \| \widetilde{C}_i \| T_i\,\Bigr]_{i=0}^{n-1} \;\|\; \mathrm{be4}(0) \| T_{\mathrm{final}},
 \]
-where each $\widetilde{C}_i$ is at most 1024 bytes of the masked varint blob and:
+where each $\widetilde{C}_i$ is at most 1024 bytes of the masked varint blob and (CVF2
+fix: nonce moved to the fixed byte $1..16$ offset shared with every other domain):
 \begin{align*}
   T_i &= \mathrm{HMAC}\!\left(\mathsf{kb},\ \texttt{0x08}
-          \| \mathrm{be4}(|A|) \| A \| N \| \mathrm{be4}(i) \| \widetilde{C}_i\right), \\
+          \| N \| \mathrm{be4}(|A|) \| A \| \mathrm{be4}(i) \| \widetilde{C}_i\right), \\
   T_{\mathrm{final}} &= \mathrm{HMAC}\!\left(\mathsf{kb},\ \texttt{0x09}
-          \| \mathrm{be4}(|A|) \| A \| N \| \mathrm{be4}(n)\right).
+          \| N \| \mathrm{be4}(|A|) \| A \| \mathrm{be4}(n)\right).
 \end{align*}
 The sentinel frame has $\ell = 0$; it signals end-of-stream.
 $\texttt{decrypt\_stream\_ae}$ verifies $T_i$ before yielding any plaintext from chunk $i$.
 $T_{\mathrm{final}}$ binds the total chunk count $n$, preventing silent truncation at a
 chunk boundary.  Chunk index $i$ in each $T_i$ prevents chunk-reordering attacks.
 
+\subsection{Format Applicability and Normative Status (CVF7 fix)}
+\label{sec:format-applicability}
+
+\begin{remark}[Audit finding CVF7]
+The preceding subsections define three distinct wire encodings — block-mode
+Wire Format Version 7 ($C = N \| \widetilde{B} \| T$,
+Section~\ref{sec:wire-format-v7}), the basic streaming format
+($\texttt{encrypt\_stream}$/$\texttt{decrypt\_stream}$, a single trailing
+tag), and the online-AE streaming format (v6s-ae,
+Section~\ref{sec:streaming-ae}, per-chunk tags) — without ever stating
+their relationship: whether they are interchangeable options, whether
+block-mode and streaming coexist by design, or how a decryptor determines
+which of the three a given ciphertext uses, since none of the three wire
+layouts carries a version/format discriminator byte. This was audit finding
+\textbf{CVF7}. Because the basic streaming format is RUP-prone (CAV-001,
+Section~\ref{sec:caveats}), leaving the relationship unstated has a security
+consequence: absent a stated selection rule, a receiver could be induced to
+invoke the unsafe decoder on a ciphertext produced by (or claimed to come
+from) the safe encoder. The remainder of this subsection states the rule
+that was missing.
+\end{remark}
+
+\paragraph{Block mode and streaming mode coexist by design; both are
+normative.} They are not alternative encodings of one message class chosen
+by preference — they serve two disjoint use cases:
+\begin{itemize}
+  \item \textbf{Block mode} (Wire Format v7, Section~\ref{sec:wire-format-v7})
+        is normative for bounded messages that fit in memory and require
+        length-bucket obfuscation via padding. It is the sole format
+        underlying $\mathsf{Enc}/\mathsf{Dec}$
+        (Definition~\ref{def:aead-triple}) and the sole format covered by
+        the IND-CPA (Theorem~\ref{thm:ind-cpa}) and INT-CTXT theorems of
+        Section~\ref{sec:security}.
+  \item \textbf{Streaming mode} is normative for unbounded or
+        memory-constrained plaintext that cannot be buffered whole. It
+        never applies block padding, so a streaming ciphertext always
+        discloses the exact plaintext length and is never interoperable
+        with a block-mode ciphertext (different framing, different token
+        encoding; Section~\ref{sec:streaming-ae}).
+\end{itemize}
+
+\paragraph{Within streaming mode, only the online-AE format is normative;
+the basic streaming format is deprecated and forbidden for new
+ciphertexts.}
+\begin{itemize}
+  \item \textbf{The online-AE streaming format (v6s-ae,
+        Section~\ref{sec:streaming-ae}) is, as of this fix, the sole
+        normative streaming format.} It MUST be used for every new
+        streaming deployment.
+  \item \textbf{The basic streaming format
+        ($\texttt{encrypt\_stream}$/$\texttt{decrypt\_stream}$) is
+        superseded, deprecated, and its use is forbidden for producing new
+        ciphertext.} It is retained solely so that streams produced before
+        this fix remain decryptable; no protocol may be designed to accept
+        it for new traffic, and no new ciphertext may be issued in this
+        format. This upgrades CAV-001 (Section~\ref{sec:caveats}) from
+        ``fixed, with the RUP-prone format still permitted at the caller's
+        discretion'' to ``fixed by supersession: the RUP-prone format is
+        deprecated and forbidden going forward.''
+\end{itemize}
+
+\paragraph{Format selection is an out-of-band API contract, not an in-band
+discriminator.} None of the three wire layouts carries a version/format
+byte, and this fix does not add one. Exactly as with key and nonce
+agreement, the two endpoints of a NAPQES deployment agree out-of-band, at
+the protocol/call-site level, on which of block mode,
+$\texttt{encrypt\_stream\_ae}$/$\texttt{decrypt\_stream\_ae}$, or the
+deprecated $\texttt{encrypt\_stream}$/$\texttt{decrypt\_stream}$ is in use
+for a given channel or message class — the same way a caller of any AEAD
+library chooses between a one-shot and a streaming construction rather than
+having the library sniff the format from ciphertext bytes. This is a
+deliberate design choice and not an omission: a self-describing in-band
+discriminator would itself have to be authenticated before a decryptor
+could safely act on it, which reintroduces the same
+trust-before-verification problem RUP already poses. Three consequences
+follow: (1) a decryptor is never expected to auto-detect format from
+ciphertext content alone; (2) a protocol built on NAPQES MUST NOT implement
+a ``try v6s-ae, then fall back to the basic streaming format'' negotiation,
+since that downgrade path would recreate exactly the induced-unsafe-decode
+hazard this fix closes; and (3) any future in-band discriminator, should
+one be added, would itself require authentication under the tag before a
+decryptor may act on it — that mechanism is deferred as out of scope for
+this fix.
+
+\subsection{The NAPQES AEAD Algorithm Triple}
+\label{sec:algorithm-triple}
+
+\begin{remark}[Audit finding CVF5]
+The subsections above state notation, key generation, per-domain HMAC
+derivation, noise probability, padding, the token-emission loop, and the
+wire format, but nowhere assembled them into the formal algorithm triple
+that an AEAD definition requires (cf.\ the Ascon v1.2
+submission~\cite{ascon2021}), and
+Section~\ref{sec:security} already invokes $\mathrm{NAPQES}.\mathsf{Enc}$
+and $\mathrm{NAPQES}.\mathsf{Dec}$ (e.g.\ the INT-CTXT proof,
+Section~\ref{sec:security}) without those symbols ever having been formally
+defined — a key-generation/setup algorithm, an encryption algorithm
+$\mathsf{Enc}(K,N,A,M)\to C$, and a decryption algorithm
+$\mathsf{Dec}(K,N,A,C)\to M$ or $\bot$, each with explicitly typed
+inputs/outputs and a stated correctness condition, were left implicit and
+scattered across the prose and pseudocode above. This was audit finding
+\textbf{CVF5}. Definition~\ref{def:aead-triple} below assembles the pieces
+already introduced into that triple; no algorithm, encoding, or derivation
+changes — this is a specification-assembly fix, not a code or wire-format
+change.
+\end{remark}
+
+\begin{definition}[NAPQES AEAD algorithm triple]\label{def:aead-triple}
+NAPQES is the triple $(\mathsf{KeyGen}, \mathsf{Enc}, \mathsf{Dec})$ over the
+following typed spaces:
+\begin{itemize}
+  \item Key space $\mathcal{K}$: ordered $K$-tuples of distinct elements of
+        $\mathcal{P}$ (Section~\ref{sec:construction}, ``Key'').
+  \item Nonce space $\mathcal{N} = \{0,1\}^{128}$.
+  \item AAD space $\mathcal{A} = \{0,1\}^{*}$.
+  \item Message space $\mathcal{M}$: finite sequences of Unicode codepoints
+        (Python \texttt{str} values, read via $\mathrm{ord}(\cdot)$) of length
+        at most \texttt{MAX\_PLAINTEXT\_CODEPOINTS} $= 2^{16}-1$, the limit
+        imposed by the 2-codepoint big-endian length prefix written during
+        padding (Section~\ref{sec:construction}, ``Plaintext Padding'').
+  \item Ciphertext space $\mathcal{C} = \{0,1\}^{*}$; every output of
+        $\mathsf{Enc}$ has length $16 + 8N + 32$ bytes, where $N$ is the
+        real-plus-noise token count for that message (minimum 48 bytes).
+\end{itemize}
+
+\paragraph{$\mathsf{KeyGen}(1^{\lambda}) \to \mathbf{k}$.}
+Draw $K$ distinct primes $k_1,\ldots,k_K$ uniformly without replacement from
+$\mathcal{P}$ by CSPRNG-driven rejection sampling
+(\texttt{generate\_prime\_numbers}); output
+$\mathbf{k} = (k_1,\ldots,k_K) \in \mathcal{K}$ and set
+$\mathsf{kb} = \mathsf{key\_bytes}(\mathbf{k})$ as in
+Section~\ref{sec:construction}, ``Key''.
+
+\paragraph{$\mathsf{Enc}(\mathbf{k}, N, A, M) \to C$.}
+On input $\mathbf{k}\in\mathcal{K}$, $N\in\mathcal{N}$, $A\in\mathcal{A}$,
+$M\in\mathcal{M}$: (1) compute $\mathsf{kb}$; (2) pad $M$ to $P_d$
+(``Plaintext Padding''); (3) run the token-emission loop over $P_d$ using
+$(\mathsf{kb}, N)$ (``Token Construction'') to obtain the token sequence
+$\mathrm{token}[0..N{-}1]$; (4) serialise
+$B = \mathrm{be8}(\mathrm{token}[0])\|\cdots\|\mathrm{be8}(\mathrm{token}[N{-}1])$
+(``Wire Format, Version 7''); (5) mask
+$\widetilde{B} = B \oplus \mathrm{Derive}_{0x07}(\mathsf{kb}, N, \cdot)$;
+(6) compute the tag
+$T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N, \mathrm{be4}(|A|)\|A\|\widetilde{B})$;
+(7) output $C = N \| \widetilde{B} \| T$.
+
+This is the algorithm the audit's recommended signature,
+$\mathsf{Enc}(K,N,A,M)\to C$, refers to, and it is exactly the internal,
+explicit-nonce encryption routine used by the FIPS power-on self-test and
+the KAT harness. The public, randomized API,
+$\mathsf{Encrypt}(\mathbf{k}, A, M) \triangleq \mathsf{Enc}(\mathbf{k}, N, A, M)$
+for $N \xleftarrow{\$} \{0,1\}^{128}$ sampled internally by a CSPRNG
+(\texttt{encrypt\_bytes}/\texttt{encrypt\_str}), is a randomized wrapper
+around $\mathsf{Enc}$ that never exposes $N$ as a caller-chosen input
+(the explicit-nonce $\mathsf{Enc}$ itself is not part of the public API —
+see \textbf{CVF3} for why caller-chosen nonces were restricted). This
+distinction — a deterministic, nonce-keyed core algorithm versus a
+randomized public wrapper that samples the nonce — is why nonce reuse
+(CVF3) is a DRBG-failure/replay hazard rather than a caller-misuse hazard
+in normal use, and why Theorem~\ref{thm:ind-cpa}'s experiment (which
+queries the public, randomized encryption oracle) and Lemma~\ref{lem:tar}'s
+per-nonce framing both apply to the same underlying $\mathsf{Enc}$.
+
+\paragraph{$\mathsf{Dec}(\mathbf{k}, A, C) \to M \text{ or } \bot$.}
+On input $\mathbf{k}\in\mathcal{K}$, $A\in\mathcal{A}$,
+$C\in\{0,1\}^{*}$: (1) if $|C| < 48$, output $\bot$; (2) parse
+$C = N \| \widetilde{B} \| T'$ with $N \in \{0,1\}^{128}$ the leading 16
+bytes and $T'$ the trailing 32 bytes; (3) compute $\mathsf{kb}$ and
+$T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N, \mathrm{be4}(|A|)\|A\|\widetilde{B})$;
+(4) if $T \neq T'$ (compared in constant time), output $\bot$; (5) else
+unmask $B = \widetilde{B} \oplus \mathrm{Derive}_{0x07}(\mathsf{kb}, N, \cdot)$,
+deserialise the fixed-width tokens, invert the token-emission loop using the
+same $(\mathsf{kb}, N)$-derived noise-position oracle and addends to recover
+$P_d$, strip the length prefix and padding, and output $M$.
+
+We write $\mathsf{Dec}$ as taking $(\mathbf{k}, A, C)$ rather than the
+audit's suggested $(\mathbf{k}, N, A, C)$ because NAPQES's wire format
+embeds $N$ as $C$'s first 16 bytes (step 2 above) rather than transmitting
+it out-of-band; this matches the actual \texttt{decrypt\_bytes(ciphertext,
+key, aad)} call signature and the $\mathsf{Dec}(\mathbf{k}, c^{*}, aad^{*})$
+notation already used in the INT-CTXT proof (Section~\ref{sec:security}),
+and is a trivial reparameterisation of the audit's four-argument form under
+$N := C[0{:}16]$ — no security-relevant difference results from embedding
+$N$ in $C$ versus passing it separately, since both are fully determined by
+the ciphertext, and the domain-separation argument of
+Remark~\ref{rem:domsep} does not depend on which of the two calling
+conventions is used.
+\end{definition}
+
+\begin{definition}[Correctness]\label{def:correctness}
+For every $\lambda$, every $\mathbf{k} \gets \mathsf{KeyGen}(1^{\lambda})$,
+every $N\in\mathcal{N}$, $A\in\mathcal{A}$, $M\in\mathcal{M}$:
+\[
+  \mathsf{Dec}\bigl(\mathbf{k},\, A,\, \mathsf{Enc}(\mathbf{k}, N, A, M)\bigr) = M.
+\]
+This holds by construction: $\mathsf{Enc}$'s token-emission loop (step 3)
+and $\mathsf{Dec}$'s loop-inversion step (step 5) both compute the
+noise-position oracle (domain \texttt{0x00}), the real/noise addends
+(domains \texttt{0x01}/\texttt{0x05}), and the padding codepoints (domain
+\texttt{0x06}) as pure, deterministic functions of $(\mathsf{kb}, N,
+\mathrm{position})$; given the same $\mathbf{k}$ and $N$, both algorithms
+therefore compute identical intermediate values at every position, so
+token emission and token inversion are exact inverses whenever $T = T'$.
+Correctness is additionally checked empirically by the cross-language KAT
+corpus (\texttt{tests/kat/v6\_vectors.json}) and the full regression suite
+across the Python, Rust, and C implementations
+(Section~\ref{sec:implementation}).
+\end{definition}
+
+\begin{remark}[Authentication-failure output $\bot$]
+The formal $\bot$ output of $\mathsf{Dec}$ is realised in all three
+reference implementations as a raised exception
+(\texttt{ValueError} in Python/Rust/C-equivalent error codes) rather than a
+sentinel return value; SPEC.md \S10 (``Error model'') enumerates every
+condition under which $\mathsf{Dec}$ raises rather than returns $M$,
+including tag mismatch, undersized ciphertext, and truncated streaming
+input. This is a standard, semantically equivalent realisation of $\bot$
+(cf.\ most software AEAD APIs, e.g.\ \texttt{cryptography.hazmat}), and every
+occurrence of ``$\mathsf{Dec}(\cdot)=\bot$'' or
+``$\mathsf{Dec}(\cdot)\neq\bot$'' in Section~\ref{sec:security} below
+should be read as, respectively, ``raises'' or ``does not raise''.
+\end{remark}
+
+\subsection{V8 Key Schedule and Synthetic Nonce (CVF3 / CVF8 / CVF13 fix)}
+\label{sec:v8}
+
+\begin{remark}[Why v7 cannot close CVF3/CVF8/CVF13 without a key-schedule change]
+\label{rem:v8-motivation}
+Three audit findings trace back to a single design choice shared by every
+wire format up to and including v7: \emph{one} secret, $\mathbf{k}$ (via
+$\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$), plays two unrelated roles
+--- it keys every domain-derivation HMAC call, \emph{and} it is the
+arithmetic-layer prime tuple used directly by the token map $c\mapsto
+c\cdot k+a$.
+\begin{itemize}
+  \item \textbf{CVF3.} Because every derived value is a deterministic
+        function of $(\mathsf{kb}, N)$, a repeated nonce reproduces an
+        identical keystream and addends; combined with the exact affine
+        token map, this permits exact key recovery from two known
+        plaintexts under one reused nonce (footnote to
+        Table~\ref{tab:comparison}). A CSPRNG-sampled nonce only makes
+        \emph{accidental} reuse improbable; it does nothing against DRBG
+        failure, restart/replay, or process-snapshot reuse.
+  \item \textbf{CVF8.} $\mathsf{kb}$ has only $H_\infty(\mathbf{k})\approx
+        19.16K$ bits of min-entropy (Remark~\ref{rem:cvf8}), a non-standard
+        HMAC-key hypothesis distinct from the textbook uniform-key PRF
+        conjecture.
+  \item \textbf{CVF13.} A reduction simulating $\mathsf{Enc}$ must know
+        $\mathbf{k}$ to run the arithmetic layer, yet the same $\mathbf{k}$
+        (via $\mathsf{kb}$) is supposed to be the PRF oracle's hidden key
+        --- a reduction that already knows the ``hidden'' key cannot
+        meaningfully distinguish it from random, so the PRF hop is vacuous
+        as written (Remark~\ref{rem:cvf13}).
+\end{itemize}
+Remark~\ref{rem:cvf8-kdf-erratum} shows that deriving
+$\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ --- the fix originally sketched
+under CVF8 --- does \emph{not} resolve CVF13, because $\mathsf{sk}$ remains
+a deterministic function of $\mathbf{k}$: knowing $\mathbf{k}$ still means
+knowing $\mathsf{sk}$. All three findings are closed simultaneously only by
+making the HMAC-keying secret and the arithmetic-layer secret
+\emph{independently sampled} random variables, with no deterministic
+function relating one to the other. This subsection specifies that
+construction (v8) precisely.
+\end{remark}
+
+\begin{definition}[V8 key generation]\label{def:keygen-v8}
+$\mathsf{KeyGen}_{v8}(1^\lambda) \to (\mathbf{k}, \mathsf{sk})$: draw
+$\mathbf{k} = (k_1,\ldots,k_K)$ exactly as in $\mathsf{KeyGen}$
+(Definition~\ref{def:aead-triple}), and, \emph{independently}, draw
+$\mathsf{sk} \xleftarrow{\$} \{0,1\}^{256}$ uniformly via CSPRNG
+(\texttt{rand::thread\_rng().fill\_bytes}, \texttt{generate\_v8\_key} in
+\texttt{rust/src/lib.rs}). No function relates $\mathsf{sk}$ to
+$\mathbf{k}$ or to $\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$; both
+$\mathbf{k}$ and $\mathsf{sk}$ are secret key material that MUST be
+generated, stored, and transmitted together.
+\end{definition}
+
+\begin{definition}[Synthetic nonce --- domain \texttt{0x0A}]\label{def:synthnonce}
+For $\mathsf{sk}\in\{0,1\}^{256}$, $A\in\{0,1\}^{*}$, $M\in\mathcal{M}$
+(encoded as UTF-8 bytes),
+\[
+  N_{v8}(\mathsf{sk}, A, M) \;=\; \mathrm{HMAC}\bigl(\mathsf{sk},\;
+    \texttt{0x0A} \,\|\, \mathrm{be4}(|A|) \,\|\, A \,\|\, M\bigr)[0{:}16].
+\]
+Unlike domains \texttt{0x00}--\texttt{0x09}, this derivation takes no
+nonce as input --- it is the step that \emph{produces} the nonce, in the
+manner of RFC~5297 SIV / AES-GCM-SIV's synthetic IV, and is keyed only by
+$\mathsf{sk}$, never by $\mathbf{k}$.
+\end{definition}
+
+\begin{definition}[V8 encryption and decryption]\label{def:aead-triple-v8}
+$\mathsf{Enc}_{v8}(\mathbf{k}, \mathsf{sk}, A, M) \to C$: (1) compute
+$N = N_{v8}(\mathsf{sk}, A, M)$ (Definition~\ref{def:synthnonce}); (2)
+run $\mathsf{Enc}(\mathbf{k}, N, A, M)$ (Definition~\ref{def:aead-triple})
+verbatim, with every occurrence of $\mathsf{kb}$ in that algorithm's steps
+(2)--(6) replaced by $\mathsf{sk}$ --- i.e.\ padding (domain
+\texttt{0x06}), the noise-position oracle (\texttt{0x00}), addends
+(\texttt{0x01}/\texttt{0x05}), noise characters (\texttt{0x04}), the
+\texttt{0x07} keystream, and the \texttt{0x03} tag are all keyed by
+$\mathsf{sk}$; only the token map $c\mapsto c\cdot k+a$ itself still uses
+$\mathbf{k}$ directly, exactly as in $\mathsf{Enc}$. Output $C$.
+$\mathsf{Dec}_{v8}(\mathbf{k}, \mathsf{sk}, A, C) \to M \text{ or } \bot$:
+run $\mathsf{Dec}(\mathbf{k}, A, C)$ verbatim with $\mathsf{kb}$ replaced
+by $\mathsf{sk}$ throughout. Correctness
+(Definition~\ref{def:correctness}) carries over unchanged, since the
+substitution is uniform and the same $\mathsf{sk}$ is used by both
+algorithms. Implemented as \texttt{encrypt\_bytes\_v8}/
+\texttt{decrypt\_bytes\_v8} in \texttt{rust/src/lib.rs}; the wire-format
+byte shape ($N\Vert\widetilde{B}\Vert T$) is unchanged, but v7 and v8
+ciphertexts are \emph{not} interoperable with each other (different
+keying and nonce derivation), and --- per the format-selection philosophy
+of Section~\ref{sec:format-applicability} --- callers must agree
+out-of-band on which schedule a given key/ciphertext pair uses.
+\end{definition}
+
+\begin{lemma}[V8 closes CVF3: nonce reuse across distinct messages is negligible]
+\label{lem:v8-cvf3}
+For any two queries $(A_1,M_1) \neq (A_2,M_2)$ to $\mathsf{Enc}_{v8}$
+under the same $\mathsf{sk}$, $\Pr[N_{v8}(\mathsf{sk},A_1,M_1) =
+N_{v8}(\mathsf{sk},A_2,M_2)]$ is bounded by
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}) +
+2^{-128}$ (a PRF hop identical in form to Lemma~\ref{lem:hiding}'s hop,
+plus the birthday bound on the truncated 128-bit output), for a PRF
+adversary $\mathcal{B}$ with access to $\mathsf{sk}$ only via domain
+\texttt{0x0A} queries. Consequently the affine-cancellation key-recovery
+route of the Table~\ref{tab:comparison} footnote --- which requires two
+\emph{distinct} known plaintexts under one \emph{reused} nonce --- applies
+to $\mathsf{Enc}_{v8}$ only with this same negligible probability, rather
+than with the $\approx 2^{-64}$ birthday probability of v7's independent
+CSPRNG nonce. Re-querying $\mathsf{Enc}_{v8}$ on an \emph{identical}
+$(A,M)$ pair reproduces the identical $N$ (and hence the identical $C$)
+deterministically by Definition~\ref{def:synthnonce} --- this discloses
+only plaintext equality, the standard, disclosed MRAE trade-off (cf.\
+AES-GCM-SIV), not a key-recovery or confidentiality break.
+\end{lemma}
+
+\begin{lemma}[V8 closes CVF8: the standard uniform-key PRF assumption applies]
+\label{lem:v8-cvf8}
+By Definition~\ref{def:keygen-v8}, $\mathsf{sk}\xleftarrow{\$}\{0,1\}^{256}$
+exactly, so $H_\infty(\mathsf{sk})=256$ and
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$
+against $\mathsf{sk}$ is the conventional, uniform-key HMAC-SHA256 PRF
+advantage the literature states --- no key-guessing term
+$q_F\cdot2^{-H_\infty(\cdot)}$ (Remark~\ref{rem:cvf8}) and no
+PRF-under-non-uniform-$D$ caveat (Remark~\ref{rem:prf-d}) is needed for a
+v8-restated Theorem~\ref{thm:ind-cpa}: simply replace $\mathsf{kb}$ by
+$\mathsf{sk}$ throughout the proof of Theorem~\ref{thm:ind-cpa} and drop
+the $q_F\cdot2^{-H_\infty(\mathbf{k})}$ term, since $\mathbf{k}$ no longer
+keys any HMAC call the adversary can query.
+\end{lemma}
+
+\begin{lemma}[V8 closes CVF13: the reductions are genuinely simulatable]
+\label{lem:v8-cvf13}
+Let $\mathcal{O}$ be a PRF challenger's oracle, keyed either by a uniform
+$\mathsf{sk}^*\xleftarrow{\$}\{0,1\}^{256}$ (real world) or by a truly
+random function (ideal world). Construct $\mathcal{B}$ as follows:
+$\mathcal{B}$ samples its own $\mathbf{k}'$ via
+$\mathsf{KeyGen}_{v8}$'s prime-sampling step (Definition~\ref{def:keygen-v8}),
+independently of $\mathcal{O}$; runs $\mathsf{Enc}_{v8}(\mathbf{k}',
+\mathsf{sk}^*, A, M)$ for each of $\mathcal{A}$'s queries by computing the
+arithmetic layer ($c\cdot k'_j+a$) itself using $\mathbf{k}'$, and
+forwarding every domain-\texttt{0x00}--\texttt{0x0A} derivation call to
+$\mathcal{O}$ in place of directly computing $\mathrm{HMAC}(\mathsf{sk}^*,\cdot)$.
+Because $\mathsf{sk}^*$ is sampled independently of $\mathbf{k}'$
+(Definition~\ref{def:keygen-v8}), $\mathcal{B}$ never needs to know
+$\mathsf{sk}^*$ to run this simulation --- unlike the v7 case
+(Remark~\ref{rem:cvf13}) and unlike the rejected
+$\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ repair
+(Remark~\ref{rem:cvf8-kdf-erratum}), where knowing the arithmetic key
+implied knowing the HMAC key. When $\mathcal{O}$ is real,
+$\mathcal{B}$'s simulation is distributed identically to
+$\mathsf{Enc}_{v8}(\mathbf{k}, \mathsf{sk}^*, \cdot, \cdot)$ for the true,
+independently-sampled $\mathbf{k}$ (both are: a uniformly-drawn prime
+tuple, together with $\mathsf{Enc}_{v8}$ run under the real $\mathsf{sk}^*$
+--- Lemma~\ref{lem:hiding}/Lemma~\ref{lem:tar} already establish that the
+adversary's view depends on $\mathbf{k}$ only through the
+$\mathsf{sk}^*$-masked blob and the content-independent token \emph{count},
+not through $\mathbf{k}$'s specific value); when $\mathcal{O}$ is ideal,
+it is distributed identically to the $G_1$ hop of
+Theorem~\ref{thm:ind-cpa}/Theorem~\ref{thm:int-ctxt}. Hence
+$|\Pr[\mathcal{A}\text{ wins real}]-\Pr[\mathcal{A}\text{ wins ideal}]| \leq
+\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$,
+exactly the PRF hop Theorem~\ref{thm:ind-cpa} and
+Theorem~\ref{thm:int-ctxt} require --- the simulation gap Remark~\ref{rem:cvf13}
+identified for v7 does not arise for v8.
+\end{lemma}
+
+\begin{remark}[Scope and residual]
+\label{rem:v8-scope}
+Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} close CVF3, CVF8, and CVF13
+for callers who adopt the v8 key schedule. The v7 wire format, key
+schedule, and their previously-documented residuals (Remarks~\ref{rem:cvf8-kdf},
+\ref{rem:cvf8-kdf-erratum}, \ref{rem:cvf13}) are unchanged and remain
+available for backward compatibility; v7 callers who need the stronger
+guarantees above must migrate to $\mathsf{KeyGen}_{v8}$/$\mathsf{Enc}_{v8}$/
+$\mathsf{Dec}_{v8}$. The v8 schedule is implemented in
+\texttt{rust/src/lib.rs} (\texttt{generate\_v8\_key},
+\texttt{encrypt\_bytes\_v8}, \texttt{decrypt\_bytes\_v8}) with unit tests
+covering round-trip correctness, tamper/AAD-mismatch rejection,
+same-message determinism (the disclosed MRAE trade-off), and
+distinct-message nonce distinctness. The Python (\texttt{napqes.py}) and C
+(\texttt{C/napqes.c}) reference implementations have not yet been ported
+to v8; this is tracked in \texttt{docs/CAVEATS.md} as a follow-up so all
+three languages offer the misuse-resistant path.
+\end{remark}
+
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Security Analysis}
 \label{sec:security}
 % ─────────────────────────────────────────────────────────────────────────────
 
+Theorem~\ref{thm:ind-cpa} (IND-CPA), the IND-CCA discussion of
+Section~\ref{sec:ind-cca}, and the INT-CTXT theorem below are all stated
+against the formal $(\mathsf{KeyGen}, \mathsf{Enc}, \mathsf{Dec})$ triple of
+Definition~\ref{def:aead-triple} and assume the correctness condition of
+Definition~\ref{def:correctness}; together, INT-CTXT (ciphertext integrity
+against an adversary with encryption-oracle access) and the underlying
+HMAC-SHA256 tag's collision/forgery resistance are the EUF-CMA-style
+unforgeability goal referenced informally in Section~\ref{sec:intro} —
+NAPQES does not define a standalone MAC verification key separate from
+$\mathsf{kb}$, so EUF-CMA unforgeability of the tag and INT-CTXT
+unforgeability of the ciphertext coincide here. Arguments below that elide
+$N$ or $A$ (e.g.\ writing $\mathsf{Enc}(\mathbf{k}, m)$) do so only where the
+elided argument is fixed or immaterial to the hybrid being analysed;
+the fully-typed calls are always as given in Definition~\ref{def:aead-triple}.
+
 \subsection{IND-CPA Security}
 
 \begin{remark}[Domain Separation of HMAC Inputs]\label{rem:domsep}
-Every internal NAPQES derivation invokes $F(\mathsf{kb},\cdot)$ with an
-input that belongs to one of two groups:
-\begin{itemize}
-  \item \emph{Nonce-first group} (domains $d \in \{0,1,4,5,6,7\}$):
-        input $= N \| d \| \mathsf{ctx}$, where $N$ is the 16-byte nonce
-        and $\mathsf{ctx}$ is a fixed-length positional counter
-        (5\,B for domains 0,1,4,5; 4\,B for domains 6,7).
-  \item \emph{Domain-first group}:
-        domain $0x02$ uses input $0x02 \| N$ (17\,B total);
-        domain $0x03$ (authentication tag) uses input
-        $0x03 \| \mathrm{be4}(|A|) \| A \| N \| \widetilde{B}$
-        (variable length, at minimum $1{+}4{+}16 = 21$\,B with empty AAD and empty blob).
-\end{itemize}
+As of the CVF2 fix, every internal NAPQES derivation invokes
+$F(\mathsf{kb},\cdot)$ with an input of the single, uniform shape
+\[
+  d \,\|\, N \,\|\, \mathsf{ctx},
+\]
+where $d \in \{\texttt{0x00},\ldots,\texttt{0x09}\}$ is a 1-byte domain
+separator, $N$ is the 16-byte nonce (always at byte offset $1..16$), and
+$\mathsf{ctx}$ is either a fixed-width positional counter (domains
+$0,1,4,5$: 5\,B; domains $6,7$: 4\,B; domain $2$: empty) or a
+length-prefixed, AAD-binding suffix (domains $3,8,9$:
+$\mathrm{be4}(|A|) \| A \| \cdot$).
 
 \noindent
-\textbf{Intra-group distinctness (nonce-first):}
-Two inputs $N\|d_1\|\mathsf{ctx}_1$ and $N\|d_2\|\mathsf{ctx}_2$ with
-$d_1 \neq d_2$ differ at byte position~16 (the domain byte); hence they
-are always distinct regardless of $\mathsf{ctx}$.
+\textbf{Cross-domain distinctness (unconditional).}
+Two inputs $d_1\|N_1\|\mathsf{ctx}_1$ and $d_2\|N_2\|\mathsf{ctx}_2$ with
+$d_1 \neq d_2$ differ at byte position~$0$ and are therefore always
+distinct, regardless of $N$ or $\mathsf{ctx}$ — no probabilistic argument
+is required.
 
 \noindent
-\textbf{Cross-group distinctness:}
-Domain-$0x02$ inputs have length 17\,B; all nonce-first inputs have
-length $\geq 21$\,B.  Different lengths $\Rightarrow$ no collision.
-Domain-$0x03$ inputs start with byte $0x03$, while nonce-first inputs
-start with $N[0]$ (the first byte of the nonce, uniform over
-$\{0,\ldots,255\}$).  For the first bytes to agree requires $N[0]=0x03$.
-Even then, a full-string collision requires the next three bytes of the
-tag input ($\mathrm{be4}(|A|)$) to equal $N[1{:}4]$, a 32-bit coincidence
-with probability $1/2^{32}$.  Over $q$ queries, the probability of any
-cross-group collision is therefore at most $q/2^{32}$, which is negligible
-for $q \ll 2^{32}$ and is dominated by the nonce-collision term
-$q^2/2^{128}$ already present in Theorem~\ref{thm:ind-cpa}.
+\textbf{Intra-domain injectivity.}
+Fix a domain $d$. Bytes $1..16$ of every input to $\mathrm{Derive}_d$ are
+the nonce $N$, so for a fixed $N$ the map $\mathsf{ctx} \mapsto d\|N\|\mathsf{ctx}$
+is injective as long as $\mathsf{ctx} \mapsto \mathsf{ctx}$ itself is
+injective. For domains $0,1,4,5,6,7$, $\mathsf{ctx}$ is a fixed-width
+big-endian counter, so this holds trivially. For domains $3,8,9$,
+$\mathsf{ctx} = \mathrm{be4}(|A|) \| A \| \mathsf{rest}$: because $\mathrm{be4}(|A|)$
+fixes $|A|$, the split between $A$ and $\mathsf{rest}$ is unambiguous, so
+distinct $(A, \mathsf{rest})$ pairs never collide — the length prefix makes
+the AAD-binding encoding injective. Consequently, for a fixed nonce $N$,
+distinct semantically-intended derivations under the same domain always
+query $F(\mathsf{kb},\cdot)$ at distinct inputs, and (by the cross-domain
+argument) derivations under different domains never collide either. No
+cross-group probabilistic term (as required under the pre-CVF2 mixed
+nonce-first/domain-first layout) is needed.
 
 In the remainder of Section~\ref{sec:security} we treat all
 $F(\mathsf{kb},\cdot)$ evaluations as queries to a single PRF; the
@@ -334,16 +1074,167 @@ domain-separation argument above guarantees that semantically distinct
 derivations always query the PRF at distinct inputs.
 \end{remark}
 
+\begin{remark}[Audit finding CVF8: the bound must depend on key entropy]
+\label{rem:cvf8}
+The original statement of Theorem~\ref{thm:ind-cpa} bounded
+$\mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})$
+purely in terms of $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$
+and a nonce-collision term, with no term depending on $K$ or $|\mathcal{P}|$.
+This is unsound: $\mathsf{kb}$ is not a uniformly random bit-string, it is
+$\mathsf{key\_bytes}(\mathbf{k})$ for $\mathbf{k}$ drawn from the
+$2^{H_\infty(\mathbf{k})}$-point prime-tuple distribution of the Key
+subsection, and the standard HMAC-SHA256 PRF conjecture is stated for a
+uniformly random key. An adversary can always recover $\mathbf{k}$ (and
+thereafter win the IND-CPA game outright) by exhaustively evaluating
+$\mathrm{HMAC}(\cdot, \cdot)$ offline against a list of candidate keys, at
+cost $\approx 2^{H_\infty(\mathbf{k})}$ evaluations in the worst case; this
+attack is entirely outside the uniform-key PRF game and so is invisible to
+a bound stated only in terms of $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}$.
+For small $K$ (e.g.\ $K=1$, $H_\infty(\mathbf{k})\approx 19$--$20$ bits)
+this search is trivial, so the original theorem was false as stated for
+admissible small key sizes, and imprecise even at the paper's default
+$K=10$. The restated theorem below adds the missing key-guessing term
+$q_F \cdot 2^{-H_\infty(\mathbf{k})}$ (Lemma~\ref{lem:key-guess}) and
+Remark~\ref{rem:min-K} gives the minimum $K$ the theorem requires to meet
+a target security level.
+\end{remark}
+
+\begin{remark}[Audit finding CVF9: INDCPA was never formally defined, and the challenge constraint was ill-specified]
+\label{rem:cvf9}
+The original text stated Theorem~\ref{thm:ind-cpa} and its proof against
+``the standard IND-CPA experiment'' without ever giving a formal IND-CPA
+definition (adversary, oracles, challenge, advantage) — the experiment was
+only sketched inline inside the proof of Game~$G_0$ below. That sketch
+then imposed a challenge constraint, ``$\mathcal{A}$ submits a challenge
+pair $(m_0,m_1)$ of \emph{equal padded length}'', which is non-standard
+(the textbook constraint is $|m_0|=|m_1|$, equal \emph{plaintext} length,
+with no padding-related precondition) and did not state which of three
+genuinely different quantities --- codepoint count, on-wire byte length,
+or the padded bucket $B$ (Plaintext Padding subsection) --- ``length''
+referred to. Left unresolved, this made the theorem statement not
+well-defined, and let the hiding lemma's proof (Lemma~\ref{lem:hiding})
+later invoke ``equal padded lengths by the IND-CPA requirement'' as an
+unproved assumption to close a step that would otherwise be circular.
+Definition~\ref{def:ind-cpa} below supplies the missing formal definition,
+using the standard constraint $|m_0|=|m_1|$ with the length metric stated
+explicitly (codepoints, matching how $\mathcal{M}$ is typed in
+Definition~\ref{def:aead-triple} --- the only metric NAPQES's algorithm
+triple is defined against); no ``equal padded length'' precondition is
+imposed on $\mathcal{A}$. Remark~\ref{rem:equal-padded-derived} then shows
+that equal padded length is a \emph{consequence} of this standard
+constraint here (not an additional restriction smuggled in to make the
+proof close), because the padding bucket $B$ is a deterministic function
+of codepoint count alone. Remark~\ref{rem:cvf9-byte-metric} states the
+residual scope limitation this leaves: the guarantee is with respect to
+$\mathcal{M}$'s codepoint metric, and does not, by itself, extend to
+external byte-string encodings of unequal codepoint count but equal byte
+length (audit finding CAV-003).
+\end{remark}
+
+\begin{definition}[IND-CPA security]\label{def:ind-cpa}
+Let $\Pi=(\mathsf{KeyGen},\mathsf{Enc},\mathsf{Dec})$ be the NAPQES
+algorithm triple of Definition~\ref{def:aead-triple}, and let
+$\mathsf{Encrypt}(\mathbf{k},A,M)\triangleq\mathsf{Enc}(\mathbf{k},N,A,M)$
+for $N\xleftarrow{\$}\mathcal{N}$ be its randomized public encryption
+oracle (Section~\ref{sec:algorithm-triple}). For a PPT adversary
+$\mathcal{A}=(\mathcal{A}_1,\mathcal{A}_2)$, define the experiment
+$\mathbf{Exp}^{\mathrm{ind\text{-}cpa}}_{\Pi,\mathcal{A}}(\lambda)$:
+\begin{enumerate}
+  \item $\mathbf{k}\gets\mathsf{KeyGen}(1^\lambda)$.
+  \item $\mathcal{A}_1$ is given adaptive oracle access to
+        $\mathsf{Encrypt}(\mathbf{k},\cdot,\cdot)$ and, after at most $q$
+        total queries (counted jointly with step 4), outputs
+        $(A^*,m_0,m_1,\mathsf{st})$ with $m_0,m_1\in\mathcal{M}$ subject to
+        exactly one constraint:
+        \[
+          |m_0| = |m_1|,
+        \]
+        where $|\cdot|$ denotes the number of Unicode codepoints of a
+        message in $\mathcal{M}$ --- the metric $\mathcal{M}$ is typed
+        against in Definition~\ref{def:aead-triple}. No other restriction
+        (padded length, byte length, or otherwise) is imposed on
+        $\mathcal{A}_1$'s choice of $m_0,m_1$.
+  \item The challenger samples $b\xleftarrow{\$}\{0,1\}$ and returns
+        $c^*\gets\mathsf{Encrypt}(\mathbf{k},A^*,m_b)$.
+  \item $\mathcal{A}_2(\mathsf{st},c^*)$, with continued oracle access to
+        $\mathsf{Encrypt}(\mathbf{k},\cdot,\cdot)$, outputs a bit $b'$.
+  \item The experiment outputs $1$ (``$\mathcal{A}$ wins'') iff $b'=b$.
+\end{enumerate}
+The advantage of $\mathcal{A}$ is
+\[
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})
+  \;=\;
+  \Bigl|\Pr\bigl[\mathbf{Exp}^{\mathrm{ind\text{-}cpa}}_{\Pi,\mathcal{A}}(\lambda)=1\bigr]-\tfrac12\Bigr|,
+\]
+and $\Pi$ is IND-CPA secure if this quantity is negligible in $\lambda$ for
+every PPT $\mathcal{A}$. This is the standard left-or-right IND-CPA notion
+for a symmetric encryption scheme, stated against NAPQES's typed algorithm
+triple with no bespoke preconditions; Theorem~\ref{thm:ind-cpa} is proved
+against exactly this definition, and $q$ there is the total query count of
+this definition.
+\end{definition}
+
+\begin{remark}[Equal padded length is derived, not assumed]
+\label{rem:equal-padded-derived}
+Definition~\ref{def:ind-cpa} imposes only the standard constraint
+$|m_0|=|m_1|$ (equal codepoint count); it does not restrict $\mathcal{A}$
+to equal \emph{padded} length. The Plaintext Padding subsection shows
+$B=\max(16,2^{\lceil\log_2(n+1)\rceil})$ is a deterministic function of
+$n=|P|$ (the codepoint count) alone, with no dependence on codepoint
+\emph{values}. Consequently $|m_0|=|m_1|$ already forces $m_0$ and $m_1$
+to share the same padding bucket $B$ and the same padded length $B+2$,
+with certainty --- this is a logical consequence of
+Definition~\ref{def:ind-cpa}'s standard constraint together with the
+padding formula, not an independent assumption. Every subsequent
+occurrence of ``$m_0,m_1$ have equal padded length'' below (Game $G_0$'s
+challenge step, Lemma~\ref{lem:hiding}'s proof) refers to this derived
+fact, closing the circularity audit finding CVF9 identified in the
+original text, which instead stated equal padded length as an unproved
+precondition and later invoked it as if it were the definition's own
+requirement.
+\end{remark}
+
+\begin{remark}[Scope: the metric is codepoints, not on-wire bytes (residual of CVF9)]
+\label{rem:cvf9-byte-metric}
+Definition~\ref{def:ind-cpa} measures $|m_0|=|m_1|$ in Unicode codepoints
+because that is the only metric $\mathcal{M}$ is formally typed against
+(Definition~\ref{def:aead-triple}); this is not a free choice among
+equally natural alternatives, since NAPQES's $\mathsf{Enc}$ takes a
+codepoint sequence, not a byte string, as its message input. It follows
+that Theorem~\ref{thm:ind-cpa} says nothing about a caller-level scenario
+in which two externally byte-equal-length plaintexts (e.g.\ two UTF-8
+byte strings of the same length) decode to \emph{different} codepoint
+counts: such a pair falls outside $\mathcal{A}$'s admissible challenge set
+entirely (they are not even a valid $(m_0,m_1)\in\mathcal{M}\times\mathcal{M}$
+challenge unless re-expressed at the codepoint level), and if instead
+compared as codepoint-level messages of unequal length, the padded bucket
+$B$ --- and hence ciphertext length --- may differ between them,
+consistent with the length-bucket leak already documented as CAV-003. A
+caller relying on NAPQES to hide the distinction between two plaintexts
+that are equal-length only in bytes, not in codepoints, is not covered by
+Theorem~\ref{thm:ind-cpa} and should consult CAV-003 (Section~\ref{sec:caveats}).
+\end{remark}
+
 \begin{theorem}[IND-CPA]\label{thm:ind-cpa}
-  Under the PRF assumption on HMAC-SHA256, the NAPQES block encryption scheme
-  is IND-CPA secure.  Specifically, for any PPT adversary $\mathcal{A}$ making
-  at most $q$ encryption queries there exists a PRF adversary $\mathcal{B}_1$
+  Under the PRF assumption on HMAC-SHA256 (Remark~\ref{rem:prf-d} makes
+  precise which key distribution this assumption is invoked against once
+  the guessing term below has been paid for, and Remark~\ref{rem:cvf13}
+  makes precise an additional simulation-gap caveat the reduction $\mathcal{B}_1$
+  is subject to), the NAPQES block encryption
+  scheme is IND-CPA secure (Definition~\ref{def:ind-cpa}) provided $K$ and
+  $|\mathcal{P}|$ are large enough
+  that $H_\infty(\mathbf{k})$ meets the target security level
+  (Remark~\ref{rem:min-K}). Specifically, for any PPT adversary
+  $\mathcal{A}$ making at most $q$ encryption queries and at most $q_F$
+  offline evaluations of $\mathrm{HMAC}(\cdot,\cdot)$ under
+  adversarially-chosen keys, there exists a PRF adversary $\mathcal{B}_1$
   with similar running time such that:
   \[
     \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})
     \leq
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
-    + \frac{q^2}{2^{128}}.
+    + \frac{q^2}{2^{128}}
+    + q_F \cdot 2^{-H_\infty(\mathbf{k})}.
   \]
 \end{theorem}
 
@@ -358,8 +1249,11 @@ and answers up to $q$ chosen-plaintext queries honestly using the real
 $\operatorname{NAPQES}.\mathsf{Enc}$ algorithm (which calls
 $F(\mathsf{kb},\cdot)=\operatorname{HMAC\text{-}SHA256}(\mathsf{kb},\cdot)$
 for all internal derivations).  After the query phase,
-$\mathcal{A}$ submits a challenge pair $(m_0,m_1)$ of equal padded length;
-the challenger samples $b\xleftarrow{\$}\{0,1\}$, returns
+$\mathcal{A}$ submits a challenge pair $(m_0,m_1)$ with $|m_0|=|m_1|$
+(Definition~\ref{def:ind-cpa}) --- which, by
+Remark~\ref{rem:equal-padded-derived}, already forces $m_0,m_1$ to have
+equal padded length; no separate precondition is imposed here.
+The challenger samples $b\xleftarrow{\$}\{0,1\}$, returns
 $c^*\gets\operatorname{NAPQES}.\mathsf{Enc}(\mathbf{k},m_b)$, and
 $\mathcal{A}$ wins if its output $b'=b$.
 
@@ -369,6 +1263,30 @@ replaced by a truly random function $\rho:\{0,1\}^*\to\{0,1\}^{256}$,
 sampled uniformly at the start of the experiment and evaluated lazily.
 Every call that would invoke $\operatorname{HMAC}(\mathsf{kb},x)$ now
 returns $\rho(x)$ instead.
+
+\begin{lemma}[Key-guessing bound (audit finding CVF8)]\label{lem:key-guess}
+Let $q_F$ upper-bound the number of evaluations of
+$\mathrm{HMAC}(\kappa,\cdot)$ that $\mathcal{A}$ performs \emph{offline},
+under keys $\kappa$ of its own choosing, in addition to its $q$ online
+encryption queries (this is exactly the resource the original theorem
+statement left unbounded --- see Remark~\ref{rem:cvf8}). Let $\mathrm{Guess}$
+denote the event that some such $\kappa$ equals the challenger's actual
+$\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$. Since $\mathbf{k}$ is sampled
+uniformly from the $2^{H_\infty(\mathbf{k})}$ ordered $K$-tuples of distinct
+primes in $\mathcal{P}$ (Key subsection) independently of $\mathcal{A}$'s
+(unbounded-time, but $q_F$-query) offline guessing strategy, a union bound
+over the $q_F$ guesses gives
+\[
+  \Pr[\mathrm{Guess}] \;\leq\; q_F \cdot 2^{-H_\infty(\mathbf{k})}.
+\]
+If $\mathrm{Guess}$ occurs, $\mathcal{A}$ can compute
+$F(\mathsf{kb},\cdot)$ directly and simulate the challenger perfectly,
+winning $G_0$ with probability $1$; this is the exhaustive-key-search
+attack the original, entropy-free bound could not see. We therefore only
+bound $\mathcal{A}$'s advantage in $G_0$ conditioned on
+$\overline{\mathrm{Guess}}$ via the PRF hop below, and add
+$\Pr[\mathrm{Guess}]$ back in when combining the bounds.
+\end{lemma}
 
 \begin{lemma}\label{lem:prf-hop}
 There exists a PRF adversary $\mathcal{B}_1$, running in time
@@ -386,12 +1304,125 @@ encryption), such that
 $\mathcal{B}_1$ is given a function oracle $\mathcal{O}(\cdot)$ that is
 either $F(\mathsf{kb},\cdot)$ (real) or $\rho(\cdot)$ (random).
 $\mathcal{B}_1$ simulates the IND-CPA experiment for $\mathcal{A}$, answering
-every internal HMAC call by forwarding to $\mathcal{O}$.
+every internal HMAC call by forwarding to $\mathcal{O}$, and
+(see Remark~\ref{rem:cvf13} for why this description alone is
+incomplete, and how the remaining gap is resolved) samples $\mathbf{k}$
+itself in order to run the arithmetic layer of $\mathrm{NAPQES}.\mathsf{Enc}$.
 If $\mathcal{O}=F(\mathsf{kb},\cdot)$, the simulation is identical to $G_0$;
 if $\mathcal{O}=\rho$, it is identical to $G_1$.
 Hence $\mathcal{B}_1$'s distinguishing advantage equals
-$|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]|$.
+$|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]|$,
+conditioned throughout on $\overline{\mathrm{Guess}}$ (Lemma~\ref{lem:key-guess}).
 \end{proof}
+
+\begin{remark}[What $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$ means here]
+\label{rem:prf-d}
+Conditioned on $\overline{\mathrm{Guess}}$, Lemma~\ref{lem:prf-hop} shows
+that distinguishing $G_0$ from $G_1$ is exactly as hard as distinguishing
+$F(\mathsf{kb},\cdot)$ from a random function \emph{for $\mathsf{kb}$ drawn
+from the prime-tuple distribution $D$ of the Key subsection, conditioned on
+not having been one of $\mathcal{A}$'s $q_F$ offline guesses} --- not for
+$\mathsf{kb}$ drawn uniformly from $\{0,1\}^{40K}$. These are different
+hypotheses: the HMAC-SHA256 PRF conjecture, as conventionally stated and
+studied, concerns a uniformly random key. $D$ is a highly structured,
+measure-zero subset of $\{0,1\}^{40K}$ (5-byte-aligned fields, each in a
+prime-valued range, no repeats, order-independent as a set) with min-entropy
+$H_\infty(\mathbf{k}) = \log_2|\mathcal{P}|!/(|\mathcal{P}|-K)! \ll 40K$.
+We write $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$
+in Theorem~\ref{thm:ind-cpa} to denote the PRF advantage against keys drawn
+from $D$ (conditioned on $\overline{\mathrm{Guess}}$) specifically --- a
+strictly weaker, and far less studied, assumption than the uniform-key one
+--- and we do not claim the standard uniform-key HMAC-SHA256 PRF assumption
+directly implies this quantity is negligible. Section~\ref{sec:cvf8-fix}
+discusses two ways to remove this residual non-standard assumption and
+restore a reduction to the standard, uniform-key conjecture.
+\end{remark}
+
+\begin{remark}[Audit finding CVF13: $\mathcal{B}_1$/$\mathcal{B}_2$ cannot simulate NAPQES encryption from oracle access alone]
+\label{rem:cvf13}
+Lemma~\ref{lem:prf-hop}'s proof (and, symmetrically, $\mathcal{B}_2$'s
+construction in the proof of Theorem~\ref{thm:int-ctxt}, Case~1) states
+that the reduction ``simulates the \dots\ experiment for $\mathcal{A}$,
+answering every internal HMAC call by forwarding to $\mathcal{O}$/$f$.''
+This is necessary but not sufficient: to answer $\mathcal{A}$'s
+encryption queries at all, the reduction must run
+$\mathrm{NAPQES}.\mathsf{Enc}(\mathbf{k},\cdot)$, and that algorithm uses
+$\mathbf{k}$ itself \emph{outside} of any HMAC call --- the token emission
+step computes $c\cdot k_j + a$ (Section~\ref{sec:construction}) and the
+admissible addend range $[1,k_j-1]$
+(Definitions~\ref{def:noiseaddend}--\ref{def:realaddend}) both depend on
+the specific prime $k_j$, not merely on $\mathrm{HMAC}(\mathsf{kb},\cdot)$'s
+output. Forwarding HMAC calls to an oracle $\mathcal{O}$ does not supply
+$\mathbf{k}$: in the standard PRF game $\mathcal{O}$'s key is sampled
+uniformly and kept secret from the distinguisher, so $\mathcal{B}_1$
+(resp.\ $\mathcal{B}_2$) has no way to extract $\mathbf{k}$ from oracle
+access, and cannot run the arithmetic layer as written.
+
+The reduction cannot be repaired by having $\mathcal{B}_1$ sample its own
+$\mathbf{k}'$ locally for the arithmetic layer: whenever
+$\mathcal{O}=F(\mathsf{kb},\cdot)$ (the real-world branch), there is no
+reason $\mathsf{kb}$ equals $\mathsf{key\_bytes}(\mathbf{k}')$ for the
+\emph{specific} $\mathbf{k}'$ that $\mathcal{B}_1$ chose --- $\mathbf{k}'$
+and the PRF challenger's hidden key are independent random variables. The
+resulting simulation would answer $\mathcal{A}$'s queries with tokens
+computed under $\mathbf{k}'$ but tags/addends/positions derived from
+$F(\mathsf{kb},\cdot)$ for an unrelated $\mathbf{k}$: an internally
+inconsistent hybrid that is a different scheme from
+$\mathrm{NAPQES}.\mathsf{Enc}(\mathbf{k}',\cdot)$ for any single key, and
+so does not establish $\Pr[\mathcal{A}\text{ wins }G_0]$ as claimed.
+Symmetrically, if $\mathcal{B}_1$ instead supplies its own $\mathbf{k}'$
+\emph{to} the PRF challenger (a ``chosen-key'' PRF game, so that
+$\mathcal{O}$'s hidden key really is $\mathsf{key\_bytes}(\mathbf{k}')$),
+$\mathcal{B}_1$ already knows the tested key and can compute
+$F(\mathsf{key\_bytes}(\mathbf{k}'),x)$ itself, making its distinguishing
+advantage against $\mathcal{O}$ trivially $\approx 1$ regardless of
+whether $\mathcal{O}$ is real or random --- this shows nothing, since the
+premise of a PRF game (the key is hidden from the distinguisher) is
+violated by construction whenever the same key material must also be
+disclosed, in the clear, to run the arithmetic layer.
+
+This defect is shared verbatim by the INT-CTXT reduction $\mathcal{B}_2$
+(Theorem~\ref{thm:int-ctxt}'s proof, Case~1), which likewise must run
+$\mathrm{NAPQES}.\mathsf{Enc}$ to answer $\mathcal{A}$'s $q$ encryption
+queries before evaluating any forgery, and it therefore propagates into
+the IND-CCA bound (Theorem~\ref{thm:ind-cca}), which is assembled from
+$\mathcal{B}_1$'s and $\mathcal{B}_2$'s advantages via the
+Bellare--Namprempre composition~\cite{bellare2000ae}: neither advantage
+is actually established for the real NAPQES scheme as the reductions are
+currently written, so the composed IND-CCA bound rests on the same
+unproven premise. This is a distinct defect from CVF8/Remark~\ref{rem:prf-d}
+(which concerns the \emph{key distribution} the PRF assumption is stated
+over) --- CVF13 concerns whether the reduction can be run \emph{at all},
+independent of which key distribution is assumed.
+
+\textbf{Resolution.} Remark~\ref{rem:cvf8-kdf}'s KDF-subkey design ---
+deriving an independent, uniformly-distributed
+$\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ and keying every domain
+derivation with $\mathsf{sk}$ in place of $\mathsf{kb}$, while
+$\mathbf{k}$ itself is used only for the (public, non-HMAC) arithmetic
+layer --- resolves both defects simultaneously: once $\mathsf{sk}$ is
+architecturally independent of $\mathbf{k}$, $\mathcal{B}_1$/$\mathcal{B}_2$
+may legitimately sample $\mathbf{k}$ locally (it is no longer correlated
+with the tested key at all, so no ``chosen-key'' game or coincidence is
+needed) while forwarding every domain-derivation call to an external
+oracle keyed by the PRF challenger's independent, hidden $\mathsf{sk}$.
+Absent that change, the reductions as written require an explicit,
+additional \emph{key-indistinguishability} step that this proof does not
+supply: a demonstration that a simulator holding $\mathbf{k}$ in the
+clear (for arithmetic) still cannot distinguish
+$\mathrm{HMAC}(\mathsf{key\_bytes}(\mathbf{k}),\cdot)$ from random using
+that knowledge alone --- i.e., that $\mathbf{k}$'s use in the arithmetic
+layer leaks nothing that helps predict HMAC outputs under
+$\mathsf{key\_bytes}(\mathbf{k})$. We do not supply that step here: it is
+not implied by the standard HMAC-PRF conjecture (which is silent about a
+distinguisher that possesses the key), and we are not aware of a
+suitable weaker primitive-level assumption. Theorem~\ref{thm:ind-cpa},
+Theorem~\ref{thm:int-ctxt}, and Theorem~\ref{thm:ind-cca} should
+therefore be read as conditioned on this gap until either the
+KDF-subkey design lands or the missing key-indistinguishability step is
+supplied; we flag this as an open residual, cross-referenced from
+Section~\ref{sec:cvf8-fix} and logged in Section~\ref{sec:caveats}.
+\end{remark}
 
 \paragraph{Nonce collision probability.}
 Let $\mathrm{Coll}$ denote the event that at least two of the $q+1$ nonces
@@ -419,49 +1450,51 @@ Fix any adversary view $V$ arising from the CPA query phase, which uses
 nonces $N_1,\ldots,N_q$.  Let $N^*$ be the challenge nonce.
 Under $\overline{\mathrm{Coll}}$, $N^*\notin\{N_1,\ldots,N_q\}$.
 
-In $G_1$, every challenge-phase derivation uses an input prefixed by $N^*$
-(e.g., $\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(j))$,
-$\rho(N^*\|\texttt{0x01}\|\mathrm{be5}(j))$, $\rho(N^*\|\texttt{0x02})$,
+In $G_1$, every challenge-phase derivation uses an input prefixed by the
+domain byte $d$ and then $N^*$
+(e.g., $\rho(\texttt{0x00}\|N^*\|\mathrm{be5}(j))$,
+$\rho(\texttt{0x01}\|N^*\|\mathrm{be5}(j))$, $\rho(\texttt{0x02}\|N^*)$,
 and so on for domains \texttt{0x03}--\texttt{0x07}).
-All CPA-phase evaluations used inputs prefixed by some $N_i\neq N^*$.
+All CPA-phase evaluations used inputs containing some $N_i\neq N^*$ at the
+same fixed byte $1..16$ offset.
 Since $\rho$ is a truly random function, its outputs on distinct inputs are
 independent, uniform $256$-bit values.
 Under $\overline{\mathrm{Coll}}$, the challenge inputs are disjoint from
 all CPA-phase inputs, so all challenge $\rho$-outputs are fresh, uniform,
 and independent of~$V$.
 
-In particular, the keystream masking the varint blob (domain~\texttt{0x07}) is:
+In particular, the keystream masking the token blob (domain~\texttt{0x07}) is:
 \[
   \mathrm{ks}(N^*)
-  = \rho(N^*\|\texttt{0x07}\|\mathrm{be4}(0))
+  = \rho(\texttt{0x07}\|N^*\|\mathrm{be4}(0))
     \;\|\;
-    \rho(N^*\|\texttt{0x07}\|\mathrm{be4}(1))
+    \rho(\texttt{0x07}\|N^*\|\mathrm{be4}(1))
     \;\|\;\cdots
   \quad(\text{truncated to }|B|\text{ bytes}),
 \]
-where $B$ denotes the varint-encoded token sequence.
+where $B$ denotes the fixed-width-encoded token sequence (Section~\ref{sec:wire-format-v7}).
 
 \smallskip
 \noindent\textbf{Independence of $\mathrm{ks}(N^*)$ from $B$ (OTP argument).}
-$B$ is assembled entirely from $\rho$-outputs queried under
-the nonce-first group with domain bytes in
+$B$ is assembled entirely from $\rho$-outputs queried under domains
 $\{\texttt{0x00},\texttt{0x01},\texttt{0x02},\texttt{0x04},\texttt{0x05},\texttt{0x06}\}$:
 \begin{itemize}
-  \item Noise/real positions: $\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(\cdot))$
-  \item Real/noise addends: $\rho(N^*\|\texttt{0x01}\|\mathrm{be5}(\cdot))$,
-        $\rho(N^*\|\texttt{0x05}\|\mathrm{be5}(\cdot))$
-  \item Noise probability: $\rho(\texttt{0x02}\|N^*)$ (domain-first, 17\,B)
-  \item Noise codepoints: $\rho(N^*\|\texttt{0x04}\|\mathrm{be5}(\cdot))$
-  \item Padding: $\rho(N^*\|\texttt{0x06}\|\mathrm{be4}(\cdot))$
+  \item Noise/real positions: $\rho(\texttt{0x00}\|N^*\|\mathrm{be5}(\cdot))$
+  \item Real/noise addends: $\rho(\texttt{0x01}\|N^*\|\mathrm{be5}(\cdot))$,
+        $\rho(\texttt{0x05}\|N^*\|\mathrm{be5}(\cdot))$
+  \item Noise probability: $\rho(\texttt{0x02}\|N^*)$
+  \item Noise codepoints: $\rho(\texttt{0x04}\|N^*\|\mathrm{be5}(\cdot))$
+  \item Padding: $\rho(\texttt{0x06}\|N^*\|\mathrm{be4}(\cdot))$
 \end{itemize}
-Each keystream block uses input $N^*\|\texttt{0x07}\|\mathrm{be4}(j)$ (length 21\,B,
-domain byte \texttt{0x07}).
-By Remark~\ref{rem:domsep} (intra-group distinctness), no keystream input
-$N^*\|\texttt{0x07}\|\mathrm{be4}(j)$ equals any $B$-construction input of the
-nonce-first group (they differ at byte position~16:
-\texttt{0x07} vs.\ \texttt{0x00}--\texttt{0x06}).
-The domain-$0x02$ input $\texttt{0x02}\|N^*$ has length 17\,B $\neq$ 21\,B,
-so it cannot equal any keystream input either.
+Each keystream block uses input $\texttt{0x07}\|N^*\|\mathrm{be4}(j)$, domain
+byte \texttt{0x07}.
+By Remark~\ref{rem:domsep} (cross-domain distinctness, unconditional — every
+input above shares the single uniform $d\|N\|\mathsf{ctx}$ shape), no
+keystream input $\texttt{0x07}\|N^*\|\mathrm{be4}(j)$ equals any $B$-construction
+input: they differ at byte position~$0$ (\texttt{0x07} vs.\ \texttt{0x00}--\texttt{0x06}).
+No probabilistic cross-group term is needed — the argument is exact, not an
+estimate over $q$ queries (this closes audit finding CVF2's cross-reference,
+issue \#848, which tracked the removal of that probabilistic term).
 Since $\rho$ is a truly random function, outputs at \emph{distinct} inputs
 are mutually independent; therefore
 $\mathrm{ks}(N^*)$ is statistically independent of~$B$.
@@ -471,27 +1504,62 @@ Consequently, the one-time-pad identity applies: for any fixed deterministic $B$
   \tilde{B}
   = B \oplus \mathrm{ks}(N^*)
   \;\overset{\mathrm{d}}{=}\;
-  \mathrm{Uniform}\bigl(\{0,1\}^{8|B|}\bigr),
+  \mathrm{Uniform}\bigl(\{0,1\}^{8|B|}\bigr).
 \]
-and since $B$ is the same length for both plaintexts $m_0, m_1$ (they have
-equal padded lengths by the IND-CPA requirement), $\tilde{B}$ is uniformly
-distributed independently of the plaintext bit~$b$ and the view~$V$.
+
+\smallskip
+\noindent\textbf{Equal byte-length of $B$ across $m_0, m_1$ (CVF1 fix).}
+Write $B = \mathrm{be8}(\mathrm{token}[0]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N-1])$, so
+$|B| = 8N$ (Section~\ref{sec:wire-format-v7}). The token count $N$ (real $+$
+noise tokens) is determined entirely by: (i) the padded codepoint count,
+which is equal for $m_0$ and $m_1$ because $|m_0|=|m_1|$
+(Definition~\ref{def:ind-cpa}) forces equal padded length
+(Remark~\ref{rem:equal-padded-derived} --- a derived fact, not an assumed
+requirement), and (ii) the noise-position oracle
+$\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(\cdot))$, which depends only on
+$N^*$ and $\mathsf{kb}$ (via $\rho$) --- \emph{not} on the codepoint values
+being encrypted. Since the challenger uses the same $N^*$ and the same key
+regardless of which of $m_0, m_1$ is encrypted, the sequence of
+noise/real decisions at each $ct\_pos$ is identical in both cases, so $N$ ---
+and hence $|B| = 8N$ --- is identical for $m_0$ and $m_1$. Therefore $\tilde{B}$
+is uniformly distributed over strings of a length that is a deterministic
+function of the (equal) padded length alone, independently of the
+plaintext bit~$b$ and the view~$V$.
+
+\begin{remark}[Erratum: the v6 argument was false]
+\label{sec:hiding-lemma-erratum}
+In the retired v6 construction, $B$ was instead
+$\mathrm{varint}(\mathrm{token}[0]) \| \cdots \| \mathrm{varint}(\mathrm{token}[N-1])$,
+and $\mathrm{varint}(\cdot)$ is \emph{not} a fixed-width encoding: its
+byte-length grows with $\mathrm{token} = c \cdot k + a$, hence with the
+plaintext codepoint $c$. Equal padded length only fixes $N$; it does not fix
+$\sum_i \lvert \mathrm{varint}(\mathrm{token}[i]) \rvert$, which depends on
+codepoint \emph{values}. The original v6 proof asserted ``$B$ is the same
+length for both plaintexts $m_0, m_1$ (they have equal padded lengths by the
+IND-CPA requirement)'' without justification --- this step is false, as
+demonstrated by audit finding CVF1 with an explicit distinguisher
+($m_0 = $ U+0001 repeated vs.\ $m_1 = $ U+FFFF repeated, equal padded
+length, ciphertexts of different length with overwhelming probability, IND-CPA
+advantage $\approx 1$). The fixed-width encoding of
+Section~\ref{sec:wire-format-v7} removes the dependency of $|B|$ on
+codepoint values, which is what restores the step above.
+\end{remark}
 
 \smallskip
 \noindent\textbf{Freshness of the authentication tag.}
 The tag is computed as
-$T = \rho(\texttt{0x03}\|\mathrm{be4}(|aad|)\|aad\|N^*\|\tilde{B})$
-(domain-\texttt{0x03} is domain-first; see Table~\ref{tab:domains}).
-The tag input has first byte $\texttt{0x03}$.
+$T = \rho(\texttt{0x03}\|N^*\|\mathrm{be4}(|aad|)\|aad\|\tilde{B})$
+(CVF2 fix: domain \texttt{0x03} uses the same unified $d\|N\|\mathsf{ctx}$
+layout as every other domain; see Table~\ref{tab:domains}).
+The tag input has first byte $\texttt{0x03}$ and, at bytes $1..16$, $N^*$.
 All CPA-phase tag inputs are of the form
-$\texttt{0x03}\|\mathrm{be4}(|aad_i|)\|aad_i\|N_i\|\tilde{B}_i$ with $N_i \neq N^*$;
-since $N^*$ appears at a fixed byte offset inside the tag input, these strings
-differ from the challenge tag input.
-All other challenge-phase $\rho$-inputs belong to the nonce-first group and
-start with $N^*[0]$; a full-string collision with the domain-first tag input
-would require $N^*[0]=\texttt{0x03}$ \emph{and} a 32-bit coincidence on
-$N^*[1{:}4]=\mathrm{be4}(|aad|)$, yielding probability at most $1/2^{40}$ per
-query and absorbed into the existing $q^2/2^{128}$ term.
+$\texttt{0x03}\|N_i\|\mathrm{be4}(|aad_i|)\|aad_i\|\tilde{B}_i$ with $N_i \neq N^*$;
+since $N^*$ occupies the same fixed byte offset in both, these strings differ
+unconditionally whenever $N_i \neq N^*$ --- which holds under
+$\overline{\mathrm{Coll}}$, with no further probabilistic argument needed.
+By Remark~\ref{rem:domsep} (cross-domain distinctness), the tag input also
+differs unconditionally from every other domain's $\rho$-input (they differ
+at byte position~$0$).
 Therefore $T$ is a fresh, uniformly distributed $32$-byte value independent
 of $b$ and~$V$.
 
@@ -501,87 +1569,583 @@ about $b$ from $c^*$, so
 $\Pr[\mathcal{A}\text{ wins }G_1\mid\overline{\mathrm{Coll}}]=\tfrac{1}{2}$.
 \end{proof}
 
+\begin{remark}[Scope of Lemma~\ref{lem:hiding} (audit finding CVF4)]
+\label{rem:hiding-scope}
+The proof above never inspects the internal structure of $B$: the
+OTP argument only uses that $\mathrm{ks}(N^*)$ (domain \texttt{0x07}) is
+independent of $B$, for \emph{any} fixed deterministic $B$. The prime
+multiplication $c \cdot k + a$ and the noise tokens assembled into $B$
+(domains \texttt{0x00}, \texttt{0x01}, \texttt{0x02}, \texttt{0x04},
+\texttt{0x05}, \texttt{0x06}) therefore play no role in this
+confidentiality argument: per-message content confidentiality (IND-CPA)
+reduces entirely to domain \texttt{0x07} being a secure keyed PRF and to
+the domain-\texttt{0x03} tag for integrity. This does not make the
+prime/noise layer redundant --- it establishes a different, and
+independent, property; see Lemma~\ref{lem:tar}.
+\end{remark}
+
+\subsection{Traffic-Analysis Resistance (a property independent of Lemma~\ref{lem:hiding})}
+\label{sec:traffic-analysis}
+
+\begin{lemma}[Ciphertext length is decorrelated from plaintext content]
+\label{lem:tar}
+For any two plaintexts $m_0, m_1$ of equal padded codepoint length $n$,
+encrypted under the same key $\mathsf{kb}$ and the same nonce $N$, the
+ciphertext byte-length $|C| = 16 + 8N_{\mathrm{tok}} + 32$ (where
+$N_{\mathrm{tok}}$ is the real-plus-noise token count) is identical for
+$m_0$ and $m_1$, and depends only on $(\mathsf{kb}, N, n)$ --- never on the
+codepoint values of $m_0$ or $m_1$ --- even in a hypothetical world where
+domain \texttt{0x07} is fully distinguishable from random (i.e.\ this
+holds independently of Lemma~\ref{lem:hiding}).
+\end{lemma}
+
+\begin{proof}
+The token-construction loop (Section~\ref{sec:wire-format-v7}) advances
+$ct\_pos$ by querying $\mathrm{is\_noise}(ct\_pos) = \rho(\texttt{0x00}\|N\|\mathrm{be5}(ct\_pos))$
+until $n$ real-token slots have been consumed; this sequence of oracle
+calls reads only $(\mathsf{kb}, N, ct\_pos)$ and never the codepoint value
+being emitted at a real-token slot. Consequently $N_{\mathrm{tok}}$ is a
+deterministic function of $(\mathsf{kb}, N, n)$ alone, identical for $m_0$
+and $m_1$ since both have padded length $n$ under the same $(\mathsf{kb},
+N)$. The fixed-width encoding $|B| = 8 N_{\mathrm{tok}}$
+(Section~\ref{sec:wire-format-v7}, CVF1 fix) fixes the blob length
+regardless of token \emph{values}, and domain \texttt{0x07} XOR-masks $B$
+without changing its length ($|\widetilde{B}|=|B|$). The tag $T$ is a
+fixed 32-byte HMAC output (Table~\ref{tab:domains}). Hence
+$|C| = 16 + 8N_{\mathrm{tok}} + 32$ is identical for $m_0, m_1$ and is a
+function of $(\mathsf{kb}, N, n)$ only, regardless of whether domain
+\texttt{0x07} is secure.
+\end{proof}
+
+\begin{remark}[Scope: this is not a confidentiality claim]
+Lemma~\ref{lem:tar} says nothing about whether ciphertext \emph{content}
+reveals $m_0$ vs.\ $m_1$ --- that is Lemma~\ref{lem:hiding} and Remark~\ref{rem:hiding-scope}
+above, which depend entirely on domain \texttt{0x07} and are indifferent to
+$B$'s internal structure. Lemma~\ref{lem:tar} instead formalises the
+noise/prime layer's actual, distinct contribution (audit finding CVF4):
+ciphertext length does not correlate with plaintext content, a property
+AES-GCM and ChaCha20-Poly1305 ciphertexts do not have, since their length
+is an exact linear function of plaintext length. The $2^{197}$--$2^{257}$
+prime-tuple key-space figures (Table~\ref{tab:comparison}) are a
+key-recovery-resistance statement about the keyed-HMAC construction as a
+whole, not a statement about what the token structure contributes to
+either Lemma~\ref{lem:hiding} or Lemma~\ref{lem:tar} individually.
+\end{remark}
+
 \paragraph{Combining the bounds.}
+By Lemma~\ref{lem:key-guess}, $\Pr[\mathrm{Guess}]\leq q_F\cdot 2^{-H_\infty(\mathbf{k})}$,
+and $\mathcal{A}$ wins $G_0$ with probability at most $1$ whenever
+$\mathrm{Guess}$ occurs, so
+\[
+  \Pr[\mathcal{A}\text{ wins }G_0]
+  \;\leq\;
+  q_F\cdot 2^{-H_\infty(\mathbf{k})}
+  \;+\;
+  \Pr[\mathcal{A}\text{ wins }G_0 \mid \overline{\mathrm{Guess}}].
+\]
+Conditioned throughout on $\overline{\mathrm{Guess}}$, the $G_0$/$G_1$ hop
+(Lemma~\ref{lem:prf-hop}, Remark~\ref{rem:prf-d}) and the hiding lemma
+proceed exactly as in the original argument:
 \begin{align*}
-  \Pr[\mathcal{A}\text{ wins }G_1]
-  &= \Pr[\mathrm{Coll}]\cdot\Pr[\text{wins}\mid\mathrm{Coll}]
-     +\Pr[\overline{\mathrm{Coll}}]\cdot\Pr[\text{wins}\mid\overline{\mathrm{Coll}}]\\
+  \Pr[\mathcal{A}\text{ wins }G_1 \mid \overline{\mathrm{Guess}}]
+  &= \Pr[\mathrm{Coll}]\cdot\Pr[\text{wins}\mid\mathrm{Coll},\overline{\mathrm{Guess}}]
+     +\Pr[\overline{\mathrm{Coll}}]\cdot\Pr[\text{wins}\mid\overline{\mathrm{Coll}},\overline{\mathrm{Guess}}]\\
   &\leq \Pr[\mathrm{Coll}]+\tfrac{1}{2}
-   \;\leq\; \frac{q^2}{2^{128}}+\tfrac{1}{2}.
+   \;\leq\; \frac{q^2}{2^{128}}+\tfrac{1}{2},
 \end{align*}
+so that
+\[
+  \Bigl|\Pr[\mathcal{A}\text{ wins }G_0 \mid \overline{\mathrm{Guess}}]-\tfrac{1}{2}\Bigr|
+  \;\leq\;
+  \bigl|\Pr[G_0\mid\overline{\mathrm{Guess}}]-\Pr[G_1\mid\overline{\mathrm{Guess}}]\bigr|
+  +\Bigl|\Pr[\mathcal{A}\text{ wins }G_1\mid\overline{\mathrm{Guess}}]-\tfrac{1}{2}\Bigr|
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1) + \frac{q^2}{2^{128}}.
+\]
 Therefore:
 \begin{align*}
   \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathrm{NAPQES}}(\mathcal{A})
   &= \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\tfrac{1}{2}\bigr| \\
-  &\leq \bigl|\Pr[G_0]-\Pr[G_1]\bigr|
-       +\bigl|\Pr[\mathcal{A}\text{ wins }G_1]-\tfrac{1}{2}\bigr| \\
-  &\leq \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1) + \frac{q^2}{2^{128}}.
+  &\leq q_F\cdot 2^{-H_\infty(\mathbf{k})}
+       + \Bigl|\Pr[\mathcal{A}\text{ wins }G_0 \mid \overline{\mathrm{Guess}}]-\tfrac{1}{2}\Bigr| \\
+  &\leq \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1) + \frac{q^2}{2^{128}}
+       + q_F\cdot 2^{-H_\infty(\mathbf{k})}.
     \qedhere
 \end{align*}
 \end{proof}
 
+\subsection{CVF8: Minimum Key Size and Removing the Residual Non-Standard Assumption}
+\label{sec:cvf8-fix}
+
+\begin{remark}[Minimum $K$ for a target security level]
+\label{rem:min-K}
+Since $|\mathcal{P}|\gg K$, $H_\infty(\mathbf{k}) = \log_2|\mathcal{P}|!/(|\mathcal{P}|-K)!
+\approx K\log_2|\mathcal{P}| \approx 19.16\,K$ bits for $|\mathcal{P}|\approx
+586{,}000$. Theorem~\ref{thm:ind-cpa}'s key-guessing term
+$q_F\cdot 2^{-H_\infty(\mathbf{k})}$ is negligible against the paper's
+own $\approx 128$-bit post-Grover target (Section~\ref{sec:intro}) only if
+$H_\infty(\mathbf{k}) \gtrsim 128$, i.e.\ $K \geq \lceil 128/19.16\rceil = 7$.
+$K=1$--$6$ ($H_\infty \approx 19$--$115$ bits) are \emph{not} admissible
+under this target: for $K=1$ in particular, $q_F\approx 2^{20}$ offline
+HMAC evaluations make the guessing term $\approx 1$, exactly the
+brute-force attack Remark~\ref{rem:cvf8} describes. The paper's default
+$K=10$ ($H_\infty\approx196$ bits) exceeds this minimum with margin.
+Implementations and future revisions of this specification MUST enforce
+$K\geq7$ (with the current $|\mathcal{P}|$) and SHOULD retain $K=10$ or
+larger; $K<7$ should be treated as a distinct, lower security level, not
+as "IND-CPA secure" in the sense of Theorem~\ref{thm:ind-cpa}.
+\end{remark}
+
+\begin{remark}[HMAC key-length handling]
+\label{rem:hmac-keylen}
+$\mathsf{kb}$ has length $5K$ bytes. HMAC-SHA256 hashes any key longer than
+its 64-byte block size down to 32 bytes before use, and zero-pads any
+shorter key up to 64 bytes; neither transformation is addressed by the
+derivation in Section~\ref{sec:construction}. For $K\leq12$ ($5K\leq60$
+bytes), $\mathsf{kb}$ is used directly, zero-padded to 64 bytes, and
+Theorem~\ref{thm:ind-cpa} applies to $\mathsf{kb}$ as defined. For $K\geq13$
+($5K\geq65$ bytes, outside the paper's default), the effective HMAC key
+becomes $\mathrm{SHA256}(\mathsf{kb})$: since $\mathsf{kb}\mapsto
+\mathrm{SHA256}(\mathsf{kb})$ is collision-resistant and its domain here
+($2^{H_\infty(\mathbf{k})}$ possible $\mathsf{kb}$ values) is far smaller
+than $2^{256}$, this map is injective with overwhelming probability and
+does not reduce $H_\infty(\mathbf{k})$ under the PRF-under-$D$ assumption
+of Remark~\ref{rem:prf-d}; Theorem~\ref{thm:ind-cpa} continues to apply
+with $\mathsf{kb}$ read as $\mathrm{SHA256}(\mathsf{key\_bytes}(\mathbf{k}))$
+in that regime. Either way, the theorem's guessing term is unaffected,
+since an adversary can still evaluate the same key-length-handling
+transformation offline for each guess at unit cost.
+\end{remark}
+
+\begin{remark}[Recommendation: deriving a uniform subkey removes the non-standard assumption]
+\label{rem:cvf8-kdf}
+Remark~\ref{rem:prf-d} left Theorem~\ref{thm:ind-cpa} resting on
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$
+being negligible \emph{for the specific structured distribution $D$}, not
+for a uniform key --- a strictly weaker and non-standard assumption
+relative to the literature's usual uniform-key HMAC-SHA256 PRF conjecture.
+This residual assumption can be removed entirely, restoring the standard
+uniform-key PRF game, by deriving a uniformly-distributed HMAC subkey from
+$\mathsf{kb}$ via a KDF before use, e.g.\
+$\mathsf{sk} = \mathrm{HKDF\text{-}SHA256}(\mathsf{salt}, \mathsf{kb}, \texttt{"napqes-hmac-key"})$,
+and keying every $\mathrm{Derive}_d$ call with $\mathsf{sk}$ in place of
+$\mathsf{kb}$. Modelling the KDF as a random oracle (standard for HKDF
+extract-then-expand), $\mathsf{sk}$ is statistically close to uniform over
+$\{0,1\}^{256}$ regardless of $D$'s structure, so
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$
+in a restated Theorem~\ref{thm:ind-cpa} would then legitimately mean the
+standard, uniform-key advantage, at the cost of one extra HKDF evaluation
+per key and a wire-format change (this KDF step is not present in the
+current reference implementations \texttt{napqes.py}/\texttt{rust/src/lib.rs}/\texttt{C/napqes.c}).
+We record this as the preferred long-term fix but have \emph{not} shipped
+it as part of the CVF8 response, since it changes the wire format and key
+schedule and is out of scope for a proof-only correction; until it lands,
+Theorem~\ref{thm:ind-cpa} as restated above (with the explicit
+$q_F\cdot2^{-H_\infty(\mathbf{k})}$ term, Remark~\ref{rem:prf-d}'s
+PRF-under-$D$ caveat, and Remark~\ref{rem:min-K}'s $K\geq7$ floor) is the
+accurate statement of what is actually proved.
+\end{remark}
+
+\begin{remark}[Erratum: HKDF-over-$\mathsf{kb}$ does not, by itself, close CVF13]
+\label{rem:cvf8-kdf-erratum}
+The paragraph above additionally claimed that deriving
+$\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ resolves the reduction-simulation
+gap of CVF13 (Remark~\ref{rem:cvf13}) ``once $\mathsf{sk}$ is independent
+of $\mathbf{k}$.'' This is imprecise and, on reflection, incorrect as a
+fix for CVF13 specifically: $\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ is a
+\emph{deterministic function} of $\mathbf{k}$ (via
+$\mathsf{kb}=\mathsf{key\_bytes}(\mathbf{k})$), so it is not
+statistically or computationally independent of $\mathbf{k}$ in the sense
+the simulation argument needs --- a reduction that already knows
+$\mathbf{k}$ (required to run the arithmetic layer) can compute
+$\mathsf{kb}$ and thus $\mathsf{sk}$ itself, so forwarding
+domain-derivation calls to an external oracle keyed by
+$\mathsf{sk}=\mathrm{HKDF}(\mathsf{kb})$ would be vacuous: the reduction
+never needs the oracle in the first place. The leftover-hash-style
+argument sketched above only shows $\mathsf{sk}$'s \emph{marginal}
+distribution is close to uniform, which is the right notion for CVF8
+(key-entropy) but the wrong notion for CVF13 (simulatability), which
+requires $\mathsf{sk}$ to be sampled \emph{independently of} $\mathbf{k}$,
+not merely to look uniform when $\mathbf{k}$ is also known. Closing CVF13
+therefore requires $\mathsf{KeyGen}$ to sample $\mathsf{sk}$ via a fresh,
+independent CSPRNG draw --- never as any deterministic function of
+$\mathbf{k}$ or $\mathsf{kb}$, HKDF included. Section~\ref{sec:v8} below
+specifies and Section~\ref{sec:implementation} implements exactly this:
+$\mathsf{KeyGen}_{v8}$ samples $\mathbf{k}$ and $\mathsf{sk}$ independently,
+closing both CVF8 (Section~\ref{sec:v8}, uniform $\mathsf{sk}$) and CVF13
+(Section~\ref{sec:v8}, genuinely simulatable reductions) simultaneously,
+for callers who adopt the v8 schedule.
+\end{remark}
+
 \subsection{INT-CTXT: Ciphertext Integrity}
 
-\begin{theorem}[INT-CTXT]
+\begin{remark}[Audit finding CVF10: the bound omitted the ideal-world tag-guessing term and was false for $q=0$]
+\label{rem:cvf10}
+The original statement of Theorem~\ref{thm:int-ctxt} bounded
+$\mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A})$ by
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2) + q^2/2^{128}$
+alone. This is unsound: the reduction $\mathcal{B}_2$'s advantage is, by
+definition, $\Pr[\text{forge}\mid\text{real}] - \Pr[\text{forge}\mid\text{random}]$,
+so a correct bound on $\Pr[\text{forge}\mid\text{real}]$ must carry the
+ideal-world term $\Pr[\text{forge}\mid\text{random}]$ forward, not discard
+it --- yet even against a \emph{truly random} function, an adversary that
+submits a candidate tag $T^*$ for a fresh (never-queried) input succeeds
+with probability exactly $2^{-256}$ per attempt, purely by guessing. The
+original statement's omission of this term made the bound literally false
+at $q=0$: an adversary making \emph{no} encryption queries and submitting
+a single uniformly random 256-bit tag as its forgery still wins the
+INT-CTXT game with probability $2^{-256} > 0$, strictly exceeding the
+original claimed bound of $0$ at $q=0$. The original proof also never
+stated $\mathcal{B}_2$'s distinguishing rule, so no advantage accounting
+connected $\mathcal{A}$'s forgery to $\mathcal{B}_2$'s output at all. The
+restated theorem below adds the missing $q_v/2^{256}$ term, where $q_v$ is
+the number of forgery-submission (verification) attempts $\mathcal{A}$
+makes, and the proof states $\mathcal{B}_2$'s decision rule explicitly
+(guess ``real'' iff $\mathcal{A}$'s forgery verifies). This omission
+propagated into the IND-CCA bound (Theorem~\ref{thm:ind-cca}), which
+invokes this theorem with $q_d$ verification queries and must therefore
+carry a matching $q_d/2^{256}$ term, added below.
+\end{remark}
+
+\begin{remark}[Audit finding CVF11: Case 2's ``nonce collision'' term treated an adversarially-chosen value as a random event]
+\label{rem:cvf11}
+The restated Theorem~\ref{thm:int-ctxt} above (post-CVF10) still carried a
+term $q^2/2^{128}$ into Case 2, justified by the sentence ``the probability
+of a nonce collision satisfying $N^*=N_i$ for some $i$ is at most
+$q/2^{128}\leq q^2/2^{128}$ by the union bound.'' This is unsound: $N^*$ is
+not sampled by any experiment. It is a component of the forgery $c^*$ chosen
+by $\mathcal{A}$ itself, adaptively, after observing $N_1,\ldots,N_q$ in the
+returned ciphertexts. $\mathcal{A}$ can therefore set $N^*=N_i$ for any $i$
+of its choosing with probability $1$; this is not a random event over which a
+union bound applies, and no such bound may be used to argue $\Pr[N^*=N_i]$
+is small. The error is moreover unnecessary: Case 2's own argument already
+disposes of $N^*=N_i$ \emph{deterministically}, via the injectivity of the
+domain-\texttt{0x03} tag-input encoding (either $\widetilde{B}^*\neq\widetilde{B}_i$,
+reducing to Case 1, or $\widetilde{B}^*=\widetilde{B}_i$, in which case the tag
+input is identical to a query-phase input and any $T^*\neq T_i$ is rejected
+outright) --- so no probability term is needed for Case 2 at all, and the
+$q^2/2^{128}$ term is removed below. The propagation of this term into the
+IND-CCA bound (Theorem~\ref{thm:ind-cca}, via ``$q+q_d$ total oracle
+queries'') is removed for the same reason; the genuine $q^2/2^{128}$ term
+that remains in Theorem~\ref{thm:ind-cca} comes only from the honestly-random
+challenge nonce in the IND-CPA hybrid (Lemma~\ref{lem:hiding}'s
+$\mathrm{Coll}$ event), not from INT-CTXT.
+\end{remark}
+
+\begin{remark}[Audit finding CVF12: stale pre-CVF2 tag-input formula survived in Theorem~\ref{thm:int-ctxt}'s Case~1 and the AAD Binding paragraph]
+\label{rem:cvf12}
+Theorem~\ref{thm:int-ctxt}'s Case~1 argument and the AAD Binding paragraph
+below its proof both wrote the tag input as
+$\texttt{0x03}\|\mathrm{be4}(|aad|)\|aad\|N\|\widetilde{B}$ --- the
+\emph{pre}-CVF2, AAD-first-then-nonce layout, in which the nonce sits at a
+variable byte offset depending on $|aad|$ --- even though
+Remark~\ref{rem:domsep} (the CVF2 fix) and the hiding lemma's
+``Freshness of the authentication tag'' paragraph (Lemma~\ref{lem:hiding})
+already state, correctly, that domain \texttt{0x03} uses the unified
+$d\|N\|\mathsf{ctx}$ layout with the nonce at the fixed offset $1..16$,
+matching the shipped code (\texttt{napqes.py}'s
+\texttt{\_compute\_auth\_tag}, and the equivalent Rust/C routines). This
+is a real internal inconsistency: the same construction was described by
+two different, mutually incompatible formulas in the same document, and
+the stale formula is precisely the one under which the audit's
+cross-group collision scenario is possible --- a nonce-first input from
+another domain, $N_i\|d\|\mathsf{ctx}$ (21--22 bytes for the
+fixed-width-counter domains), can equal an AAD-first tag input
+$\texttt{0x03}\|\mathrm{be4}(0)\|N^*$ (21 bytes, the empty-AAD,
+$|\widetilde{B}^*|=0$ minimal case) whenever $N_i$ happens to begin with
+$\texttt{0x03}\,\texttt{00}\,\texttt{00}\,\texttt{00}\,\texttt{00}$, an
+event of probability $\approx 2^{-40}$ per query (or $\approx q/2^{40}$
+over $q$ queries by the union bound) --- exactly the term the audit
+finding identifies as missing under that (stale) formula. Under the
+\emph{actual}, already-unified domain-first layout, this collision cannot
+occur at all: Remark~\ref{rem:domsep}'s cross-domain argument (inputs
+with different domain bytes differ at byte position~$0$, unconditionally)
+already rules out any \texttt{0x03} input colliding with a nonce-first
+domain's input, with no probabilistic term of any kind. The fix below
+corrects Theorem~\ref{thm:int-ctxt}'s Case~1 and the AAD Binding
+paragraph to the formula Remark~\ref{rem:domsep} and the hiding lemma
+already use, and grounds Case~1's freshness argument in injectivity (per
+Remark~\ref{rem:domsep}) rather than the previously imprecise ``prefixed
+by nonces'' phrasing --- matching the audit's own recommended fix for the
+domain-first case. We also rechecked Remark~\ref{rem:domsep} for the
+audit's separately-flagged claim that a $q/2^{32}$ cross-group term is
+``dominated by'' the nonce-collision term $q^2/2^{128}$ (mathematically
+false for realistic $q$, as the finding correctly notes); no such claim is
+present anywhere in the current Remark~\ref{rem:domsep} --- the CVF2
+rewrite already replaced the probabilistic cross-group argument with the
+unconditional injectivity argument, so there is no $q/2^{32}$ term left to
+(mis)dominate, and no bound in this document ever carried one. No further
+fix is required for that sub-claim beyond confirming its absence.
+\end{remark}
+
+\begin{theorem}[INT-CTXT]\label{thm:int-ctxt}
   Under the PRF assumption on HMAC-SHA256, NAPQES is INT-CTXT secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
-  encryption queries there exists a PRF adversary $\mathcal{B}_2$ with
-  similar running time such that:
+  encryption queries and at most $q_v \geq 1$ forgery-submission
+  (verification) attempts, there exists a PRF adversary $\mathcal{B}_2$
+  with similar running time such that:
   \[
     \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A})
     \leq
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-    + \frac{q^2}{2^{128}}.
+    + \frac{q_v}{2^{256}}.
   \]
+  For a single forgery attempt ($q_v = 1$, the minimal INT-CTXT
+  experiment), the last term is $2^{-256}$; it is what makes the bound
+  correctly nonzero at $q=0$ (Remark~\ref{rem:cvf10}). There is no
+  $q$-dependent term: $q$ (the number of encryption queries) affects only
+  which nonces $\mathcal{A}$ has seen, and Case 2 below disposes of
+  $N^*=N_i$ deterministically rather than probabilistically
+  (Remark~\ref{rem:cvf11}). The experiment grants $\mathcal{A}$ a genuine
+  encryption oracle and a genuine, \emph{adaptive} decryption/verification
+  oracle: $q_v$ counts real-time oracle queries, each answered with the
+  true decrypted plaintext or $\bot$ before $\mathcal{A}$ chooses its next
+  query, not a batch of final guesses evaluated only once at the end
+  (Remark~\ref{rem:cvf21}).
 \end{theorem}
+
+\begin{remark}[Audit finding CVF20: Case~2 ignored $aad^*$, and freshness was defined on $c^*$ alone]
+\label{rem:cvf20}
+An earlier draft of this proof (a) defined freshness as $c^* \notin
+\{c_1,\ldots,c_q\}$ --- a condition on the ciphertext alone --- and (b)
+split Case~2 into $\widetilde{B}^* \neq \widetilde{B}_i$ versus
+$\widetilde{B}^* = \widetilde{B}_i \wedge T^* \neq T_i$, asserting in the
+second sub-case that ``the tag input is identical to $x_i$.'' That claim
+holds only if additionally $aad^* = aad_i$, which was never assumed: if
+$aad^* \neq aad_i$ while $\widetilde{B}^* = \widetilde{B}_i$, then
+$x^* \neq x_i$ (Table~\ref{tab:domains}'s length-prefixed
+$\mathrm{be4}(|aad|)\|aad$ encoding is injective in $aad$), and this
+sub-case must route to the Case~1 fresh-input argument rather than being
+dismissed as unable to contribute. The standard INT-CTXT object of
+freshness is the pair $(c,aad)$, not $c$ alone: a forgery that replays
+$c_i$ verbatim with a new $aad^* \neq aad_i$ is a pair never returned by
+the encryption oracle, hence a legitimate forgery attempt, and (a) silently
+excluded it rather than proving it infeasible. The fix below (i) restates
+freshness over $(c^*,aad^*)$ and (ii) re-splits Case~2 on $x^*=x_i$ versus
+$x^*\neq x_i$, which subsumes and correctly routes the AAD-replay case.
+\end{remark}
+
+\begin{remark}[Audit finding CVF21: Theorem~\ref{thm:int-ctxt} must be proved in the adaptive, multi-verification-query oracle regime the IND-CCA proof actually invokes it in]
+\label{rem:cvf21}
+Theorem~\ref{thm:int-ctxt}'s statement described $q_v$ only as a count of
+``forgery-submission attempts,'' which reads as a batch of final guesses
+evaluated once at the end of the experiment. The IND-CCA proof
+(Theorem~\ref{thm:ind-cca}), however, invokes this theorem to bound
+$\Pr[D]$ for a forger $\mathcal{A}'$ that holds a genuine, real-time
+decryption oracle $\hat{\mathcal{D}}$ and answers each of $\mathcal{A}$'s
+$q_d$ decryption queries adaptively, with $\mathcal{A}$ observing each
+$\bot$/plaintext answer before choosing its next query --- a strictly
+stronger, Bellare--Namprempre-style multi-query oracle regime that the
+original statement, read literally, never established. Two further gaps
+compounded this, per the finding: (i) an earlier draft's Case~2 carried a
+$q^2/2^{128}$ term into the IND-CCA bound via ``$q+q_d$ total oracle
+queries'' (Remark~\ref{rem:cvf11}), substituting $q+q_d$ for the
+encryption-query parameter $q$ of a term that was, in any case, a
+collision bound over \emph{encryption-generated} nonces --- decryption
+queries generate no nonces, so that substitution had no basis in the
+theorem being invoked, independently of the term's own soundness; and
+(ii) the forger $\mathcal{A}'$ constructed in Theorem~\ref{thm:ind-cca}'s
+proof must itself produce the IND-CCA challenge ciphertext $c^*$ (by
+sampling $b$ and querying its own encryption oracle on $m_b$) to run the
+post-challenge phase of $\mathcal{A}$ at all --- $q+1$ encryption queries,
+not $q$ --- yet an earlier draft's simulation description omitted this
+challenge-generation step entirely while asserting, rather than showing,
+that ``$\mathcal{A}'$'s simulation is perfect.''
+
+\textbf{Resolution.} We resolve this by proving the bound holds in
+exactly the adaptive oracle regime required, rather than restating it as
+a weaker, single-shot game:
+\begin{itemize}
+  \item \emph{Adaptivity does not change the Case~1/Case~2 argument.}
+        Fix any sequence of $q_v$ adaptive decryption/verification queries,
+        each answered in real time before the next is chosen. Case~2
+        (above) is resolved by injectivity alone --- for a query with
+        $N=N_i$ for some encryption-query $i$, whether $x=x_i$ or
+        $x\neq x_i$ is fully determined by the query's own bytes,
+        independent of any other query's answer or ordering, so
+        adaptivity contributes nothing to Case~2 regardless of how many
+        queries have already been answered. Case~1 (a query with a fresh
+        $N$) reduces the query's success probability, in the ideal
+        world, to $f(x)$ for an $x$ that --- by the same injectivity
+        argument --- has never been queried to $f$ before, \emph{even
+        counting every previous decryption/verification query's own $x$
+        as part of $f$'s query history}: lazy sampling of the random
+        function $f$ gives every not-yet-queried input an independent
+        uniform $256$-bit value regardless of what other, distinct inputs
+        have already been resolved, so knowledge of every previous
+        query's outcome (accept or $\bot$) reveals nothing about $f$ at a
+        new, still-fresh point. The per-query success probability is
+        therefore exactly $2^{-256}$ regardless of adaptivity, position in
+        the query sequence, or $\mathcal{A}$'s strategy for choosing later
+        queries from earlier answers, and the union bound
+        $\Pr[\text{forge in Case 1 across all } q_v \text{ queries}] \leq
+        q_v/2^{256}$ therefore holds for the fully adaptive, real-time
+        oracle exactly as it did for a final batch of guesses --- the
+        \emph{bound} of Theorem~\ref{thm:int-ctxt} is unchanged, but it is
+        now established for the stronger regime the IND-CCA proof
+        requires, closing this half of the finding.
+  \item \emph{No substitution of $q+q_d$ into a nonce-collision parameter
+        is needed}, because none exists to substitute into:
+        Remark~\ref{rem:cvf11} already removed Case~2's $q^2/2^{128}$ term
+        from Theorem~\ref{thm:int-ctxt} entirely (it traced to a bogus
+        argument over the adversarially-chosen $N^*$, not to a genuine
+        collision over encryption-generated nonces), so
+        Theorem~\ref{thm:int-ctxt}'s bound has no $q$-dependent term at
+        all for the IND-CCA proof to (mis)parametrise by $q+q_d$. This was
+        gap~(i) above; it is moot under the current bound rather than
+        requiring a corrected substitution.
+  \item \emph{The forger's own challenge query, and the perfect-simulation
+        claim, are made explicit} in the revised construction of
+        $\mathcal{A}'$ below (Theorem~\ref{thm:ind-cca}'s proof):
+        $\mathcal{A}'$ is shown, step by step, to sample $b$ itself and
+        query its own encryption oracle on $m_b$ as its $(q\!+\!1)$-th
+        encryption query, to record the resulting $c^*$ for later
+        freshness bookkeeping (Remark~\ref{rem:cvf23}), and to forward
+        every one of $\mathcal{A}$'s decryption queries --- pre- \emph{and}
+        post-challenge (Remark~\ref{rem:cvf22}) --- to its own real
+        decryption oracle; perfection of the simulation is then derived
+        from the fact that every oracle $\mathcal{A}$ interacts with is a
+        real oracle keyed by the same hidden key throughout, rather than
+        merely asserted.
+\end{itemize}
+\end{remark}
 
 \begin{proof}
 The INT-CTXT experiment requires $\mathcal{A}$ to produce a \emph{fresh}
-valid ciphertext: a tuple $(c^*, aad^*)$ with
-$c^* \notin \{c_1, \ldots, c_q\}$ (the outputs of the $q$ encryption oracle
-calls) such that $\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c^*, aad^*) \neq \bot$.
+valid ciphertext: a pair $(c^*, aad^*)$ with
+$(c^*, aad^*) \notin \{(c_1,aad_1), \ldots, (c_q,aad_q)\}$ (the outputs of
+the $q$ encryption oracle calls, paired with their queried AAD;
+Remark~\ref{rem:cvf20}) such that
+$\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c^*, aad^*) \neq \bot$. In
+particular $\mathcal{A}$ may submit $c^* = c_i$ for some $i$ provided
+$aad^* \neq aad_i$ --- a replay-with-new-AAD attempt, addressed in Case~2
+below.
 
 Write $c^* = (N^*, \widetilde{B}^*, T^*)$.  For $\mathsf{Dec}$ to accept,
-$T^*$ must satisfy:
+$T^*$ must satisfy (domain-first layout, Remark~\ref{rem:domsep};
+corrected here per audit finding CVF12, Remark~\ref{rem:cvf12} --- an
+earlier draft of this proof used the pre-CVF2, AAD-first-then-nonce
+formula):
 \[
   T^* = \mathrm{HMAC}\!\left(\mathsf{kb},\
-        \texttt{0x03} \| \mathrm{be4}(|aad^*|) \| aad^* \| N^* \| \widetilde{B}^*\right).
+        \texttt{0x03} \| N^* \| \mathrm{be4}(|aad^*|) \| aad^* \| \widetilde{B}^*\right).
 \]
-Let $x^* = \texttt{0x03} \| \mathrm{be4}(|aad^*|) \| aad^* \| N^* \| \widetilde{B}^*$.
+Let $x^* = \texttt{0x03} \| N^* \| \mathrm{be4}(|aad^*|) \| aad^* \| \widetilde{B}^*$.
 
 \paragraph{Case 1: $N^*$ was not used in any encryption query.}
-All domain-\texttt{0x03} tag inputs from the query phase are prefixed by
-nonces $N_1, \ldots, N_q \neq N^*$, so $x^*$ was never submitted to
-$\mathrm{HMAC}(\mathsf{kb}, \cdot)$ during the query phase.  Producing the
-correct $T^*$ is therefore an HMAC MAC forgery at a fresh input.  We
-construct $\mathcal{B}_2$ that simulates the INT-CTXT experiment for
-$\mathcal{A}$, forwarding all HMAC calls to its own PRF oracle, and uses
-$\mathcal{A}$'s forgery $(x^*, T^*)$ to distinguish $\mathrm{HMAC}(\mathsf{kb},\cdot)$
-from a random function.
+Every domain-\texttt{0x03} tag input from the query phase has the form
+$x_i = \texttt{0x03} \| N_i \| \mathrm{be4}(|aad_i|) \| aad_i \| \widetilde{B}_i$,
+with $N_i$ occupying the same fixed byte offset $1..16$ that $N^*$
+occupies in $x^*$ (Remark~\ref{rem:domsep}: every domain-\texttt{0x03}
+input shares the uniform $d\|N\|\mathsf{ctx}$ shape). Since $N_i \neq N^*$
+for every query $i$ (Case~1 hypothesis), $x_i \neq x^*$ unconditionally at
+bytes $1..16$, regardless of $|aad_i|$, $|aad^*|$, or $\widetilde{B}_i$ ---
+freshness follows from injectivity of the encoding, not from an assumed
+nonce prefix, and no probabilistic cross-group collision term (of the
+kind audit finding CVF12 checked for; see Remark~\ref{rem:cvf12}) is
+needed or applies: Remark~\ref{rem:domsep}'s cross-domain distinctness
+additionally rules out $x^*$ colliding with any other domain's input. So
+$x^*$ was never submitted to $\mathrm{HMAC}(\mathsf{kb}, \cdot)$ during
+the query phase.  We construct
+$\mathcal{B}_2$, given oracle access to a function $f$ that is either
+$\mathrm{HMAC}(\mathsf{kb}, \cdot)$ (the \emph{real} world) or a uniformly
+random function $\{0,1\}^* \to \{0,1\}^{256}$ (the \emph{ideal} world):
+$\mathcal{B}_2$ simulates the INT-CTXT experiment for $\mathcal{A}$,
+forwarding every HMAC computation to $f$, and evaluates each of
+$\mathcal{A}$'s (at most $q_v$) forgery-submission attempts by computing
+the expected tag via $f$. This description shares, for the same reason,
+the simulation gap identified in Remark~\ref{rem:cvf13}: answering
+$\mathcal{A}$'s $q$ encryption queries requires running
+$\mathrm{NAPQES}.\mathsf{Enc}(\mathbf{k},\cdot)$, which needs $\mathbf{k}$
+itself for its arithmetic layer, not merely oracle access to $f$; see that
+remark for the resolution. \emph{Decision rule:} $\mathcal{B}_2$ outputs
+``real'' iff at least one of $\mathcal{A}$'s forgeries verifies (its
+candidate tag matches $f(x^*)$ for the corresponding tag input $x^*$);
+otherwise it outputs ``random''. By this construction,
+\[
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  =
+  \Pr[\mathcal{B}_2 \to \text{``real''} \mid f = \mathrm{HMAC}(\mathsf{kb},\cdot)]
+  -
+  \Pr[\mathcal{B}_2 \to \text{``real''} \mid f \text{ random}]
+  =
+  \Pr[\text{forge}\mid\text{real}] - \Pr[\text{forge}\mid\text{random}].
+\]
+In the real world this probability is exactly $\mathcal{A}$'s Case-1
+forgery probability. In the ideal world, $x^*$ was never queried, so
+$f(x^*)$ is a uniform 256-bit string independent of $\mathcal{A}$'s view;
+each of $\mathcal{A}$'s $q_v$ forgery attempts therefore succeeds only by
+blind guessing, with probability exactly $2^{-256}$ per attempt, so by the
+union bound $\Pr[\text{forge}\mid\text{random}] \leq q_v/2^{256}$.
+Rearranging the advantage equation,
+\[
+  \Pr[\text{forge in Case 1}]
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  + \frac{q_v}{2^{256}}.
+\]
+This ideal-world term is exactly what the original proof omitted
+(Remark~\ref{rem:cvf10}): it is what makes the bound correct at $q=0$,
+since an adversary submitting one uninformed random tag guess still
+forges with probability $2^{-256}$ even against a perfect random
+function.
 
 \paragraph{Case 2: $N^* = N_i$ for some query $i$.}
-Since $c^* \neq c_i = (N_i, \widetilde{B}_i, T_i)$, either
-$\widetilde{B}^* \neq \widetilde{B}_i$, in which case $x^* \neq x_i$ and
-the argument from Case~1 applies; or $\widetilde{B}^* = \widetilde{B}_i$
-and $T^* \neq T_i$, but then $c^*$ cannot be a valid ciphertext (the tag
-input is identical to $x_i$ yet the tag differs from the correct value),
-so this sub-case cannot contribute to $\mathcal{A}$'s success.
-
-The probability of a nonce collision satisfying $N^* = N_i$ for some $i$
-is at most $q / 2^{128} \leq q^2 / 2^{128}$ by the union bound.
-Combining both cases:
+Fix any query $i$ with $N_i = N^*$, and recall
+$x_i = \texttt{0x03} \| N_i \| \mathrm{be4}(|aad_i|) \| aad_i \| \widetilde{B}_i$.
+The correct split (Remark~\ref{rem:cvf20}) is on $x^* = x_i$ versus
+$x^* \neq x_i$, not on $\widetilde{B}^*$ alone:
+\begin{itemize}
+  \item \emph{$x^* \neq x_i$ for every query $i$ with $N_i = N^*$.} This
+        covers $\widetilde{B}^* \neq \widetilde{B}_i$ \emph{and} the
+        case $\widetilde{B}^* = \widetilde{B}_i$ with $aad^* \neq aad_i$
+        (by injectivity of $\mathrm{be4}(|aad|)\|aad$ in $aad$, holding
+        $N_i=N^*$ and $\widetilde{B}^*=\widetilde{B}_i$ fixed) --- in
+        particular the replay-with-new-AAD attempt
+        $(c^*,aad^*)=(c_i,aad^*)$, $aad^*\neq aad_i$, falls here. In every
+        such case $x^*$ was never submitted to
+        $\mathrm{HMAC}(\mathsf{kb},\cdot)$ during the query phase (it
+        differs from every $x_j$: from $x_i$ by the argument just given,
+        and from every $x_j$ with $N_j \neq N^*$ by the Case~1 argument
+        applied to that $j$), so the Case~1 reduction and bound apply
+        verbatim to this forgery attempt.
+  \item \emph{$x^* = x_i$ for some query $i$ with $N_i = N^*$.} By
+        injectivity of the tag-input encoding (Remark~\ref{rem:domsep}),
+        $x^*=x_i$ forces $aad^*=aad_i$ and $\widetilde{B}^*=\widetilde{B}_i$
+        jointly. Two sub-cases on the tag itself: if $T^* = T_i$, then
+        $c^*=(N^*,\widetilde{B}^*,T^*)=c_i$ and $aad^*=aad_i$, so
+        $(c^*,aad^*)=(c_i,aad_i)$ --- excluded by the freshness
+        requirement (Remark~\ref{rem:cvf20}), hence not a valid forgery
+        attempt. If instead $T^* \neq T_i$, decryption recomputes the
+        expected tag as $\mathrm{HMAC}(\mathsf{kb},x^*) =
+        \mathrm{HMAC}(\mathsf{kb},x_i) = T_i \neq T^*$ and rejects
+        outright, regardless of freshness. Either way this branch
+        contributes no successful, freshness-respecting forgery.
+\end{itemize}
+Both branches are exhaustive and are resolved \emph{deterministically} by
+injectivity, not by any probabilistic argument over $N^*$: $N^*$ is a
+value $\mathcal{A}$ chooses as part of its forgery $c^*$, adaptively and
+after observing $N_1,\ldots,N_q$, not a value sampled by the experiment,
+so no probability term (in particular, no $q^2/2^{128}$ nonce-collision
+term) is associated with Case~2 (Remark~\ref{rem:cvf11}). The re-split
+above additionally shows the replay-with-new-AAD attempt is not silently
+excluded but is proved infeasible beyond the Case~1 bound: it always
+falls in the first branch, which reduces to Case~1. Case~2 therefore
+contributes no additional term beyond Case~1's, and combining both cases:
 \[
   \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A})
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-  + \frac{q^2}{2^{128}}. \qedhere
+  + \frac{q_v}{2^{256}}. \qedhere
 \]
 \end{proof}
 
 \subsection{AAD Binding}
 
-The AAD is included in the tag computation as:
-$T = \mathrm{HMAC}(\mathsf{kb},\ \texttt{0x03} \| \mathrm{be4}(|A|) \| A \| N \| B)$.
+The AAD is included in the tag computation as (domain-first layout,
+Remark~\ref{rem:domsep}; corrected here per audit finding CVF12,
+Remark~\ref{rem:cvf12}):
+$T = \mathrm{HMAC}(\mathsf{kb},\ \texttt{0x03} \| N \| \mathrm{be4}(|A|) \| A \| B)$.
 The 4-byte length prefix prevents length-extension mixing between different
 AAD lengths.  Any single-bit change to the AAD produces an unpredictable
 change to the expected tag, with advantage bounded by the HMAC security.
@@ -589,7 +2153,90 @@ change to the expected tag, with advantage bounded by the HMAC security.
 \subsection{IND-CCA Security}
 \label{sec:ind-cca}
 
-\begin{theorem}[IND-CCA]
+\begin{remark}[Audit finding CVF14: the $H_0\to H_1$ ``identical-until-bad'' step is false, since $H_1$ also diverges on non-fresh replays]
+\label{rem:cvf14}
+An earlier draft of the proof below defined $H_1$ by stubbing
+$\mathcal{D}$ to \emph{always} return $\bot$, while defining the bad event
+$D$ as a \emph{fresh} ($c \notin \{c_1,\ldots,c_q\}$) valid submission, and
+then asserted ``$H_0$ and $H_1$ are identical in every execution that does
+not trigger $D$.'' That assertion is false as those two definitions stand:
+in $H_0$, $\mathcal{A}$ may legally query $\mathcal{D}$ on a
+\emph{replayed} encryption-oracle output $(c_i, aad_i)$ and receive the
+correct plaintext $m_i$ (by correctness, Definition~\ref{def:correctness}),
+whereas the stubbed $H_1$ returns $\bot$ on that same query --- yet this
+query is not fresh, so $D$ does not occur. An adversary that simply
+queries $\mathcal{D}(c_1, aad_1)$ after one encryption-oracle query
+distinguishes $H_0$ from $H_1$ with probability $1$ without ever
+triggering $D$, so the fundamental-lemma step
+$|\Pr[H_0]-\Pr[H_1]|\leq\Pr[D]$ was not established as written. This is a
+distinct defect from CVF10--CVF13, which concern gaps or omitted terms
+inside the INT-CTXT and IND-CCA advantage bounds themselves; CVF14
+concerns whether the hybrid argument used to \emph{reduce} IND-CCA to
+INT-CTXT plus IND-CPA is even correctly stated, independent of those
+bounds' content. The fix, applied below, is the standard corrected hybrid:
+redefine $H_1$ so that $\mathcal{D}$ answers a replayed $(c_i, aad_i)$
+pair with its recorded plaintext $m_i$ from a table populated by the
+encryption oracle, and returns $\bot$ only for ciphertexts not in that
+table (i.e., only for fresh queries). Under that definition $H_0$ and
+$H_1$ agree exactly on replayed queries (both return $m_i$, by
+correctness) and can only disagree on a fresh query, which is exactly
+what $D$ captures, so the identical-until-bad step now goes through.
+\end{remark}
+
+\begin{remark}[Audit finding CVF22: the bad event $D$ was restricted to the query phase, leaving post-challenge forgeries uncovered]
+\label{rem:cvf22}
+Game $H_0$ below explicitly permits $\mathcal{A}$ to call the decryption
+oracle after receiving the challenge ciphertext, yet an earlier draft
+defined the bad event $D$ as a fresh valid submission occurring only
+``during the query phase'' (i.e., before the challenge). A fresh valid
+ciphertext submitted \emph{after} the challenge makes $H_0$ and $H_1$
+diverge (by exactly the same case analysis as a pre-challenge query) but
+was not counted by that restricted $D$, so the identical-until-bad bound
+$|\Pr[H_0]-\Pr[H_1]|\leq\Pr[D]$ again failed to cover every
+distinguishing execution --- the same defect family as CVF14, applied to
+the phase of the query rather than to replays. \textbf{Fix:} $D$ below is
+defined over decryption queries in \emph{both} phases (any fresh valid
+$(c,aad)$ submitted to $\mathcal{D}$ at any point in the experiment), and
+the INT-CTXT forger $\mathcal{A}'$ constructed in the proof forwards
+\emph{every} one of $\mathcal{A}$'s decryption queries --- pre- and
+post-challenge alike --- to its own real decryption oracle, so the
+reduction bounding $\Pr[D]$ runs across both phases exactly as $D$ is now
+defined.
+\end{remark}
+
+\begin{remark}[Audit finding CVF23: freshness-set mismatch, and $c$-only freshness silently weakened the IND-CCA notion]
+\label{rem:cvf23}
+Two related defects. First, an earlier draft's bad event $D$ used the
+freshness set $\{c_1,\ldots,c_q\}$ (the adversary's own $q$ encryption
+queries), but from the INT-CTXT challenger's point of view the challenge
+ciphertext $c^*$ is itself an $\hat{\mathcal{E}}$ output once the forger
+$\mathcal{A}'$ generates it (Remark~\ref{rem:cvf21}), so the correct
+freshness set for $\mathcal{A}'$'s win condition is
+$\{c_1,\ldots,c_q\}\cup\{c^*\}$; the two sets were never reconciled.
+Second, and independently, an earlier draft's Game~$H_0$ forbade
+$\mathcal{A}$ from querying $\mathcal{D}$ on \emph{any} $c=c^*$ (for every
+$aad$), whereas the standard AEAD IND-CCA game forbids only the specific
+pair $(c^*,aad^*)$ and \emph{permits} $\mathcal{D}(c^*,aad\neq aad^*)$ ---
+a legitimate, potentially-winning forgery attempt in the standard game
+that the $c$-only restriction silently excluded, consistent with the
+$c$-only (rather than $(c,aad)$-pair) freshness already corrected for
+Theorem~\ref{thm:int-ctxt} by audit finding CVF20
+(Remark~\ref{rem:cvf20}). Left uncorrected, the composed result would
+establish a strictly weaker-than-standard IND-CCA notion --- one in which
+$\mathcal{A}$ is never even permitted to \emph{attempt} the
+AAD-substitution forgery, rather than one in which that forgery is proved
+to fail. \textbf{Fix:} the table $T$ used by $D$/$D'$ below is populated
+to include the challenge tuple $(c^*,aad^*,m_b)$ once the challenge is
+issued, so $\mathcal{A}'$'s freshness set is exactly
+$\{(c_1,aad_1),\ldots,(c_q,aad_q)\}\cup\{(c^*,aad^*)\}$ --- the INT-CTXT
+challenger's own complete output set, reconciling the mismatch --- and
+Game~$H_0$ now forbids only the pair $(c^*,aad^*)$, explicitly permitting
+$\mathcal{D}(c^*,aad\neq aad^*)$, so the proven notion is the standard
+$(c,aad)$-pair-freshness AEAD IND-CCA game rather than the $c$-only
+weakening.
+\end{remark}
+
+\begin{theorem}[IND-CCA]\label{thm:ind-cca}
   Under the PRF assumption on HMAC-SHA256, NAPQES is IND-CCA secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
   encryption queries and $q_d$ decryption queries there exist PRF adversaries
@@ -600,32 +2247,102 @@ change to the expected tag, with advantage bounded by the HMAC security.
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
     +
     \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-    + \frac{(q + q_d)^2}{2^{128}}.
+    + \frac{q^2}{2^{128}}
+    + \frac{q_d}{2^{256}}.
   \]
+  The $q_d/2^{256}$ term is the ideal-world forgery term of
+  Theorem~\ref{thm:int-ctxt} (Remark~\ref{rem:cvf10}), carried through
+  with $q_v = q_d$ since the INT-CTXT forger $\mathcal{A}'$ constructed
+  below makes exactly $q_d$ verification (decryption-oracle) queries,
+  counted across \emph{both} the pre- and post-challenge phases
+  (Remark~\ref{rem:cvf22}). Freshness for $D$ and for the INT-CTXT
+  reduction is measured over the pair $(c,aad)$ against the set
+  $\{(c_1,aad_1),\ldots,(c_q,aad_q)\}\cup\{(c^*,aad^*)\}$
+  (Remark~\ref{rem:cvf23}). The forger $\mathcal{A}'$ constructed below
+  additionally uses $q+1$ total encryption-oracle queries (its $q$
+  forwarded queries plus one to produce $c^*$ itself) when invoking
+  Theorem~\ref{thm:int-ctxt} --- which carries no
+  encryption-query-count-dependent term (Remark~\ref{rem:cvf11}) and is
+  proved in the adaptive dual-oracle regime this invocation requires
+  (Remark~\ref{rem:cvf21}) --- so this does not change the stated bound.
+  The $q^2/2^{128}$ term is the genuine nonce-collision bound from the
+  IND-CPA hybrid (Lemma~\ref{lem:hiding}'s $\mathrm{Coll}$ event over the
+  $q$ honestly-random encryption-oracle nonces plus the challenge nonce);
+  it is \emph{not} inherited from Theorem~\ref{thm:int-ctxt}, which has no
+  $q$-dependent term (Remark~\ref{rem:cvf11}).
+  (As noted in Remark~\ref{rem:cvf14}, the hybrid game $H_1$ used in the
+  proof below is defined with a table-backed decryption oracle rather
+  than one stubbed unconditionally to $\bot$, so that the
+  identical-until-bad step is sound.)
 \end{theorem}
 
 \begin{proof}
 We apply the composition theorem of Bellare and
 Namprempre~\cite{bellare2000ae} (B\&N~2000, Theorem~3): a scheme that
 is simultaneously IND-CPA and INT-CTXT is IND-CCA.  We make the argument
-explicit via two hybrid games.
+explicit via two hybrid games. (As noted in Remark~\ref{rem:cvf13}, the
+$\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)$ and
+$\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_2)$ terms this composition
+invokes below inherit that remark's simulation-gap caveat.)
 
 \paragraph{Game $H_0$ (Real IND-CCA).}
 The standard IND-CCA experiment: $\mathcal{A}$ has access to an encryption
-oracle $\mathcal{E}$ and a decryption oracle $\mathcal{D}$.  After receiving
-the challenge ciphertext $c^*$, $\mathcal{A}$ may call $\mathcal{D}$ on
-any $c \neq c^*$.
+oracle $\mathcal{E}$ and a decryption oracle $\mathcal{D}$, and may query
+$\mathcal{D}$ both before and after receiving the challenge ciphertext
+$c^*$ (produced by one call to $\mathcal{E}$ on adversarially-chosen
+$(A^*,m_b)$). The \emph{only} restriction is on the exact pair:
+$\mathcal{A}$ may not query $\mathcal{D}(c^*, A^*)$, but \emph{may} query
+$\mathcal{D}(c^*, aad)$ for any $aad \neq A^*$ (Remark~\ref{rem:cvf23}) ---
+the standard AEAD $(c,aad)$-pair freshness notion, not the strictly
+weaker $c$-only restriction (``$\mathcal{D}$ on any $c \neq c^*$'') an
+earlier draft imposed.
 
-\paragraph{Game $H_1$ (Decryption oracle stubbed to $\bot$).}
-Identical to $H_0$, except $\mathcal{D}$ always returns $\bot$.
+\paragraph{Game $H_1$ (Table-backed decryption oracle).}
+Identical to $H_0$, except $\mathcal{D}$ is replaced by $\mathcal{D}'$,
+which consults a table $T$ populated by every $(c, aad, m)$ triple
+$\mathcal{E}$ has produced so far --- including, once issued, the
+challenge triple $(c^*, A^*, m_b)$ itself (Remark~\ref{rem:cvf23}: from
+the standpoint of freshness, the challenge is an $\mathcal{E}$ output like
+any other): on query $(c, aad)$, $\mathcal{D}'$ returns the recorded $m$
+if $(c, aad)$ matches some entry in $T$, and returns $\bot$ otherwise ---
+i.e., $\bot$ only on pairs not yet in $T$ (per Remark~\ref{rem:cvf14}; an
+earlier draft instead stubbed $\mathcal{D}$ to return $\bot$
+unconditionally, which is corrected here). The one query the game
+forbids outright, $\mathcal{D}(c^*,A^*)$, would --- were it permitted ---
+trivially hit the table entry for $(c^*,A^*,m_b)$; since $\mathcal{A}$ is
+never allowed to make it, $\mathcal{D}'$ never needs to disclose $m_b$ to
+answer any query it actually receives.
 
 \paragraph{Transition $H_0 \to H_1$.}
-Let $D$ be the event that $\mathcal{A}$ submits, during the query phase, a
-\emph{fresh valid} ciphertext to $\mathcal{D}$—i.e., a tuple
-$(c, aad)$ with $c \notin \{c_1,\ldots,c_q\}$ (the encryption-oracle
-outputs) such that $\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c, aad) \neq \bot$.
-The games $H_0$ and $H_1$ are identical in every execution that does not
-trigger $D$; hence:
+Let $D$ be the event that $\mathcal{A}$ submits, \emph{at any point in the
+experiment --- before or after the challenge alike}
+(Remark~\ref{rem:cvf22}), a \emph{fresh valid} ciphertext to
+$\mathcal{D}$—i.e., a pair $(c, aad)$ with $(c, aad) \notin T$ (not equal
+to any $(c_i, aad_i)$ recorded from a pre- or post-challenge
+encryption-oracle output, nor to $(c^*,A^*)$ itself,
+Remark~\ref{rem:cvf23}) such that
+$\mathrm{NAPQES}.\mathsf{Dec}(\mathbf{k}, c, aad) \neq \bot$.
+We claim $H_0$ and $H_1$ answer every decryption query identically unless
+$D$ occurs, in \emph{either} phase. Consider any query $(c, aad)$
+$\mathcal{A}$ makes to the decryption oracle, pre- or post-challenge: (a)
+if $(c, aad) \in T$, i.e. it replays some earlier $\mathcal{E}$ output
+(a replay of $(c^*,A^*)$ itself cannot occur, since $H_0$ forbids that
+exact query), then by correctness (Definition~\ref{def:correctness})
+$H_0$'s real decryption returns exactly the recorded plaintext, which is
+precisely what $H_1$'s table lookup returns --- the two games agree on
+every replayed query, closing exactly the gap identified in
+Remark~\ref{rem:cvf14}; (b) if $(c, aad) \notin T$ and the ciphertext is
+invalid, both games return $\bot$; (c) if $(c, aad) \notin T$ and the
+ciphertext is valid, $H_0$ returns the (non-$\bot$) decrypted plaintext
+while $H_1$ returns $\bot$ --- this is exactly event $D$. This case
+analysis is identical in the pre-challenge and post-challenge phases ---
+nothing about it depends on whether the challenge has been issued yet,
+only on whether $(c,aad)\in T$ --- so restricting $D$ to a single phase,
+as an earlier draft did, was an unjustified narrowing
+(Remark~\ref{rem:cvf22}) rather than a consequence of the case analysis
+itself. Hence $H_0$ and $H_1$ are identical in every execution that does
+not trigger $D$ in \emph{either} phase, and the fundamental lemma of
+game-hopping gives:
 \[
   \bigl|\Pr[\mathcal{A}\text{ wins }H_0] - \Pr[\mathcal{A}\text{ wins }H_1]\bigr|
   \;\leq\; \Pr[D].
@@ -633,35 +2350,96 @@ trigger $D$; hence:
 
 We bound $\Pr[D]$ by constructing an INT-CTXT forger $\mathcal{A}'$ (using
 the B\&N formulation that grants the INT-CTXT adversary both an encryption
-oracle \emph{and} a decryption oracle~\cite{bellare2000ae}, Definition~2):
+oracle \emph{and} an adaptive decryption/verification oracle, in the
+regime proved sound by Remark~\ref{rem:cvf21}~\cite{bellare2000ae},
+Definition~2):
 \begin{enumerate}
   \item $\mathcal{A}'$ receives an encryption oracle $\hat{\mathcal{E}}$ and a
-        decryption oracle $\hat{\mathcal{D}}$ from the INT-CTXT challenger.
-  \item $\mathcal{A}'$ simulates game $H_0$ for $\mathcal{A}$, forwarding
-        every one of $\mathcal{A}$'s encryption queries to $\hat{\mathcal{E}}$
-        and every decryption query to $\hat{\mathcal{D}}$.
-  \item Whenever $\hat{\mathcal{D}}$ returns a non-$\bot$ result on a
-        fresh ciphertext $(c, aad)$ (i.e., one not previously output by
-        $\hat{\mathcal{E}}$), event $D$ has occurred; $\mathcal{A}'$ wins the
-        INT-CTXT experiment.
+        decryption oracle $\hat{\mathcal{D}}$ from the INT-CTXT challenger,
+        and initialises an empty table $T$.
+  \item $\mathcal{A}'$ runs $\mathcal{A}_1$, forwarding every encryption
+        query to $\hat{\mathcal{E}}$ (recording each resulting
+        $(c_i, aad_i, m_i)$ triple into $T$) and every (pre-challenge)
+        decryption query to $\hat{\mathcal{D}}$: whenever $\hat{\mathcal{D}}$
+        returns a non-$\bot$ result on a pair $(c,aad)\notin T$, event $D$
+        has occurred and $\mathcal{A}'$ immediately wins the INT-CTXT
+        experiment.
+  \item When $\mathcal{A}_1$ outputs $(A^*, m_0, m_1, \mathsf{st})$,
+        $\mathcal{A}'$ samples $b \xleftarrow{\$} \{0,1\}$ itself and
+        queries $\hat{\mathcal{E}}$ on $(A^*, m_b)$ --- its
+        $(q\!+\!1)$-th encryption query --- to obtain the challenge
+        ciphertext $c^*$, records $(c^*, A^*, m_b)$ into $T$
+        (Remark~\ref{rem:cvf23}), and invokes $\mathcal{A}_2(\mathsf{st},
+        c^*)$: the challenge phase is thus an explicit, counted step of
+        the construction, not an unstated assumption
+        (Remark~\ref{rem:cvf21}, gap~(ii)).
+  \item $\mathcal{A}'$ continues running $\mathcal{A}_2$, forwarding
+        every \emph{post-challenge} decryption query to $\hat{\mathcal{D}}$
+        exactly as in step~2 --- $\mathcal{A}_2$ may query any
+        $(c,aad)\neq(c^*,A^*)$, per Game~$H_0$'s restriction
+        (Remark~\ref{rem:cvf23}) --- and again declares event $D$ (and
+        wins) on the first non-$\bot$ result for a pair not in $T$; this
+        step is what makes the reduction cover the post-challenge phase,
+        which an earlier draft's construction omitted
+        (Remark~\ref{rem:cvf22}).
+  \item If $\mathcal{A}$ terminates without triggering $D$ in either
+        phase, $\mathcal{A}'$ outputs a fixed, known-invalid forgery
+        attempt (e.g.\ $(c^*, A^*)$ with its tag byte flipped), which
+        fails to verify and so does not win.
 \end{enumerate}
-$\mathcal{A}'$'s simulation is perfect (it uses the real oracles throughout),
-so $\Pr[\mathcal{A}'\text{ wins INT-CTXT}] = \Pr[D]$, giving:
+\emph{Perfect simulation, demonstrated rather than asserted.} Every value
+$\mathcal{A}$ observes in this simulation --- every ciphertext returned
+for an encryption query (including $c^*$, generated in step~3 by a real
+call to $\hat{\mathcal{E}}$ under the same hidden challenger key that
+answers every other query) and every plaintext/$\bot$ returned for a
+decryption query in either phase (answered by the real oracle
+$\hat{\mathcal{D}}$ in steps~2 and~4) --- is produced by the actual
+INT-CTXT challenger's real oracles, keyed identically throughout and
+never diverging from $\mathcal{A}$'s view in $H_0$ itself; $\mathcal{A}'$
+introduces no approximation at any step, so $\mathcal{A}$'s view in this
+simulation is distributed exactly as in $H_0$, and event $D$ occurs in
+the simulation iff it occurs in $H_0$ (Remark~\ref{rem:cvf21}).
+Consequently $\Pr[\mathcal{A}'\text{ wins INT-CTXT}] = \Pr[D]$, giving:
 \[
   \Pr[D]
   \;\leq\;
   \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\mathrm{NAPQES}}(\mathcal{A}')
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-  + \frac{(q+q_d)^2}{2^{128}},
+  + \frac{q_d}{2^{256}},
 \]
-where the second inequality applies Theorem~2 (INT-CTXT bound) with
-$q+q_d$ total oracle queries.
+where the second inequality applies Theorem~\ref{thm:int-ctxt} in the
+adaptive, dual-oracle regime justified by Remark~\ref{rem:cvf21}, with
+$\mathcal{A}'$ making $q+1$ encryption-oracle queries (contributing no
+term, since Theorem~\ref{thm:int-ctxt} carries no encryption-query-count
+term, Remark~\ref{rem:cvf11}) and $q_v = q_d$ decryption/verification
+queries counted across \emph{both} phases (Remark~\ref{rem:cvf22}):
+$\mathcal{A}'$ submits exactly one forgery candidate per decryption-oracle
+query $\hat{\mathcal{D}}$ that $\mathcal{A}$ makes, pre- or
+post-challenge, and none from its $q+1$ encryption queries, so $q_d$ is
+the correct total count for this term, and the freshness set against
+which each such query is judged --- $T \supseteq
+\{(c_1,aad_1),\ldots,(c_q,aad_q)\} \cup \{(c^*,A^*)\}$ --- is exactly the
+INT-CTXT challenger's own complete set of $\hat{\mathcal{E}}$ outputs
+(Remark~\ref{rem:cvf23}), with no mismatch left unreconciled.
 
 \paragraph{Game $H_1$ reduces to IND-CPA.}
-In $H_1$ the decryption oracle is always $\bot$, providing no information
-to $\mathcal{A}$.  The IND-CCA experiment in $H_1$ is therefore
-computationally equivalent to the IND-CPA experiment, giving:
+In $H_1$, $\mathcal{D}'$ never returns any information $\mathcal{A}$ does
+not already possess: on a replayed query it returns $m_i$, the very
+plaintext $\mathcal{A}$ itself supplied to $\mathcal{E}$ to obtain $c_i$
+in the first place, and on any other query it returns $\bot$. (The sole
+table entry $\mathcal{A}$ could not reconstruct this way is the challenge
+triple $(c^*,A^*,m_b)$, since $\mathcal{A}''$ below does not know $b$ ---
+but $\mathcal{A}$ is never permitted to query $\mathcal{D}'(c^*,A^*)$
+(Remark~\ref{rem:cvf23}), so this entry is never looked up and its
+absence from $\mathcal{A}''$'s local copy of $T$ never affects an answer
+$\mathcal{A}$ actually receives.) Hence $\mathcal{D}'$ can be simulated
+perfectly by $\mathcal{A}$'s own local table $T$ without any oracle
+access beyond $\mathcal{E}$, so an IND-CPA adversary $\mathcal{A}''$ can
+reproduce $H_1$ exactly for $\mathcal{A}$ using only the IND-CPA
+experiment's encryption oracle (maintaining $T$ itself and answering
+$\mathcal{A}$'s decryption queries from it), so
+$H_1$ is computationally equivalent to the IND-CPA experiment, giving:
 \[
   \Pr\bigl[\mathcal{A}\text{ wins }H_1\bigr]
   \;\leq\;
@@ -674,6 +2452,38 @@ computationally equivalent to the IND-CPA experiment, giving:
 \]
 where Theorem~1 is applied to the IND-CPA adversary $\mathcal{A}''$.
 
+\begin{remark}[Audit finding CVF15: the ``absorbing the constant'' step in an earlier draft was invalid, since $2x \leq x$ is false for $x>0$]
+\label{rem:cvf15}
+An earlier draft of the combining step below derived two nonce-collision
+terms, $q^2/2^{128}$ (from the $H_1$-reduces-to-IND-CPA step) and
+$(q+q_d)^2/2^{128}$ (inherited from an earlier, since-retracted version of
+Theorem~\ref{thm:int-ctxt}'s Case~2 bound), bounded their sum via
+$q^2+(q+q_d)^2 \leq 2(q+q_d)^2$, and then asserted that ``absorbing the
+constant into the stated bound yields $(q+q_d)^2/2^{128}$, matching the
+statement.'' That step is invalid: a multiplicative factor of two cannot
+be dropped for free, since $2x \leq x$ is false for every $x>0$ --- the
+algebra shown established only $2(q+q_d)^2/2^{128}$, not the bare
+$(q+q_d)^2/2^{128}$ the theorem claimed.
+
+This defect no longer applies to the proof as it now stands, for a reason
+related to but distinct from this finding's own recommendation:
+Remark~\ref{rem:cvf11} already showed the $(q+q_d)^2/2^{128}$ term being
+``absorbed'' here was itself unsound --- it traced to a bogus union-bound
+argument over the adversarially-chosen forgery nonce $N^*$ in
+Theorem~\ref{thm:int-ctxt}'s Case~2 --- and removed it from that theorem
+entirely, rather than merely restating its coefficient. With that term
+gone, the combining step below sums exactly one genuine nonce-collision
+term, $q^2/2^{128}$ (Lemma~\ref{lem:hiding}'s $\mathrm{Coll}$ event), with
+the genuine ideal-world forgery term $q_d/2^{256}$ (Remark~\ref{rem:cvf10})
+--- a plain addition of two distinct, correctly-scoped terms, with no
+factor-of-two approximation, tightening, or absorption step required at
+all. Had CVF11 not already eliminated the disputed term, the correct fix
+would have been exactly this finding's recommendation: state the honest
+$2(q+q_d)^2/2^{128}$ constant, or tighten via
+$q^2+(q+q_d)^2 \leq (2q+q_d)^2$, rather than silently drop the factor of
+two.
+\end{remark}
+
 \paragraph{Combining.}
 \begin{align*}
   \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
@@ -681,18 +2491,25 @@ where Theorem~1 is applied to the IND-CPA adversary $\mathcal{A}''$.
   &\leq \Pr[D]
        + \bigl|\Pr[\mathcal{A}\text{ wins }H_1] - \tfrac{1}{2}\bigr| \\
   &\leq \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
-       + \frac{(q+q_d)^2}{2^{128}}
+       + \frac{q_d}{2^{256}}
        + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
        + \frac{q^2}{2^{128}}.
 \end{align*}
-Since $q^2 + (q+q_d)^2 \leq 2(q+q_d)^2$, the sum of the two nonce-collision
-terms is at most $2(q+q_d)^2/2^{128}$; absorbing the constant into the
-stated bound yields
+The single nonce-collision term $q^2/2^{128}$ here originates entirely
+from the $H_1$-reduces-to-IND-CPA step (the honestly-random challenge
+nonce, Lemma~\ref{lem:hiding}'s $\mathrm{Coll}$ event); the INT-CTXT bound
+contributes no such term (Remark~\ref{rem:cvf11}), so no absorption or
+doubling is needed (Remark~\ref{rem:cvf15}). Carrying the $q_d/2^{256}$ ideal-world forgery term
+(Remark~\ref{rem:cvf10}) through unchanged yields
 $\mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathrm{NAPQES}}(\mathcal{A})
 \leq \mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)
    + \mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_2)
-   + (q+q_d)^2/2^{128}$,
-matching the statement.
+   + q^2/2^{128}
+   + q_d/2^{256}$,
+matching the statement. This combining step and the final bound are
+unaffected by the CVF14 correction (Remark~\ref{rem:cvf14}) above; only
+the definition of $H_1$ and the identical-until-bad argument for
+$\Pr[D]$ were repaired, not the numerical value of any term.
 \qedhere
 \end{proof}
 
@@ -701,11 +2518,51 @@ matching the statement.
 \label{sec:pq}
 % ─────────────────────────────────────────────────────────────────────────────
 
+\begin{remark}[Audit finding CVF24: the Grover post-quantum figure was stated as a bare number without operational caveats]
+\label{rem:cvf24}
+The original text stated only that ``Grover's algorithm halves the
+exponent, giving a post-quantum key-search complexity of $\approx 2^{98}$,
+well above 128-bit thresholds,'' with no operational context. As the
+finding notes, a bare exponent invites two misreadings: (i) that
+$2^{98}$ is an ordinary, comparably-achievable attack cost, on the same
+footing as a classical work-factor figure; and (ii), more importantly,
+that it is a \emph{parallelizable} cost that could be brought within
+reach by adding hardware. Neither is true. Grover's algorithm requires
+$\approx 2^{n/2}$ \emph{essentially sequential} oracle queries and is
+well known to be non-parallelizable in any useful sense: the
+Bennett--Bernstein--Brassard--Vazirani (BBBV) optimality
+result~\cite{bbbv1997} establishes that no quantum algorithm can search
+an unstructured space of size $N$ in fewer than $\Omega(\sqrt{N})$ oracle
+queries, and Zalka's analysis~\cite{zalka1999} of distributing Grover's
+search over $S$ independent machines shows the achievable speedup is only
+$\sqrt{S}$ --- the wall-clock \emph{depth} remains
+$\approx 2^{n/2}/\sqrt{S}$ and the \emph{total} work (query-time
+$\times$ machine-count) is unchanged, in sharp contrast to classical
+brute force, which parallelizes linearly across machines. Presented as a
+bare number, $2^{98}$ therefore looks like a hardware-scalable,
+classical-style cost rather than the sequential-depth lower bound it
+actually is. The fix below rephrases both post-quantum figures (the
+$2^{128}$ SHA-256 preimage bound and the $2^{98}$ key-space bound) to
+state this explicitly.
+\end{remark}
+
 \paragraph{SHA-256 and Grover's algorithm.}
-Grover's algorithm~\cite{grover96} provides a quadratic speedup for unstructured
-search.  Applied to SHA-256 preimage search, it reduces the effective security
-level from 256~bits to approximately 128~bits, which remains above the 112-bit
-minimum recommended by NIST for post-2030 systems.
+Grover's algorithm~\cite{grover96} provides a quadratic speedup for
+unstructured search, requiring $\approx 2^{n/2}$ oracle queries against an
+$n$-bit target. Applied to SHA-256 preimage search, this reduces the
+\emph{nominal} security level from 256~bits to approximately 128~bits.
+Crucially, this $2^{128}$ figure is a bound on \emph{sequential query
+depth}, not a parallelizable work-factor: the BBBV optimality
+result~\cite{bbbv1997} shows no quantum algorithm can search an
+unstructured space of size $N$ in fewer than $\Omega(\sqrt{N})$ oracle
+queries, and Zalka~\cite{zalka1999} shows that distributing Grover's
+search across $S$ machines yields only a $\sqrt{S}$ speedup --- the depth
+stays $\approx 2^{n/2}/\sqrt{S}$ and the total work is unchanged --- so,
+unlike a classical brute-force search, this cost cannot be brought closer
+to feasibility by adding hardware. At $2^{128}$ sequential oracle queries,
+SHA-256 preimage resistance remains far beyond feasibility and above the
+112-bit minimum recommended by NIST for post-2030 systems
+(Remark~\ref{rem:cvf24}).
 
 \paragraph{No Shor-applicable structure.}
 NAPQES does not use discrete logarithms, integer factorisation, or any
@@ -715,8 +2572,16 @@ provide no speedup against the construction.
 \paragraph{Key space.}
 With a 10-element prime-tuple key from $\mathcal{P}$, the key space is
 $\approx 2^{196}$.  Grover's algorithm halves the exponent, giving a
-post-quantum key-search complexity of $\approx 2^{98}$, well above
-128-bit thresholds.
+post-quantum key-search complexity of $\approx 2^{98}$ \emph{sequential}
+oracle queries (Remark~\ref{rem:cvf24}) --- like the SHA-256 figure
+above, this is a non-parallelizable depth bound, not a figure that
+shrinks with additional hardware: by the same BBBV~\cite{bbbv1997}/
+Zalka~\cite{zalka1999} argument, $S$ machines give only a $\sqrt{S}$
+speedup, so the wall-clock depth stays $\approx 2^{98}/\sqrt{S}$ and the
+total work is unchanged. Both the $2^{128}$ and $2^{98}$ figures are
+therefore sequential-depth quantities far beyond feasibility, and at
+these output/key-space lengths Grover's algorithm is largely irrelevant
+to NAPQES's practical post-quantum security margin.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Comparison with AES-GCM and ChaCha20-Poly1305}
@@ -733,7 +2598,7 @@ Primitive basis & HMAC-SHA256 & AES + GHASH & ChaCha20 + Poly1305 & Ascon permut
 FIPS-approved & \textbf{Yes} & Yes & \textbf{No} & No (pending) \\
 Shor-applicable structure & \textbf{No} & No & No & No \\
 Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No \\
-Nonce-reuse key recovery & \textbf{No} & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
+Nonce-reuse key recovery & \textbf{Yes (catastrophic)}\footnotemark & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
 Ciphertext expansion & $4\text{--}20\times$ & $1\times$ & $1\times$ & $1\times$ \\
 Key size & 50+ bytes & 32 bytes & 32 bytes & 16 bytes \\
 \bottomrule
@@ -741,6 +2606,30 @@ Key size & 50+ bytes & 32 bytes & 32 bytes & 16 bytes \\
 \caption{Comparison of NAPQES with established AEAD schemes.}
 \label{tab:comparison}
 \end{table}
+\footnotetext{Every internal value used by NAPQES — noise positions
+(domain \texttt{0x00}), noise characters (\texttt{0x04}), addends
+(\texttt{0x01}, \texttt{0x05}), padding (\texttt{0x06}), and the XOR
+keystream (\texttt{0x07}) — is a deterministic function of
+$(k_b, N)$ alone via $\mathrm{Derive}_d(k_b, N, \mathit{ctx}) =
+\mathrm{HMAC}(k_b, d\Vert N \Vert \mathit{ctx})$.  A repeated nonce
+therefore reproduces an identical keystream and identical noise/addends
+(a two-time pad).  Because the real-token map $c \mapsto c\cdot k + a$ is
+an exact (non-modular) affine function and the domain-\texttt{0x07} mask is
+a simple XOR, two known- or chosen-plaintext queries under one reused
+nonce at the same real-token position recover that position's key element
+$k_j$ and addend $a_j$ \emph{exactly}: XOR-cancelling the shared keystream
+yields the two exact token integers $c_1 k_j + a_j$ and $c_2 k_j + a_j$,
+and $k_j = (t_1 - t_2)/(c_1 - c_2)$.  This is strictly worse than the
+ordinary two-time-pad confidentiality loss of a nonce-reuse in AES-GCM or
+ChaCha20-Poly1305, and worse than the length-channel escalation route
+described in the CVF3 audit finding, because it needs no ciphertext-length
+side channel at all.  This is fully closed for callers who adopt the v8
+key schedule (Section~\ref{sec:v8}), whose synthetic-IV nonce derivation
+makes nonce reuse across distinct \((\mathrm{aad}, M)\) pairs an
+HMAC-SHA256-collision event rather than a birthday-bound or
+DRBG-failure event.  See \texttt{docs/CAVEATS.md} (CVF3) and
+\texttt{docs/audit\_mitigation\_responses.md} for the full analysis and
+mitigation status.}
 
 The primary trade-off is ciphertext expansion: NAPQES's noise-injection
 mechanism produces $4\text{--}20\times$ ciphertext expansion depending on the
@@ -749,6 +2638,39 @@ ChaCha20-Poly1305.  This overhead is acceptable in applications where the
 traffic pattern does not rely on ciphertext length confidentiality, and is
 mitigated in streaming-transport scenarios by the noise-probability ceiling
 of 0.99.
+
+\textbf{Nonce-reuse hazard (CVF3).}  Unlike AES-GCM and ChaCha20-Poly1305,
+where nonce reuse degrades confidentiality but does not expose the key,
+NAPQES's affine token construction makes nonce reuse \emph{key-recoverable}
+(see the footnote to Table~\ref{tab:comparison} and \S\ref{sec:nonce-misuse}
+below).  NAPQES therefore does \emph{not} offer an advantage over AES-GCM or
+ChaCha20-Poly1305 on this property; the 128-bit random nonce makes
+accidental reuse a $\approx 2^{64}$ birthday event, but NAPQES provides no
+misuse resistance, and callers must never supply or reuse an explicit
+nonce in production.
+
+\subsection{Nonce Reuse Is Key-Recoverable, Not Merely Confidentiality-Losing}
+\label{sec:nonce-misuse}
+
+For an ordinary stream cipher, reusing a nonce loses confidentiality (the
+XOR of two keystreams is exposed) but not the key.  NAPQES's per-position
+affine map $c \mapsto c\cdot k_j + a_j$ makes reuse strictly worse: as shown
+in the footnote to Table~\ref{tab:comparison}, two plaintext/ciphertext
+pairs at the same real-token position under a reused nonce yield $k_j$ and
+$a_j$ exactly, via ordinary linear algebra over the integers — no
+conditional probability bound, no ciphertext-length side channel, and no
+attack on the HMAC keystream itself is required.  Recovering $k_j$ for each
+of the $K$ key-tuple positions (cycled via $\mathit{real\_idx} \bmod K$)
+fully recovers the key.  This holds independently of the CVF1 wire-format
+fix (fixed-width token encoding): CVF1 closed a \emph{length}-based side
+channel that let an attacker infer $k_j$ under a reused nonce without known
+plaintext (via the LEB128 boundary-detection CPA described in the CVF3
+finding); it does not and cannot close the exact algebraic recovery
+described here, which requires only known-plaintext, not chosen-plaintext,
+and does not depend on the token serialisation width. Misuse resistance is
+not currently a NAPQES design goal; production callers must never supply
+an explicit nonce, and the reference implementations generate the nonce
+internally via a CSPRNG on every call (see \texttt{docs/CAVEATS.md}, CVF3).
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Implementation}
@@ -844,17 +2766,23 @@ The following known caveats are documented in \texttt{docs/CAVEATS.md} and
 \texttt{SPEC.md \S11} in the reference implementation.
 
 \begin{description}
-  \item[CAV-001 — Streaming RUP (\textbf{fixed}).] Earlier versions of
+  \item[CAV-001 — Streaming RUP (\textbf{fixed, format deprecated and
+        forbidden as of CVF7}).] Earlier versions of
         \texttt{decrypt\_stream} yielded plaintext before the authentication
         tag was verified, allowing an active attacker to cause unverified data
         to reach the application.  This is resolved by the online-AE streaming
         format (Section~\ref{sec:streaming-ae}):
         \texttt{decrypt\_stream\_ae} verifies each chunk's HMAC-SHA256 tag
         before releasing any of its plaintext, and a final sentinel tag
-        authenticates the total chunk count.  The legacy
-        \texttt{decrypt\_stream} API is retained with an explicit opt-in gate
-        (\texttt{enable\_unauthenticated\_streaming=True}); new code should use
-        \texttt{encrypt\_stream\_ae} / \texttt{decrypt\_stream\_ae}.
+        authenticates the total chunk count.  As of the CVF7 fix
+        (Section~\ref{sec:format-applicability}), v6s-ae is the sole
+        normative streaming format; the legacy \texttt{decrypt\_stream} API
+        is retained only for reading streams produced before this fix
+        (behind the pre-existing opt-in gate,
+        \texttt{enable\_unauthenticated\_streaming=True}) and is deprecated
+        and forbidden for issuing new ciphertext — new code and new
+        protocols MUST use \texttt{encrypt\_stream\_ae} /
+        \texttt{decrypt\_stream\_ae} exclusively.
 
   \item[CAV-002 — 16-bit plaintext length cap (open, low).] The v6 block
         padding scheme stores the plaintext length as a 2-byte big-endian
@@ -925,6 +2853,16 @@ evaluation on embedded ARM Cortex-M4 and RISC-V targets.
   L. K. Grover,
   \emph{A fast quantum mechanical algorithm for database search},
   Proceedings of STOC '96, pp. 212--219, 1996.
+
+\bibitem{bbbv1997}
+  C. H. Bennett, E. Bernstein, G. Brassard, U. Vazirani,
+  \emph{Strengths and Weaknesses of Quantum Computing},
+  SIAM Journal on Computing, 26(5), pp. 1510--1523, 1997.
+
+\bibitem{zalka1999}
+  C. Zalka,
+  \emph{Grover's quantum searching algorithm is optimal},
+  Physical Review A, 60(4), pp. 2746--2751, 1999.
 
 \bibitem{nistpq2022}
   NIST,
