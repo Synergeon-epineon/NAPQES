@@ -381,16 +381,22 @@ class TestDecryptStreamStrict:
         assert napqes.decrypt_stream_strict(chunks, KEY) == plaintext
 
     def test_not_cross_compatible_with_encrypt_bytes(self):
-        # Both APIs now apply the domain-0x07 XOR mask and use the same HMAC
-        # formula, so auth passes when cross-decoding.  Incompatibility comes
-        # from padding: encrypt_bytes prepends a 2-token length prefix and
-        # pads to a power-of-two block, while encrypt_stream has no padding.
-        # decrypt_stream_strict therefore decodes the padding tokens as if
-        # they were real plaintext characters, producing garbled output — it
-        # must NOT equal the original message.
+        # Both APIs apply the domain-0x07 XOR mask and use the same HMAC tag
+        # formula, so auth passes when cross-decoding. Incompatibility comes
+        # from two independent sources: (1) padding — encrypt_bytes prepends
+        # a 2-token length prefix and pads to a power-of-two block, while
+        # encrypt_stream has no padding; and (2) token encoding — encrypt_bytes
+        # now serialises fixed-width 8-byte tokens (v7, CVF1 fix), while
+        # decrypt_stream still parses LEB128 varints, so reinterpreting a
+        # fixed-width blob as LEB128 typically raises a decode error rather
+        # than silently producing garbled (but valid) plaintext. Either way,
+        # the two APIs must never be interchangeable.
         plaintext = "hello"
         ct_bytes = napqes.encrypt_bytes(plaintext, KEY)
-        recovered = napqes.decrypt_stream_strict([ct_bytes], KEY)
+        try:
+            recovered = napqes.decrypt_stream_strict([ct_bytes], KEY)
+        except ValueError:
+            return  # decode failure is an acceptable form of incompatibility
         assert recovered != plaintext
 
 

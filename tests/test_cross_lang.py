@@ -6,8 +6,13 @@ KAT harness's deterministic encrypt path) are byte-identical to Python's.
 
 Strategy
 --------
-- Python → Rust: run ``cargo test --test kats`` which decrypts the Python-
-  generated ``tests/kat/v6_vectors.json`` ciphertexts.
+- Python → Rust: run ``cargo test --lib kat_cross_check`` which decrypts the
+  Python-generated ``tests/kat/v6_vectors.json`` ciphertexts. (This lives as
+  an in-crate unit-test module, not an external integration test, because
+  the deterministic-nonce encrypt helper it exercises is ``pub(crate)``
+  only — see CVF3 in ``docs/CAVEATS.md``: an explicit, caller-chosen nonce
+  is a key-recovery hazard for NAPQES, so that entry point must not be part
+  of the crate's public API.)
 - Python → C:    run the C ``kat-test`` binary which decrypts the same vectors.
 - Rust  → Python: the Rust KAT harness also calls ``encrypt_bytes_with_nonce``
   and asserts byte-identical output to the Python-generated ``ciphertext_hex``
@@ -63,10 +68,10 @@ class TestPythonToRust:
     """Rust KAT harness must decrypt all Python-generated block-mode vectors."""
 
     def test_rust_kats_pass(self):
-        """cargo test --test kats exits 0 — Rust decrypts Python vectors."""
+        """cargo test --lib kat_cross_check exits 0 — Rust decrypts Python vectors."""
         _require_tool("cargo")
         result = _run(
-            ["cargo", "test", "--release", "--test", "kats", "--", "--nocapture"],
+            ["cargo", "test", "--release", "--lib", "kat_cross_check", "--", "--nocapture"],
             cwd=_RUST_DIR,
             timeout=300,
         )

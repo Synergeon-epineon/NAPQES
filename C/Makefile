@@ -23,9 +23,19 @@ napqes_demo$(EXE): $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJ) napqes_demo napqes_demo.exe test_kats test_kats.exe test_kats.o
+	rm -f $(OBJ) napqes_demo napqes_demo.exe test_kats test_kats.exe test_kats.o napqes_test.o kat-test kat-test.exe
 
-kat-test$(EXE): test_kats.c sha256.o base64.o napqes.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o kat-test$(EXE) test_kats.c sha256.o base64.o napqes.o $(LDLIBS)
+# napqes_test.o is a separate compilation of napqes.c with
+# NAPQES_ENABLE_TEST_NONCE_API defined, exposing napqes_encrypt_bytes_with_nonce
+# (deterministic-nonce encrypt) for the KAT harness only. The default
+# napqes.o (used by napqes_demo) does NOT define this macro, so that
+# symbol is absent from the production build/library — see docs/CAVEATS.md
+# (CVF3): an explicit, caller-chosen nonce is a key-recovery hazard for
+# NAPQES and must not be reachable outside testing.
+napqes_test.o: napqes.c napqes.h
+	$(CC) $(CFLAGS) -DNAPQES_ENABLE_TEST_NONCE_API -c -o napqes_test.o napqes.c
+
+kat-test$(EXE): test_kats.c sha256.o base64.o napqes_test.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -DNAPQES_ENABLE_TEST_NONCE_API -o kat-test$(EXE) test_kats.c sha256.o base64.o napqes_test.o $(LDLIBS)
 
 .PHONY: clean kat-test
