@@ -794,6 +794,16 @@ SK_SIZE = 32
 #: documented "<=20x" bound exactly. The cap is a deterministic, public
 #: counter comparison (not a secret-dependent decision), so it introduces no
 #: new side channel and both encryption and decryption apply it identically.
+#:
+#: As of the V2-CVF2 fix (2026-07-21, docs/CAVEATS.md), this cap also fixes
+#: the *total* per-real-token budget used to pad every v8 ciphertext up to a
+#: deterministic per-bucket ceiling of ``real_token_count * (MAX_NOISE_RUN +
+#: 1)`` tokens (see :func:`_encrypt_v8_core` / :func:`_decrypt_v8_core`):
+#: v8 ciphertext length is therefore now a pure function of the padding
+#: bucket alone, never of the message-derived synthetic nonce's noise
+#: realisation, at the cost of always paying the worst-case ~20x expansion
+#: (previously the average case was ~13.4x). v7 is unaffected — it keeps its
+#: original average-case-length, uncapped-ceiling behaviour.
 MAX_NOISE_RUN = 19
 
 #: Domain 0x0B format-subkey identifiers. Passed to `_derive_format_subkey`
@@ -882,6 +892,20 @@ def _encrypt_v8_core(message: list[int], key: list[int], key_material: bytes,
     noise tokens bounds worst-case ciphertext expansion. *key* (the prime
     tuple) is still used directly, un-keyed, for the arithmetic token map
     ``c * k + a`` — exactly as in v7.
+
+    V2-CVF2 fix: after the natural real/noise sequence is emitted, the
+    output is padded with additional, structurally identical filler tokens
+    up to a fixed ceiling of ``len(padded) * (MAX_NOISE_RUN + 1)`` tokens.
+    Because the synthetic nonce is a function of the message
+    (Definition ``synthnonce``), the *natural* token count would otherwise
+    vary with the message even for a fixed padding bucket, letting an
+    observer who collects several ciphertexts of one message under varying
+    AAD average out the noise and reliably recover the padding bucket
+    (docs/CAVEATS.md, V2-CVF2). Padding to a bucket-only ceiling removes
+    that variance: v8 ciphertext length is now a deterministic function of
+    ``len(padded)`` (the padding bucket) alone, exactly like v7's
+    Lemma~tar guarantee, at the cost of always paying the worst-case
+    expansion instead of the ~13.4x average case.
     """
     noise_probability = _derive_noise_p(key_material, nonce)
     padded = _pad_message(message, key_material, nonce)
@@ -907,6 +931,16 @@ def _encrypt_v8_core(message: list[int], key: list[int], key_material: bytes,
         ct_pos += 1
         real_idx += 1
 
+    # V2-CVF2 fix: pad up to the fixed, bucket-only ceiling so |C| never
+    # depends on the message-derived nonce's noise realisation.
+    ceiling = len(padded) * (MAX_NOISE_RUN + 1)
+    while len(cypher) < ceiling:
+        k = key[real_idx % K]
+        noise_c = _derive_noise_char(key_material, nonce, ct_pos)
+        noise_add = _derive_noise_token_addend(key_material, nonce, ct_pos, k)
+        cypher.append(noise_c * k + noise_add)
+        ct_pos += 1
+
     return cypher
 
 
@@ -917,6 +951,14 @@ def _decrypt_v8_core(nonce: bytes, cypher: list[int], key: list[int],
     Applies the identical :data:`MAX_NOISE_RUN`-capped schedule derivation so
     encryption and decryption stay in lock-step. Raises ``ValueError`` (never
     ``IndexError``) if the token stream is truncated mid noise-run.
+
+    V2-CVF2 fix: the real-token count ``R`` is no longer discovered by
+    consuming tokens until the blob is exhausted. Instead, because
+    :func:`_encrypt_v8_core` always pads the token count up to exactly
+    ``R * (MAX_NOISE_RUN + 1)``, ``R`` is recovered directly from the total
+    token count up front; decoding stops as soon as ``R`` real tokens have
+    been extracted, and any trailing filler tokens are ignored rather than
+    being fed through the noise/real decision loop.
     """
     noise_probability = _derive_noise_p(key_material, nonce)
     K = len(key)
@@ -924,10 +966,20 @@ def _decrypt_v8_core(nonce: bytes, cypher: list[int], key: list[int],
     real_idx = 0
     ct_pos = 0
     n = len(cypher)
+    ceiling_unit = MAX_NOISE_RUN + 1
 
-    while ct_pos < n:
+    if n % ceiling_unit != 0:
+        raise ValueError(
+            "Malformed v8 ciphertext: token count is not a multiple of the "
+            f"padding ceiling ({ceiling_unit}); expected exactly "
+            "real_token_count * (MAX_NOISE_RUN + 1) tokens."
+        )
+    real_count = n // ceiling_unit
+
+    while real_idx < real_count:
         noise_run = 0
         while (noise_run < MAX_NOISE_RUN
+               and ct_pos < n
                and _is_noise_pos(key_material, nonce, ct_pos, noise_probability)):
             ct_pos += 1
             noise_run += 1

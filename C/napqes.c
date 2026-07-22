@@ -626,6 +626,33 @@ static int encrypt_core_det_v8(const uint32_t *msg, size_t n,
         }
     }
 
+    /* V2-CVF2 fix: pad the token stream up to a fixed, bucket-only ceiling
+     * of padded_len * (NAPQES_MAX_NOISE_RUN + 1) tokens, using additional
+     * filler tokens structurally identical to genuine noise tokens. Without
+     * this, the natural token count varies with the message-derived v8
+     * synthetic nonce even for a fixed padding bucket, letting an observer
+     * who collects several ciphertexts of one message under varying AAD
+     * average out the noise and reliably recover the padding bucket
+     * (docs/CAVEATS.md, V2-CVF2). After this fix, ciphertext length is a
+     * deterministic function of the padding bucket alone. */
+    size_t ceiling_tokens = padded_len * ((size_t)NAPQES_MAX_NOISE_RUN + 1);
+    size_t cur_tokens = len / TOKEN_WIDTH;
+    while (cur_tokens < ceiling_tokens) {
+        if (len + TOKEN_WIDTH > cap) {
+            size_t ncap = cap * 2;
+            uint8_t *nbuf = (uint8_t *)realloc(buf, ncap);
+            if (!nbuf) { free(buf); free(padded); return -1; }
+            buf = nbuf; cap = ncap;
+        }
+        uint64_t k = primes[real_idx % klen];
+        uint64_t nc  = derive_noise_char(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos);
+        uint64_t nad = derive_noise_token_addend(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos, k);
+        fixed_encode(nc * k + nad, buf + len);
+        len += TOKEN_WIDTH;
+        ct_pos++;
+        cur_tokens++;
+    }
+
     free(padded);
     *blob_out = buf;
     *blob_len = len;
@@ -635,7 +662,14 @@ static int encrypt_core_det_v8(const uint32_t *msg, size_t n,
 /* Decrypts a v8 fixed-width token blob using sk_fmt in place of key_bytes,
  * applying the identical NAPQES_MAX_NOISE_RUN-capped schedule derivation so
  * encryption and decryption stay in lock-step. Returns NULL (never reads
- * out of bounds) on a truncated token stream. */
+ * out of bounds) on a truncated token stream.
+ *
+ * V2-CVF2 fix: the real-token count is no longer discovered by consuming
+ * tokens until the blob is exhausted. Because encrypt_core_det_v8 now pads
+ * every ciphertext up to exactly real_count * (NAPQES_MAX_NOISE_RUN + 1)
+ * tokens, real_count is recovered directly from n_tokens up front, and
+ * decoding stops as soon as real_count real tokens have been extracted;
+ * any trailing filler tokens are ignored. */
 static uint32_t *decrypt_core_v8(const uint8_t *blob, size_t blob_len,
                                  const uint8_t nonce[NAPQES_NONCE_SIZE],
                                  const uint64_t *primes, size_t klen,
@@ -646,21 +680,26 @@ static uint32_t *decrypt_core_v8(const uint8_t *blob, size_t blob_len,
     double noise_p = derive_noise_p(sk_fmt, SHA256_DIGEST_SIZE, nonce);
 
     size_t n_tokens = blob_len / TOKEN_WIDTH;
+    size_t ceiling_unit = (size_t)NAPQES_MAX_NOISE_RUN + 1;
+    if (n_tokens % ceiling_unit != 0) return NULL;
+    size_t real_count = n_tokens / ceiling_unit;
+
     uint64_t *tokens = (uint64_t *)malloc((n_tokens + 1) * sizeof(uint64_t));
     if (!tokens) return NULL;
     for (size_t i = 0; i < n_tokens; ++i) {
         tokens[i] = fixed_decode(blob + i * TOKEN_WIDTH);
     }
 
-    uint32_t *padded = (uint32_t *)malloc((n_tokens + 2) * sizeof(uint32_t));
+    uint32_t *padded = (uint32_t *)malloc((real_count + 1) * sizeof(uint32_t));
     if (!padded) { free(tokens); return NULL; }
     size_t padded_n = 0;
     uint64_t real_idx = 0;
     size_t ct_pos = 0;
 
-    while (ct_pos < n_tokens) {
+    while (real_idx < real_count) {
         unsigned noise_run = 0;
         while (noise_run < NAPQES_MAX_NOISE_RUN
+               && ct_pos < n_tokens
                && is_noise_pos(sk_fmt, SHA256_DIGEST_SIZE, nonce, (uint64_t)ct_pos, noise_p)) {
             ct_pos++;
             noise_run++;

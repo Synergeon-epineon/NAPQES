@@ -1,0 +1,1258 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{authblk}
+\usepackage{abstract}
+
+% ── Theorem environments ──────────────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}[theorem]{Assumption}
+
+% ── Code listing style ────────────────────────────────────────────────────────
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!5},
+  keywordstyle=\bfseries,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+% ── Metadata ──────────────────────────────────────────────────────────────────
+\title{\textbf{NAPQES: A Single-Primitive Authenticated Encryption Scheme\\
+Built from HMAC-SHA256}}
+
+\author[1]{Abdeslam Jakjoud}
+\author[1]{Karim Amor}
+\affil[1]{QAegis, France}
+\date{July 2026}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+
+% ── Abstract ─────────────────────────────────────────────────────────────────
+\begin{abstract}
+We present NAPQES, an Authenticated Encryption with Associated Data (AEAD)
+scheme whose security reduces exclusively to the pseudorandomness of
+HMAC-SHA256.  Unlike AES-GCM and ChaCha20-Poly1305, NAPQES employs no
+finite-field arithmetic, group operations, or AES S-box permutations, and is
+therefore not subject to Shor's algorithm or hidden-subgroup quantum
+attacks.  The construction keys two independently sampled secrets: an
+arithmetic-layer key $\mathbf{k}$, an ordered tuple of primes driving a
+prime-indexed token cipher, and a uniform 256-bit secret $\mathsf{sk}$ that
+keys every HMAC domain derivation used for noise injection, plaintext
+padding, keystream masking, and message authentication. The nonce is
+derived synthetically as
+$N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)$, in
+the manner of AES-GCM-SIV, rather than sampled independently at random.
+Because $\mathbf{k}$ and $\mathsf{sk}$ are sampled independently and only
+$\mathsf{sk}$ ever keys an HMAC call, we prove IND-CPA-det (the
+restricted-query notion appropriate to a deterministic, misuse-resistant
+scheme's synthetic nonce), INT-CTXT, and IND-CCA-det security
+(Theorems~\ref{thm:ind-cpa}, \ref{thm:int-ctxt}, \ref{thm:ind-cca}) under
+the standard, uniform-key PRF assumption on HMAC-SHA256 — with no
+key-entropy term and no non-standard key-distribution assumption — and show
+that nonce misuse (re-encrypting an identical associated-data/message pair)
+degrades gracefully to disclosed message-equality leakage rather than key
+recovery. Ciphertext length is proved to be a deterministic function of the
+padded-length bucket alone (Lemma~\ref{lem:length-det}), never of message
+content, nonce, or associated data. We discuss the post-quantum security
+level, provide performance measurements and implementation notes across
+Python, Rust, and C reference implementations, and report a 30-vector
+Known-Answer Test corpus together with a NIST SP 800-22 Rev.\ 1a
+statistical analysis. A reference implementation, KAT corpus, and fuzz
+harnesses are published at \url{https://github.com/Synergeon-epineon/NAPQES}.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Modern AEAD standards—AES-GCM~\cite{nist-gcm} and
+ChaCha20-Poly1305~\cite{rfc7539}—have achieved widespread deployment.
+Their security, however, ultimately depends on algebraic structures
+(finite-field multiplication for GCM, add-rotate-XOR chains for ChaCha20)
+whose resilience against quantum adversaries running variants of Shor's
+algorithm is an active research question~\cite{nistpq2022}.
+
+NAPQES takes a more conservative approach: the \emph{only} cryptographic
+primitive in the construction is HMAC-SHA256, approved under NIST FIPS
+198-1 and FIPS 180-4. The security of the entire scheme therefore reduces
+to the pseudorandomness of HMAC-SHA256—a well-studied assumption with no
+known quantum speedup beyond Grover's $O(\sqrt{N})$ search, which reduces
+the effective security level from 256~bits to approximately 128~bits while
+remaining far above all recommended thresholds.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item We fully specify NAPQES (Section~\ref{sec:construction}): an
+        independent HMAC-domain-derivation secret $\mathsf{sk}$ and
+        arithmetic-layer key $\mathbf{k}$, sampled independently, together
+        with a synthetic, message-bound nonce
+        $N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)$
+        (Definition~\ref{def:synthnonce}) and a fixed-width, per-bucket-ceiling
+        wire format (Section~\ref{sec:wire-format}) under which ciphertext
+        length depends only on the padded-length bucket.
+  \item We give a formal AEAD algorithm triple
+        $(\mathsf{KeyGen},\mathsf{Enc},\mathsf{Dec})$
+        (Definition~\ref{def:aead-triple}) and prove correctness
+        (Definition~\ref{def:correctness}).
+  \item We prove IND-CPA-det (Definition~\ref{def:ind-cpa-det}),
+        INT-CTXT (Theorem~\ref{thm:int-ctxt}), and IND-CCA-det
+        (Theorem~\ref{thm:ind-cca}) security
+        (Theorem~\ref{thm:ind-cpa}) under the \emph{standard, uniform-key}
+        PRF assumption on HMAC-SHA256, with no key-entropy term: because
+        $\mathsf{sk}$ is sampled uniformly and independently of
+        $\mathbf{k}$, every reduction below may sample $\mathbf{k}$ on its
+        own to run the arithmetic layer while forwarding every HMAC call to
+        an external PRF oracle keyed by $\mathsf{sk}$, with no simulation
+        gap of any kind.
+  \item We prove ciphertext length is a deterministic function of the
+        padded-length bucket alone (Lemma~\ref{lem:length-det}) — never of
+        message content within a bucket, the nonce, or the associated data.
+  \item We provide a post-quantum analysis (Section~\ref{sec:pq}) and a
+        comparison with AES-GCM, ChaCha20-Poly1305, and Ascon
+        (Section~\ref{sec:comparison}).
+  \item We report NIST SP 800-22 Rev.\ 1a statistical test results on
+        ciphertext output (Section~\ref{sec:sts}), a 30-vector KAT corpus
+        (Section~\ref{sec:kats}), and a fuzz harness covering the full
+        decoder pipeline (Section~\ref{sec:fuzz}).
+  \item We discuss known caveats (Section~\ref{sec:caveats}): the 16-bit
+        plaintext length cap, the fixed ciphertext expansion factor, the
+        padding length-bucket leak, and the scope of what each of
+        $\mathsf{sk}$ and $\mathbf{k}$ actually protects.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\paragraph{AES-GCM~\cite{nist-gcm}.}
+AES-GCM combines AES-CTR for confidentiality with a GHASH polynomial MAC
+over $\mathrm{GF}(2^{128})$. The Forbidden Attack~\cite{joux2006} and
+nonce-reuse attacks~\cite{joux-nonce} demonstrate that the algebraic
+structure of GHASH can be exploited when the polynomial MAC key is
+recovered (e.g., under nonce misuse), algebraically recovering the
+authentication key. NAPQES uses HMAC-SHA256 for authentication, which does
+not admit the Forbidden Attack.
+
+\paragraph{ChaCha20-Poly1305~\cite{rfc7539}.}
+ChaCha20 is an ARX cipher whose security is not reduced to a well-studied
+hardness assumption; Poly1305 is again a polynomial MAC, subject to the
+same class of Forbidden Attacks as GHASH when the one-time key is reused.
+Neither ChaCha20 nor Poly1305 is approved under current FIPS standards.
+
+\paragraph{Ascon~\cite{ascon2021}.}
+Ascon (NIST LWC winner) is a sponge-based AEAD targeting lightweight
+environments. Its security is based on the hardness of distinguishing the
+Ascon permutation from a random permutation, which involves xor-and-rotate
+operations over 64-bit words. Ascon is not yet in a FIPS-approved family.
+
+\paragraph{HMAC-based constructions.}
+HKDF~\cite{rfc5869} and HMAC-DRBG~\cite{nist-drbg} demonstrate that
+HMAC-SHA256 is a sufficient basis for key derivation and pseudorandom
+generation. NAPQES extends this philosophy to the full AEAD context.
+
+\paragraph{Deterministic and misuse-resistant AE.}
+Rogaway and Shrimpton~\cite{rogaway2006} formalise deterministic
+authenticated encryption and the corresponding restricted-query security
+notion; AES-GCM-SIV follows the same synthetic-IV philosophy NAPQES adopts
+for its nonce.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Construction}
+\label{sec:construction}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Notation}
+\label{sec:notation}
+
+Throughout this paper:
+\begin{itemize}
+  \item $\|$ denotes byte concatenation.
+  \item $\mathrm{HMAC}(K, M)$ denotes HMAC-SHA256 keyed with $K$ over message $M$.
+  \item $\mathrm{be4}(x)$, $\mathrm{be5}(x)$, $\mathrm{be8}(x)$ denote the
+        4-, 5-, and 8-byte big-endian encodings of the non-negative integer
+        $x$ (each field is fixed-width; $x$ is assumed to fit).
+  \item $[0{:}n]_{\mathrm{be}k}$ denotes the first $n$ bytes of a 32-byte
+        HMAC-SHA256 digest, interpreted as an unsigned big-endian integer
+        in $[0,2^{k})$ where $k=8n$.
+  \item $\mathcal{P}$ denotes the set of prime integers in $[10^6, 9.9 \times 10^6]$,
+        a fixed public system parameter with $|\mathcal{P}| \approx 586{,}000$.
+\end{itemize}
+
+\subsection{Key Generation}
+\label{sec:keygen}
+
+A NAPQES key pair is $(\mathbf{k}, \mathsf{sk})$, sampled by
+$\mathsf{KeyGen}(1^\lambda)$ as follows.
+
+\begin{definition}[Key generation]\label{def:keygen}
+Draw $\mathbf{k} = (k_1,\ldots,k_K)$, an ordered tuple of $K$ distinct
+primes sampled uniformly, without replacement, from $\mathcal{P}$ via a
+cryptographically secure DRBG (default $K=10$); \emph{independently}, draw
+$\mathsf{sk}\xleftarrow{\$}\{0,1\}^{256}$ uniformly via a CSPRNG. No
+function relates $\mathsf{sk}$ to $\mathbf{k}$. The serialised arithmetic
+key is
+\[
+  \mathsf{key\_bytes}(\mathbf{k}) = \mathrm{be5}(k_1) \| \mathrm{be5}(k_2) \| \cdots \| \mathrm{be5}(k_K).
+\]
+\end{definition}
+
+\begin{remark}[Concrete sampling algorithm]\label{rem:sampling}
+$\mathcal{P}$ is fixed as a public, canonical ascending enumeration
+$\mathcal{P}=\{p_0<p_1<\cdots<p_{|\mathcal{P}|-1}\}$ (e.g.\ a precomputed
+sieve table), so ``the $idx$-th prime of $\mathcal{P}$'' is well-defined
+and identical across implementations. Index sampling is by rejection:
+$\textsc{SampleIndex}()$ draws a uniform 32-bit unsigned integer $x$ from
+the CSPRNG, sets $L=\lfloor 2^{32}/|\mathcal{P}|\rfloor\cdot|\mathcal{P}|$,
+and rejects and redraws $x$ whenever $x\geq L$; once $x<L$, it returns
+$idx=x\bmod|\mathcal{P}|$, which is then exactly uniform over
+$\{0,\ldots,|\mathcal{P}|-1\}$ with no modulo bias. $k_1$ is set to
+$p_{\textsc{SampleIndex}()}$; for $j=2,\ldots,K$, $k_j$ is drawn by
+repeatedly invoking $\textsc{SampleIndex}()$ and rejecting (redrawing) any
+result equal to an already-chosen $k_1,\ldots,k_{j-1}$, until a fresh
+value is obtained. This realises exactly the uniform distribution over
+ordered tuples of $K$ distinct elements of $\mathcal{P}$ assumed by the
+$H_\infty(\mathbf{k})$ computation below.
+\end{remark}
+
+The min-entropy of $\mathbf{k}$ as sampled above is
+\[
+  H_\infty(\mathbf{k}) = \log_2\!\left(\frac{|\mathcal{P}|!}{(|\mathcal{P}|-K)!}\right) \approx K\log_2|\mathcal{P}| \approx 19.16\,K \text{ bits},
+\]
+so $H_\infty(\mathbf{k}) \approx 191.6$ bits at the default $K=10$
+(key-space size $\approx 4.8\times10^{57}\approx 2^{191.6}$).
+
+\begin{remark}[The role of $\mathbf{k}$ and $\mathsf{sk}$ are not symmetric]
+\label{rem:key-roles}
+$\mathsf{sk}$ is the \emph{only} secret that ever keys an HMAC call in this
+construction (Section~\ref{sec:domains}); $\mathbf{k}$ is used exclusively,
+directly, and un-keyed by the arithmetic token map $c \mapsto c\cdot k_j+a$
+(Section~\ref{sec:token-construction}). Consequently, none of the security
+theorems of Section~\ref{sec:security} depend in any way on
+$H_\infty(\mathbf{k})$: the PRF assumption below is stated, and used,
+against the standard \emph{uniform}-key distribution of $\mathsf{sk}$ only.
+$K$ therefore carries no security-theorem-driven minimum in this
+construction (contrast a single-secret design in which the arithmetic key
+also keys HMAC, which would require a minimum $K$ to keep an offline
+key-guessing term negligible). $K=10$ is retained as the default purely for
+the traffic-analysis-resistance contribution of the multi-prime token
+construction (Lemma~\ref{lem:length-det} and the discussion in
+Section~\ref{sec:caveats}) and as a matter of general defense-in-depth, not
+because any theorem below requires it. Section~\ref{sec:caveats} discusses,
+conversely, what protecting $\mathbf{k}$ actually buys once $\mathsf{sk}$
+is known.
+\end{remark}
+
+\subsection{Domain-Separated HMAC Derivation}
+\label{sec:domains}
+
+All internal values are computed as
+\[
+  \mathrm{Derive}_d(\mathsf{sk}, N, \mathsf{ctx}) = \mathrm{HMAC}(\mathsf{sk},\ d \| N \| \mathsf{ctx}),
+\]
+where $d$ is a 1-byte domain separator and every variable-width field
+inside $\mathsf{ctx}$ is length-prefixed (e.g.\ $\mathrm{be8}(|A|) \| A$
+for AAD $A$). Domain $\texttt{0x0A}$ is the single exception: it does not
+take a nonce as input, since it is the derivation that \emph{produces} the
+nonce (Definition~\ref{def:synthnonce}); its input shape is instead
+$\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}clll@{}}
+\toprule
+Domain & Function & Context & Output \\
+\midrule
+\texttt{0x00} & Noise position & $\mathrm{be5}(ct\_pos)$ & Boolean \\
+\texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k_i - 1]$ \\
+\texttt{0x02} & Noise probability & (none) & $[0.75, 0.99]$ \\
+\texttt{0x03} & Auth tag & $\mathrm{be8}(\lvert aad \rvert) \| aad \| \widetilde{B}$ & 32 bytes \\
+\texttt{0x04} & Noise character & $\mathrm{be5}(ct\_pos)$ & $[32, 127]$ \\
+\texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k_i - 1]$ \\
+\texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
+\texttt{0x07} & Keystream block & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
+\texttt{0x0A} & Synthetic nonce & $\mathrm{be8}(|A|) \| A \| M$ & 16 bytes \\
+\bottomrule
+\end{tabular}
+\caption{Domain-separated HMAC derivation schedule. Every domain is keyed
+by $\mathsf{sk}$ only. The nonce $N$ is applied uniformly by
+$\mathrm{Derive}_d$ for $d\neq\texttt{0x0A}$ and is therefore omitted from
+the Context column above.}
+\label{tab:domains}
+\end{table}
+
+\begin{lemma}[Domain separation]\label{lem:domsep}
+For every pair of distinct queries to $\mathrm{Derive}_\bullet(\mathsf{sk},\cdot,\cdot)$
+made anywhere in this construction, the two underlying HMAC-SHA256 inputs
+are unconditionally distinct.
+\end{lemma}
+
+\begin{proof}
+Two inputs with different domain bytes $d_1\neq d_2$ differ at byte
+position $0$, regardless of any other field, so cross-domain distinctness
+is unconditional. Within a fixed domain $d\neq\texttt{0x0A}$: bytes
+$1..16$ carry the nonce $N$, so for fixed $N$, distinctness reduces to
+injectivity of $\mathsf{ctx}\mapsto\mathsf{ctx}$; for domains
+$\{\texttt{0x00},\texttt{0x01},\texttt{0x02},\texttt{0x04},\texttt{0x05},\texttt{0x06},\texttt{0x07}\}$
+this is a fixed-width positional counter (or empty), trivially injective;
+for domain $\texttt{0x03}$, $\mathsf{ctx}=\mathrm{be8}(|A|)\|A\|\widetilde{B}$,
+and because $\mathrm{be8}(|A|)$ fixes $|A|$, the split between $A$ and
+$\widetilde{B}$ is unambiguous, so distinct $(A,\widetilde{B})$ pairs never
+collide. Within domain $\texttt{0x0A}$, whose input is
+$\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$ with no nonce field at all, the
+same length-prefix argument shows $\mathrm{be8}(|A|)\|A\|M$ is injective in
+$(A,M)$. Hence every semantically distinct derivation, in every domain,
+queries $\mathrm{HMAC}(\mathsf{sk},\cdot)$ at a distinct input.
+\end{proof}
+
+\subsection{Noise Probability}
+\label{sec:noiseprob}
+
+The noise probability is realised entirely with fixed-width integer
+arithmetic; no floating-point representation is used anywhere in this
+construction. Fix the public integer constants
+\[
+  \theta_{\min} = \lfloor 0.75 \times 2^{64} \rfloor, \qquad
+  \theta_{\max} = \lfloor 0.99 \times 2^{64} \rfloor,
+\]
+and let $\tau = \mathrm{Derive}_{0x02}(\mathsf{sk}, N, \varepsilon)[0:8]_{\mathrm{be64}} \in [0, 2^{64})$
+be the raw 64-bit unsigned integer HMAC output (no division involved).
+The per-message noise threshold is the 64-bit integer
+\[
+  \theta(N) = \theta_{\min} + \left\lfloor \frac{\tau \cdot (\theta_{\max} - \theta_{\min})}{2^{64}} \right\rfloor,
+\]
+computed with a single 128-bit intermediate product and one integer
+division, so that $\theta(N)$ is bit-identical across all conforming
+implementations regardless of platform or language. Every informal
+reference elsewhere in this paper to a ``noise probability $p \in
+[0.75, 0.99]$'' (e.g.\ Table~\ref{tab:domains}) denotes this integer
+threshold, i.e.\ $p = \theta(N)/2^{64}$.
+
+\subsection{Plaintext Padding}
+\label{sec:padding}
+
+Let $n = \lvert P \rvert$ (plaintext length in Unicode codepoints). Define
+\[
+  B = \max(16,\ 2^{\lceil \log_2(n+1) \rceil}), \qquad P_d = [n \gg 8,\ n \wedge \mathrm{0xFF}] \| P \| \mathbf{pad},
+\]
+where $\mathbf{pad} = (\mathbf{pad}_0, \ldots, \mathbf{pad}_{B-n-1})$ is a
+$(B-n)$-codepoint sequence with
+\[
+  \mathbf{pad}_{i} = \bigl(\mathrm{Derive}_{0x06}(\mathsf{sk}, N, \mathrm{be4}(i))[0{:}4]_{\mathrm{be32}} \bmod 95\bigr) + 32 \ \in [32,126].
+\]
+The total padded length is $R = n + 2 + (B-n) = B+2$ codepoints; we call
+$B$ the \emph{padding bucket} of the message and $R$ the \emph{real-token
+count}. Because $B$ depends only on $n$ (never on the codepoint values
+themselves), two messages of equal codepoint length always share the same
+padding bucket and the same real-token count.
+
+\subsection{Token Construction}
+\label{sec:token-construction}
+
+For each padded codepoint $c$, define the following primitives, each an
+explicit reduction of a 32-byte $\mathrm{Derive}_d$ output into its target
+range:
+
+\begin{definition}[Token-construction primitives]\label{def:token-prims}
+For a key element $k$, position counters $ct\_pos$, $real\_idx$:
+\begin{align*}
+  \texttt{is\_noise}(ct\_pos) &= \mathbf{1}\bigl[\,\mathrm{Derive}_{0x00}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}8]_{\mathrm{be64}} < \theta(N)\,\bigr], \\
+  \texttt{noise\_char}(ct\_pos) &= \bigl(\mathrm{Derive}_{0x04}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod 96\bigr) + 32, \\
+  \texttt{noise\_addend}(ct\_pos, k) &= \bigl(\mathrm{Derive}_{0x05}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1, \\
+  \texttt{real\_addend}(real\_idx, k) &= \bigl(\mathrm{Derive}_{0x01}(\mathsf{sk}, N, \mathrm{be5}(real\_idx))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1.
+\end{align*}
+\end{definition}
+
+\begin{remark}[Modulo bias]\label{rem:modbias}
+Each finite-range reduction above (and the padding-codepoint reduction of
+Section~\ref{sec:padding}) draws a value pseudo-uniformly from
+$[0,2^{32})$ and reduces it modulo a small integer $m$. For any
+$m\le2^{32}$, every residue's probability deviates from $1/m$ by at most a
+factor $m/2^{32}$: below $2^{-25}$ for the padding codepoint ($m=95$) and
+noise character ($m=96$), and below $2^{-8}$ for the addends
+($m=k-1<2^{24}$). This bias is statistically dominated by the underlying
+PRF advantage against HMAC-SHA256 and is negligible for the security
+claims of Section~\ref{sec:security}; no rejection sampling is required.
+The noise threshold $\theta(N)$ (Section~\ref{sec:noiseprob}) is exempt
+from this discussion entirely: it is computed from fixed public integer
+constants via exact integer arithmetic rather than a modulo reduction, so
+no residue bias applies to it at all, and the prime-index sampling of
+Remark~\ref{rem:sampling} is bias-free by rejection rather than by
+statistical dominance.
+\end{remark}
+
+Real and noise tokens are integers $c\cdot k + a$ for codepoint $c$
+(or a noise character), key element $k=\mathbf{k}[i \bmod K]$, and addend
+$a$ from Definition~\ref{def:token-prims}. Because $k$ is prime and every
+addend lies in $[1,k-1]$, $\gcd(a,k)=1$ and hence $\gcd(\text{token},k)=1$
+for every token, real or noise.
+
+To keep ciphertext length independent of the message-derived nonce's
+particular noise realisation (Section~\ref{sec:wire-format}), the number
+of \emph{consecutive} noise tokens emitted before each real token is capped
+at a fixed constant $\mathrm{MAX\_NOISE\_RUN}=19$, and the total token
+count is padded, with additional filler tokens structurally identical to
+genuine noise tokens, up to a fixed ceiling of exactly
+$R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens per message:
+
+\begin{lstlisting}[language=Python, caption={Token emission (encoding)}]
+for c in padded:                     # R codepoints total
+    noise_run = 0
+    while noise_run < MAX_NOISE_RUN and is_noise(ct_pos):
+        k = key[real_idx % K]
+        emit noise_char(ct_pos) * k + noise_addend(ct_pos, k)
+        ct_pos += 1; noise_run += 1
+    k = key[real_idx % K]
+    emit c * k + real_addend(real_idx, k)
+    ct_pos += 1; real_idx += 1
+
+# Ceiling padding: append filler tokens (identical construction to
+# genuine noise tokens) until exactly R * (MAX_NOISE_RUN + 1) tokens
+# have been emitted in total.
+ceiling = R * (MAX_NOISE_RUN + 1)
+while len(tokens) < ceiling:
+    k = key[real_idx % K]
+    emit noise_char(ct_pos) * k + noise_addend(ct_pos, k)
+    ct_pos += 1
+\end{lstlisting}
+
+Because the ceiling depends only on $R$ (hence only on the padding bucket
+$B$), the total token count $N_{\mathrm{tok}} = R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$
+is, by construction, a deterministic function of the padding bucket
+alone — regardless of $\mathsf{sk}$, $N$, $A$, or the specific message
+(Lemma~\ref{lem:length-det}).
+
+\subsection{Synthetic Nonce}
+\label{sec:synthnonce}
+
+\begin{definition}[Synthetic nonce]\label{def:synthnonce}
+For $\mathsf{sk}\in\{0,1\}^{256}$, $A\in\{0,1\}^{*}$, $M\in\mathcal{M}$
+(encoded as UTF-8 bytes),
+\[
+  N(\mathsf{sk}, A, M) \;=\; \mathrm{HMAC}\bigl(\mathsf{sk},\;
+    \texttt{0x0A} \,\|\, \mathrm{be8}(|A|) \,\|\, A \,\|\, M\bigr)[0{:}16].
+\]
+\end{definition}
+
+This is a synthetic IV in the manner of RFC~5297 SIV / AES-GCM-SIV: it is
+a deterministic function of the key and the input, not sampled
+independently at random, so re-encrypting an identical $(A,M)$ pair always
+reproduces the identical nonce (and hence the identical ciphertext) —
+the standard, disclosed message-equality trade-off of deterministic,
+misuse-resistant encryption (Definition~\ref{def:ind-cpa-det}).
+
+\subsection{Wire Format}
+\label{sec:wire-format}
+
+Each token is serialised in a fixed-width 8-byte field,
+\[
+  B = \mathrm{be8}(\mathrm{token}[0]) \| \mathrm{be8}(\mathrm{token}[1]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N_{\mathrm{tok}}-1]),
+\]
+so $|B| = 8N_{\mathrm{tok}}$ bytes, with $N_{\mathrm{tok}} = R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$
+as fixed in Section~\ref{sec:token-construction}. $B$ is XOR-masked with a
+keystream derived from domain $\texttt{0x07}$:
+\[
+  \widetilde{B} \;=\; B \,\oplus\, \mathrm{ks}(N)\bigl[0 : |B|\bigr],
+  \qquad
+  \mathrm{ks}(N) \;=\; \mathrm{Derive}_{0x07}(\mathsf{sk}, N, \mathrm{be4}(0)) \,\|\,
+  \mathrm{Derive}_{0x07}(\mathsf{sk}, N, \mathrm{be4}(1)) \,\|\, \cdots,
+\]
+generating only as many 32-byte blocks as needed to cover $|B|$ bytes
+(truncating the final block). The authentication tag is
+\[
+  T = \mathrm{Derive}_{0x03}\bigl(\mathsf{sk},\ N,\ \mathrm{be8}(|A|) \| A \| \widetilde{B}\bigr),
+\]
+a 32-byte HMAC-SHA256 value binding the (possibly empty) associated data
+$A$. The ciphertext is
+\[
+  C = N \| \widetilde{B} \| T,
+\]
+a 16-byte nonce, the masked token blob, and the 32-byte tag. A decryptor
+rejects any input with $|C| < 48$ bytes outright (parse-time floor); the
+true minimum length of a well-formed ciphertext is larger, since every
+message — including the empty string — pads to at least $B=16$ codepoints
+($R=18$ real tokens), giving
+$N_{\mathrm{tok}} = 18\cdot20 = 360$, $|B|=2880$ bytes, and
+$|C| = 16+2880+32 = 2928$ bytes at minimum.
+
+\begin{lemma}[Ciphertext length is a deterministic function of the padding bucket]
+\label{lem:length-det}
+For any $\mathbf{k}$, $\mathsf{sk}$, $A$, $M$,
+\[
+  |C| \;=\; 16 \;+\; 8\,R\,(\mathrm{MAX\_NOISE\_RUN}+1) \;+\; 32,
+  \qquad R = B(|M|) + 2,
+\]
+where $B(\cdot)$ is the padding-bucket function of
+Section~\ref{sec:padding}. In particular $|C|$ depends on $M$ only through
+$B(|M|)$ — never through $\mathsf{sk}$, $N$, $A$, or the specific
+codepoints of $M$.
+\end{lemma}
+
+\begin{proof}
+Immediate from the construction of Section~\ref{sec:token-construction}:
+$N_{\mathrm{tok}}$ is fixed, by the ceiling-padding step, to exactly
+$R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens regardless of the natural
+noise realisation, and $R = B(|M|)+2$ depends only on the codepoint
+\emph{count} of $M$ (Section~\ref{sec:padding}). The wire format then adds
+a constant 16-byte nonce and 32-byte tag, and masking (XOR) does not
+change $|B|$.
+\end{proof}
+
+\subsection{The NAPQES Algorithm Triple}
+\label{sec:algorithm-triple}
+
+\begin{definition}[NAPQES AEAD algorithm triple]\label{def:aead-triple}
+NAPQES is the triple $(\mathsf{KeyGen}, \mathsf{Enc}, \mathsf{Dec})$ over
+the following typed spaces:
+\begin{itemize}
+  \item Key space $\mathcal{K}\times\{0,1\}^{256}$: $\mathcal{K}$ is the set
+        of ordered $K$-tuples of distinct elements of $\mathcal{P}$
+        (Section~\ref{sec:keygen}).
+  \item AAD space $\mathcal{A} = \{0,1\}^{*}$: the AAD length is encoded
+        as $\mathrm{be8}(|A|)$ throughout (Section~\ref{sec:domains}), so
+        any $|A|<2^{64}$ bytes is supported unambiguously, with no
+        practical ceiling.
+  \item Message space $\mathcal{M}$: finite sequences of Unicode codepoints
+        of length at most $\mathrm{MAX\_PLAINTEXT\_CODEPOINTS}=2^{16}-1$, the
+        limit imposed by the 2-codepoint big-endian length prefix written
+        during padding (Section~\ref{sec:padding}).
+  \item Ciphertext space $\mathcal{C}=\{0,1\}^{*}$: every output of
+        $\mathsf{Enc}$ has length $16+8R(\mathrm{MAX\_NOISE\_RUN}+1)+32$
+        bytes for $R=B(|M|)+2$ (Lemma~\ref{lem:length-det}); the parse-time
+        rejection floor is 48 bytes, but the true minimum length of a
+        well-formed ciphertext is $2928$ bytes.
+\end{itemize}
+
+\paragraph{$\mathsf{KeyGen}(1^{\lambda}) \to (\mathbf{k},\mathsf{sk})$.}
+As in Definition~\ref{def:keygen}.
+
+\paragraph{$\mathsf{Enc}(\mathbf{k}, \mathsf{sk}, A, M) \to C$.}
+(1) compute $N=N(\mathsf{sk},A,M)$ (Definition~\ref{def:synthnonce}); (2)
+pad $M$ to $P_d$ (Section~\ref{sec:padding}); (3) run the token-emission
+loop of Section~\ref{sec:token-construction} over $P_d$ using
+$(\mathsf{sk},N)$ to obtain the token vector
+$(\mathrm{token}[0],\ldots,\mathrm{token}[N_{\mathrm{tok}}-1])$; (4)
+serialise $B$; (5) mask $\widetilde{B}=B\oplus\mathrm{ks}(N)$; (6) compute
+$T=\mathrm{Derive}_{0x03}(\mathsf{sk},N,\mathrm{be8}(|A|)\|A\|\widetilde{B})$;
+(7) output $C=N\|\widetilde{B}\|T$. The public encryption oracle is
+$\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},A,M)\triangleq\mathsf{Enc}(\mathbf{k},\mathsf{sk},A,M)$
+— a \emph{pure function} of $(A,M)$, since $N$ is computed synthetically
+rather than sampled.
+
+\paragraph{$\mathsf{Dec}(\mathbf{k}, \mathsf{sk}, A, C) \to M \text{ or } \bot$.}
+(1) if $|C|<48$, output $\bot$; (2) parse $C=N\|\widetilde{B}\|T'$ with $N$
+the leading 16 bytes and $T'$ the trailing 32 bytes; (3) let
+$N_{\mathrm{tok}}=(|C|-48)/8$ and, if this is not a non-negative integer or
+not divisible by $\mathrm{MAX\_NOISE\_RUN}+1$, output $\bot$; otherwise set
+$R=N_{\mathrm{tok}}/(\mathrm{MAX\_NOISE\_RUN}+1)$; (4) compute
+$T=\mathrm{Derive}_{0x03}(\mathsf{sk},N,\mathrm{be4}(|A|)\|A\|\widetilde{B})$;
+(5) if $T\neq T'$ (compared in constant time), output $\bot$; (6) else
+unmask $B=\widetilde{B}\oplus\mathrm{ks}(N)$, deserialise the fixed-width
+tokens, and invert the token-emission loop using the same
+$(\mathsf{sk},N)$-derived noise-position oracle and addends, stopping once
+$R$ real tokens have been extracted (discarding any trailing filler);
+strip the length prefix and padding; output $M$.
+\end{definition}
+
+\begin{definition}[Correctness]\label{def:correctness}
+For every $\lambda$, every $(\mathbf{k},\mathsf{sk})\gets\mathsf{KeyGen}(1^\lambda)$,
+every $A\in\mathcal{A}$, $M\in\mathcal{M}$:
+\[
+  \mathsf{Dec}\bigl(\mathbf{k},\mathsf{sk},\,A,\,\mathsf{Enc}(\mathbf{k},\mathsf{sk},A,M)\bigr) = M.
+\]
+\end{definition}
+
+\begin{proof}
+$\mathsf{Enc}$'s token-emission loop and $\mathsf{Dec}$'s loop-inversion
+step both compute the noise-position oracle, addends, and padding
+codepoints as pure, deterministic functions of $(\mathsf{sk},N,\mathrm{position})$;
+given the same $\mathsf{sk}$ and the (deterministically re-derivable, once
+$M$ is recovered token-by-token) $N$, both algorithms compute identical
+intermediate values at every position, so token emission and inversion are
+exact inverses whenever $T=T'$. Correctness is additionally checked
+empirically by the cross-language KAT corpus and the full regression
+suite across the Python, Rust, and C implementations
+(Section~\ref{sec:implementation}).
+\end{proof}
+
+\begin{remark}[Authentication-failure output $\bot$]
+The formal $\bot$ output of $\mathsf{Dec}$ is realised in all three
+reference implementations as a raised exception (\texttt{ValueError} in
+Python/Rust, an equivalent error code in C) rather than a sentinel return
+value — a standard, semantically equivalent realisation of $\bot$ (cf.\
+most software AEAD APIs, e.g.\ \texttt{cryptography.hazmat}).
+\end{remark}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Security Analysis}
+\label{sec:security}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Every theorem in this section is unconditional under the standard,
+uniform-key PRF assumption on HMAC-SHA256 stated below: because
+$\mathsf{sk}$ is sampled uniformly and independently of $\mathbf{k}$, every
+reduction constructed in this section may sample $\mathbf{k}$ on its own
+(to run the arithmetic layer) while forwarding every HMAC call to an
+external oracle keyed by the challenger's $\mathsf{sk}$ — the reduction
+never needs to extract $\mathsf{sk}$ from $\mathbf{k}$, or vice versa, so
+no simulation gap and no non-standard key-distribution assumption arises.
+NAPQES does not define a standalone MAC verification key separate from
+$\mathsf{sk}$, so EUF-CMA unforgeability of the tag and INT-CTXT
+unforgeability of the ciphertext coincide here.
+
+\subsection{PRF Advantage and Truncation}
+
+\begin{definition}[HMAC-SHA256 PRF advantage]\label{def:prf-adv}
+Let $F=\mathrm{HMAC\text{-}SHA256}:\{0,1\}^{*}\times\{0,1\}^{*}\to\{0,1\}^{256}$.
+For a PPT distinguisher $\mathcal{B}$ with oracle access to either
+$F(\kappa,\cdot)$ for $\kappa\xleftarrow{\$}\{0,1\}^{256}$, or a function
+$\rho:\{0,1\}^{*}\to\{0,1\}^{256}$ sampled uniformly from all functions of
+that type,
+\[
+  \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B})
+  \;=\;
+  \Bigl|\Pr\bigl[\mathcal{B}^{F(\kappa,\cdot)}=1\bigr]-\Pr\bigl[\mathcal{B}^{\rho(\cdot)}=1\bigr]\Bigr|.
+\]
+\end{definition}
+
+\begin{assumption}[Uniform-key HMAC-SHA256 PRF]\label{assum:hmac-prf}
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$
+is negligible in the security parameter for every PPT $\mathcal{B}$,
+for $\kappa$ drawn uniformly from $\{0,1\}^{256}$ (matching how
+$\mathsf{sk}$ is sampled, Definition~\ref{def:keygen}).
+\end{assumption}
+
+\begin{lemma}[Truncation preserves the PRF property]\label{lem:trunc-prf}
+For any fixed truncation length $\tau\le256$, writing
+$\mathrm{trunc}_\tau(x)=x[0{:}\tau]$,
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{trunc}_\tau\circ F}(\mathcal{B})=\mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B})$.
+\end{lemma}
+
+\begin{proof}
+$\rho$ is a uniformly random function, so $\mathrm{trunc}_\tau\circ\rho$ is
+itself uniformly random over $\{0,1\}^{8\tau}$, independently across
+distinct inputs. Any distinguisher against $\mathrm{trunc}_\tau\circ F$
+yields, by truncating every oracle answer it receives before continuing to
+run unmodified, a distinguisher against $F$ with identical advantage.
+\end{proof}
+
+This covers every truncated derivation used by this construction (nonce
+$[0{:}16]$, addend/character $[0{:}4]$, noise threshold $[0{:}8]$) under
+Assumption~\ref{assum:hmac-prf} alone.
+
+\subsection{IND-CPA-det Security}
+\label{sec:ind-cpa}
+
+Because $\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},A,M)$ is a pure function
+of $(A,M)$ (Section~\ref{sec:algorithm-triple}), the standard,
+unrestricted left-or-right IND-CPA game is not achievable by any
+deterministic scheme: an adversary who queries the encryption oracle on
+one of its own two challenge messages trivially learns the challenge bit
+by comparing the result to the challenge ciphertext. This is not a defect
+of the construction — it is the standard, well-understood property of
+deterministic, misuse-resistant encryption (Rogaway and
+Shrimpton~\cite{rogaway2006}; cf.\ AES-GCM-SIV) — and the correct notion
+of confidentiality for such a scheme is the restricted-query game below.
+
+\begin{definition}[IND-CPA-det security]\label{def:ind-cpa-det}
+For a PPT adversary $\mathcal{A}=(\mathcal{A}_1,\mathcal{A}_2)$, define
+$\mathbf{Exp}^{\mathrm{ind\text{-}cpa\text{-}det}}_{\mathcal{A}}(\lambda)$:
+\begin{enumerate}
+  \item $(\mathbf{k},\mathsf{sk})\gets\mathsf{KeyGen}(1^\lambda)$.
+  \item $\mathcal{A}_1$ is given adaptive oracle access to
+        $\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},\cdot,\cdot)$ and, after at
+        most $q$ total queries (counted jointly with step 4), outputs
+        $(A^*,m_0,m_1,\mathsf{st})$ with $|m_0|=|m_1|$ (codepoint count).
+  \item The challenger samples $b\xleftarrow{\$}\{0,1\}$ and returns
+        $c^*\gets\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},A^*,m_b)$.
+  \item $\mathcal{A}_2(\mathsf{st},c^*)$, with continued oracle access,
+        outputs a bit $b'$.
+  \item The experiment outputs $1$ iff $b'=b$.
+\end{enumerate}
+$\mathcal{A}$ must additionally respect two restrictions, standard for
+deterministic/misuse-resistant AE~\cite{rogaway2006}, or the experiment
+aborts with $\mathcal{A}$ losing: (i) \emph{no repeated queries} — $\mathcal{A}$
+never queries the encryption oracle twice on an identical $(A,M)$ pair, in
+either phase; (ii) \emph{no challenge-message queries} — writing
+$(A^*,m_0,m_1)$ for $\mathcal{A}_1$'s output, $\mathcal{A}$ never queries
+the encryption oracle, in either phase, on $(A^*,m_0)$ or $(A^*,m_1)$.
+The advantage of $\mathcal{A}$ is
+$\mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}(\mathcal{A}) =
+|\Pr[\mathbf{Exp}^{\mathrm{ind\text{-}cpa\text{-}det}}_{\mathcal{A}}(\lambda)=1]-\tfrac12|$.
+\end{definition}
+
+\begin{lemma}[Equal padded length is derived]\label{rem:equal-padded-derived}
+$|m_0|=|m_1|$ forces $m_0,m_1$ to share the same padding bucket $B$ and the
+same real-token count $R$ (Section~\ref{sec:padding}), with certainty —
+this is a direct consequence of $B$ depending only on codepoint count.
+\end{lemma}
+
+\begin{lemma}[Nonce collision]\label{lem:nonce-collision}
+For any two distinct queried pairs $(A_1,M_1)\neq(A_2,M_2)$ under the same
+$\mathsf{sk}$, there is a PRF adversary $\mathcal{B}$ with similar running
+time such that
+$\Pr[N(\mathsf{sk},A_1,M_1)=N(\mathsf{sk},A_2,M_2)] \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}) + 2^{-128}$.
+\end{lemma}
+
+\begin{proof}
+By Lemma~\ref{lem:domsep}, $(A_1,M_1)\neq(A_2,M_2)$ implies the two domain
+$\texttt{0x0A}$ inputs are distinct, so replacing $\mathrm{HMAC}(\mathsf{sk},\cdot)$
+by a truly random function $\rho$ (a PRF hop of advantage
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$)
+makes the two 128-bit truncated outputs independent and uniform, colliding
+with probability exactly $2^{-128}$.
+\end{proof}
+
+\begin{theorem}[IND-CPA-det]\label{thm:ind-cpa}
+For any PPT adversary $\mathcal{A}$ respecting
+Definition~\ref{def:ind-cpa-det}'s restrictions and making at most $q$
+encryption queries, there exists a PRF adversary $\mathcal{B}_1$ with
+similar running time such that
+\[
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}(\mathcal{A})
+  \;\leq\;
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+  + \frac{q^2}{2^{128}},
+\]
+against the standard, uniform-key HMAC-SHA256 PRF assumption, with no
+key-guessing or key-entropy term.
+\end{theorem}
+
+\begin{proof}
+We proceed via a sequence of two hybrid games.
+
+\paragraph{Game $G_0$ (real).} The challenger samples $(\mathbf{k},\mathsf{sk})$
+and answers queries via the real $\mathsf{Enc}$, which calls
+$F(\mathsf{sk},\cdot)$ for all internal derivations.
+
+\paragraph{Game $G_1$ (PRF replacement).} Identical, except
+$F(\mathsf{sk},\cdot)$ is replaced by a truly random function
+$\rho:\{0,1\}^*\to\{0,1\}^{256}$, sampled lazily.
+
+\begin{lemma}\label{lem:prf-hop}
+There is a PRF adversary $\mathcal{B}_1$, running in time
+$\mathcal{O}(T_\mathcal{A})$, such that
+$|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]|\le\mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1)$.
+\end{lemma}
+\begin{proof}
+$\mathcal{B}_1$ is given an oracle $\mathcal{O}$ that is either
+$F(\mathsf{sk},\cdot)$ or $\rho(\cdot)$. Because $\mathsf{sk}$ is sampled
+independently of $\mathbf{k}$ (Definition~\ref{def:keygen}), $\mathcal{B}_1$
+samples its own $\mathbf{k}'$ via the prime-sampling step of
+$\mathsf{KeyGen}$ to run the arithmetic layer of $\mathsf{Enc}$ directly,
+and forwards every domain-derivation call (including domain
+$\texttt{0x0A}$) to $\mathcal{O}$. $\mathcal{B}_1$ never needs to know
+$\mathsf{sk}$ (or the challenger's hidden key) to run this simulation: when
+$\mathcal{O}=F(\mathsf{sk},\cdot)$ the simulation is distributed
+identically to $G_0$; when $\mathcal{O}=\rho$, identically to $G_1$.
+\end{proof}
+
+\paragraph{Nonce collision under $G_1$.} Let $\mathrm{Coll}$ be the event
+that the challenge nonce $N^*$ collides with some queried nonce
+$N_1,\ldots,N_q$. By Definition~\ref{def:ind-cpa-det}'s restriction (ii),
+every queried pair $(A_i,M_i)$ is distinct from the challenge pair
+$(A^*,m_b)$ regardless of $b$, so Lemma~\ref{lem:nonce-collision} applies
+validly to every pair $\{(A_i,M_i),(A^*,m_b)\}$; a union bound over the $q$
+queries (together with pairwise collisions among $N_1,\ldots,N_q$) gives
+$\Pr[\mathrm{Coll}]\le q^2/2^{128}$ (the $\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)$
+term from Lemma~\ref{lem:nonce-collision} is already accounted for by
+$\mathcal{B}_1$ above).
+
+\begin{lemma}[Hiding]\label{lem:hiding}
+In $G_1$, conditioned on $\overline{\mathrm{Coll}}$,
+$\Pr[\mathcal{A}\text{ wins }G_1\mid\overline{\mathrm{Coll}}]=\tfrac12$.
+\end{lemma}
+
+\begin{proof}
+Under $\overline{\mathrm{Coll}}$, $N^*\notin\{N_1,\ldots,N_q\}$. Every
+challenge-phase derivation (domains $\texttt{0x00}$–$\texttt{0x07}$) uses
+an input prefixed by its domain byte and then $N^*$; by
+Lemma~\ref{lem:domsep} none of these inputs collides with any query-phase
+input (different nonce at the fixed offset) or with any other domain's
+input (different domain byte). Since $\rho$ is truly random, all
+challenge-phase outputs are therefore fresh, uniform, and independent of
+the adversary's view. In particular the keystream
+$\mathrm{ks}(N^*)$ (domain $\texttt{0x07}$) is independent of the token
+blob $B$ it masks (which is itself assembled entirely from domains
+$\texttt{0x00},\texttt{0x01},\texttt{0x02},\texttt{0x04},\texttt{0x05},\texttt{0x06}$),
+so the one-time-pad identity applies: for fixed $B$,
+$\widetilde{B}=B\oplus\mathrm{ks}(N^*)$ is uniform over
+$\{0,1\}^{8|B|}$. By Lemma~\ref{rem:equal-padded-derived}, $m_0,m_1$ share
+the same padding bucket and real-token count $R$; by
+Lemma~\ref{lem:length-det}, $N_{\mathrm{tok}}=R(\mathrm{MAX\_NOISE\_RUN}+1)$
+is therefore identical for $m_0$ and $m_1$ (indeed for \emph{any} nonce),
+so $|B|$ — and hence the distribution of $\widetilde{B}$ — is identical
+regardless of $b$. The tag $T=\rho(\texttt{0x03}\|N^*\|\cdots)$ is a fresh
+uniform 32-byte value, also independent of $b$. Hence
+$c^*=(N^*,\widetilde{B},T)$ is jointly uniform over its domain,
+independently of $b$, giving the adversary no information about $b$.
+\end{proof}
+
+Combining: $\Pr[\mathcal{A}\text{ wins }G_1]\le\Pr[\mathrm{Coll}]+\tfrac12\le q^2/2^{128}+\tfrac12$,
+so
+\[
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}(\mathcal{A})
+  = \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\tfrac12\bigr|
+  \le \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B}_1) + \frac{q^2}{2^{128}}. \qedhere
+\]
+\end{proof}
+
+\subsection{INT-CTXT: Ciphertext Integrity}
+\label{sec:int-ctxt}
+
+\begin{theorem}[INT-CTXT]\label{thm:int-ctxt}
+For any PPT adversary $\mathcal{A}$ making at most $q$ encryption queries
+and at most $q_v\ge1$ adaptive decryption/verification queries, there
+exists a PRF adversary $\mathcal{B}_2$ with similar running time such that
+\[
+  \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}(\mathcal{A})
+  \leq
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  + \frac{q_v}{2^{256}}.
+\]
+Freshness is measured over the pair $(c,aad)$ against
+$\{(c_1,aad_1),\ldots,(c_q,aad_q)\}$, the encryption oracle's own outputs;
+there is no $q$-dependent (encryption-query-count) term, since Case~2
+below is resolved deterministically rather than probabilistically.
+\end{theorem}
+
+\begin{proof}
+Write a forgery attempt as $c^*=(N^*,\widetilde{B}^*,T^*)$ with tag input
+$x^*=\texttt{0x03}\|N^*\|\mathrm{be4}(|aad^*|)\|aad^*\|\widetilde{B}^*$.
+
+\paragraph{Case 1: $N^*$ was not used in any encryption query.} By
+Lemma~\ref{lem:domsep}, $x^*$ is distinct from every query-phase domain
+$\texttt{0x03}$ input (different nonce at the fixed offset) and from every
+other domain's input, so $x^*$ was never submitted to
+$\mathrm{HMAC}(\mathsf{sk},\cdot)$. Construct $\mathcal{B}_2$, given an
+oracle $f$ (real or random), exactly as $\mathcal{B}_1$ in
+Lemma~\ref{lem:prf-hop}: sample $\mathbf{k}'$ independently, forward every
+HMAC call to $f$, and output ``real'' iff some forgery attempt's candidate
+tag matches $f(x^*)$. In the ideal world $f(x^*)$ is uniform and
+independent of $\mathcal{A}$'s view, so each of the $q_v$ attempts succeeds
+by blind guessing with probability exactly $2^{-256}$; a union bound gives
+$\Pr[\text{forge in Case 1}]\le\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)+q_v/2^{256}$.
+
+\paragraph{Case 2: $N^*=N_i$ for some query $i$.} If $x^*\neq x_i$ for
+every such $i$ (which, by injectivity of the length-prefixed AAD encoding,
+covers both $\widetilde{B}^*\neq\widetilde{B}_i$ and the
+$\widetilde{B}^*=\widetilde{B}_i\wedge aad^*\neq aad_i$ replay-with-new-AAD
+sub-case), $x^*$ was never queried and Case 1's argument applies verbatim.
+If instead $x^*=x_i$ for some $i$, injectivity forces
+$aad^*=aad_i\wedge\widetilde{B}^*=\widetilde{B}_i$: if also $T^*=T_i$ then
+$(c^*,aad^*)=(c_i,aad_i)$, excluded by freshness; if $T^*\neq T_i$, the
+recomputed tag equals $T_i\neq T^*$ and $\mathsf{Dec}$ rejects
+unconditionally. Either sub-case contributes no successful,
+freshness-respecting forgery, and both branches are resolved
+deterministically via Lemma~\ref{lem:domsep}'s injectivity — $N^*$ is
+chosen adaptively by $\mathcal{A}$ after observing $N_1,\ldots,N_q$, so no
+probabilistic collision term applies to Case~2.
+
+Combining both cases yields the stated bound.
+\end{proof}
+
+\subsection{IND-CCA-det Security}
+\label{sec:ind-cca}
+
+\begin{theorem}[IND-CCA-det]\label{thm:ind-cca}
+For any PPT adversary making at most $q$ encryption queries and $q_d$
+decryption queries, and respecting Definition~\ref{def:ind-cpa-det}'s
+restrictions (i)–(ii) on its own encryption-oracle queries, there exist
+PRF adversaries $\mathcal{B}_1,\mathcal{B}_2$ with similar running time
+such that
+\[
+  \mathrm{Adv}^{\mathrm{IND\text{-}CCA\text{-}det}}(\mathcal{A})
+  \leq
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+  +
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  + \frac{q^2}{2^{128}}
+  + \frac{q_d}{2^{256}}.
+\]
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+We apply the Bellare–Namprempre composition theorem~\cite{bellare2000ae}:
+a scheme that is both IND-CPA-det (Theorem~\ref{thm:ind-cpa}) and INT-CTXT
+(Theorem~\ref{thm:int-ctxt}) is IND-CCA-det. Concretely, define
+$H_0$ as the real IND-CCA-det game (encryption and adaptive decryption
+oracles, with only the exact pair $(c^*,A^*)$ forbidden from the
+decryption oracle) and $H_1$ as $H_0$ with the decryption oracle replaced
+by a table lookup that answers a query $(c,aad)$ with the recorded
+plaintext if $(c,aad)$ was previously output by the encryption oracle
+(including the challenge triple, once issued) and $\bot$ otherwise. $H_0$
+and $H_1$ agree on every query except a fresh, valid forgery — event $D$ —
+so $|\Pr[H_0]-\Pr[H_1]|\le\Pr[D]$. An INT-CTXT forger constructed by
+forwarding $\mathcal{A}$'s $q$ encryption queries and its own
+$(q{+}1)$-th (used to produce the challenge $c^*$), and every
+decryption query in both phases, to a real INT-CTXT challenger simulates
+$H_0$ perfectly, so $\Pr[D]\le\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_2)+q_d/2^{256}$
+by Theorem~\ref{thm:int-ctxt} (no encryption-query-count term). In $H_1$,
+the table-backed decryption oracle discloses nothing $\mathcal{A}$ could
+not reconstruct itself from its own queries (the one exception, the
+challenge triple, is never looked up since $(c^*,A^*)$ is forbidden), so
+$H_1$ reduces directly to the IND-CPA-det game of
+Theorem~\ref{thm:ind-cpa}, giving
+$|\Pr[H_1]-\tfrac12|\le\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)+q^2/2^{128}$.
+Combining the two bounds yields the stated inequality.
+\end{proof}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Post-Quantum Analysis}
+\label{sec:pq}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\paragraph{SHA-256 and Grover's algorithm.}
+Grover's algorithm~\cite{grover96} provides a quadratic speedup for
+unstructured search, requiring $\approx2^{n/2}$ oracle queries against an
+$n$-bit target. Applied to SHA-256 preimage search, this reduces the
+nominal security level from 256 to approximately 128 bits. This $2^{128}$
+figure is a bound on \emph{sequential query depth}, not a parallelizable
+work-factor: the Bennett–Bernstein–Brassard–Vazirani (BBBV) optimality
+result~\cite{bbbv1997} shows no quantum algorithm can search an
+unstructured space of size $N$ in fewer than $\Omega(\sqrt N)$ oracle
+queries, and Zalka~\cite{zalka1999} shows that distributing Grover's
+search across $S$ machines yields only a $\sqrt{S}$ speedup — the depth
+stays $\approx2^{n/2}/\sqrt{S}$ and the total work is unchanged, unlike
+classical brute force, which parallelizes linearly. At $2^{128}$
+sequential oracle queries, this remains far beyond feasibility and above
+the 112-bit minimum NIST recommends for post-2030 systems.
+
+\paragraph{No Shor-applicable structure.}
+NAPQES does not use discrete logarithms, integer factorisation, or any
+algebraic group structure. Shor's algorithm and related quantum algorithms
+provide no speedup against the construction.
+
+\paragraph{Two separate key-space figures.}
+Because $\mathsf{sk}$ is the sole HMAC key and $\mathbf{k}$ is used only by
+the un-keyed arithmetic layer (Remark~\ref{rem:key-roles}), the two secrets
+have different, non-interchangeable security roles and are best reported
+separately rather than as one conflated figure:
+\begin{itemize}
+  \item $\mathsf{sk}$: uniform 256 bits, classical exhaustive search
+        $2^{256}$, post-Grover sequential depth $\approx2^{128}$ — this is
+        the figure relevant to Assumption~\ref{assum:hmac-prf} and to every
+        theorem of Section~\ref{sec:security}.
+  \item $\mathbf{k}$: $\approx2^{191.6}$ ordered-tuple key-space size at the
+        default $K=10$ (post-Grover $\approx2^{95.8}$), relevant only to
+        the structural/traffic-analysis contribution of the multi-prime
+        token construction — \emph{not} to any theorem in
+        Section~\ref{sec:security}, none of which depend on
+        $H_\infty(\mathbf{k})$ (Remark~\ref{rem:key-roles}).
+\end{itemize}
+Both figures are non-parallelizable sequential-depth bounds by the same
+BBBV~\cite{bbbv1997}/Zalka~\cite{zalka1999} argument. Section~\ref{sec:caveats}
+discusses the practical consequence of this asymmetry: protecting
+$\mathsf{sk}$ is necessary and sufficient for confidentiality and
+integrity; protecting $\mathbf{k}$ in addition provides no independent
+confidentiality margin once $\mathsf{sk}$ is compromised.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Comparison with AES-GCM, ChaCha20-Poly1305, and Ascon}
+\label{sec:comparison}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Property & NAPQES & AES-GCM & ChaCha20-Poly1305 & Ascon \\
+\midrule
+Primitive basis & HMAC-SHA256 & AES + GHASH & ChaCha20 + Poly1305 & Ascon permutation \\
+FIPS-approved & \textbf{Yes} & Yes & \textbf{No} & No (pending) \\
+Shor-applicable structure & \textbf{No} & No & No & No \\
+Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No \\
+Nonce-reuse key recovery & \textbf{No} (Definition~\ref{def:synthnonce}, disclosed message-equality only) & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
+Ciphertext expansion & $20\times$ (fixed) & $1\times$ & $1\times$ & $1\times$ \\
+Key size & $\ge82$ bytes ($\mathbf{k}$+$\mathsf{sk}$) & 32 bytes & 32 bytes & 16 bytes \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of NAPQES with established AEAD schemes.}
+\label{tab:comparison}
+\end{table}
+
+The primary trade-off is ciphertext expansion. The token-emission loop
+caps consecutive noise tokens at $\mathrm{MAX\_NOISE\_RUN}=19$
+(Section~\ref{sec:token-construction}) and pads every message to exactly
+$R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)=20R$ tokens, so ciphertext expansion is
+a hard, deterministic $20\times$ per real codepoint — never a range, and
+never dependent on the per-message noise realisation
+(Lemma~\ref{lem:length-det}). Compared to no expansion for AES-GCM and
+ChaCha20-Poly1305, this overhead is acceptable in applications where the
+traffic pattern does not rely on ciphertext length confidentiality beyond
+the padding bucket (Section~\ref{sec:caveats}).
+
+Unlike AES-GCM and ChaCha20-Poly1305, where nonce reuse degrades
+confidentiality but does not expose the key, NAPQES's synthetic,
+message-bound nonce (Definition~\ref{def:synthnonce}) makes accidental
+reuse across \emph{distinct} $(A,M)$ pairs a negligible
+HMAC-SHA256-collision event (Lemma~\ref{lem:nonce-collision}) rather than a
+birthday-bound or DRBG-failure event; re-querying with an \emph{identical}
+$(A,M)$ pair reproduces the identical ciphertext deterministically,
+disclosing only plaintext equality — the standard, disclosed MRAE
+trade-off (cf.\ AES-GCM-SIV), not a confidentiality or key-recovery break.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Implementation}
+\label{sec:implementation}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Python Reference Implementation}
+
+The Python reference implementation (\texttt{napqes.py}) is pure Python
+3.10+, with no dependencies beyond the standard library (\texttt{hmac},
+\texttt{hashlib}, \texttt{secrets}, \texttt{base64}). Key generation and
+the AEAD entry points are \texttt{generate\_v8\_key},
+\texttt{encrypt\_bytes\_v8}, and \texttt{decrypt\_bytes\_v8}. All KAT
+vectors are derived from this implementation.
+
+\subsection{Rust Implementation}
+
+A Rust port (\texttt{rust/src/lib.rs}) mirrors the Python implementation
+(\texttt{generate\_v8\_key}, \texttt{encrypt\_bytes\_v8},
+\texttt{decrypt\_bytes\_v8}). Unit tests cover round-trip correctness,
+tamper/AAD-mismatch rejection, same-message determinism (the disclosed
+MRAE trade-off), distinct-message nonce distinctness, and
+ciphertext-length determinism across varied AAD and keys
+(Lemma~\ref{lem:length-det}).
+
+\subsection{C Implementation}
+
+A C port (\texttt{C/napqes.c}) mirrors the same construction
+(\texttt{napqes\_encrypt\_bytes\_v8}, \texttt{napqes\_decrypt\_bytes\_v8}).
+
+\subsection{Constant-Time Considerations}
+
+Authentication tag comparison uses \texttt{hmac.compare\_digest} (Python)
+and \texttt{constant\_time\_eq} from the \texttt{subtle} crate (Rust),
+providing constant-time equality on the tag bytes.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{NIST SP 800-22 Statistical Analysis}
+\label{sec:sts}
+% ─────────────────────────────────────────────────────────────────────────────
+
+We applied the full NIST SP 800-22 Rev.\ 1a Statistical Test
+Suite~\cite{sp800-22} to $10^7$ bits of NAPQES ciphertext output generated
+by encrypting a cycling corpus of printable-ASCII plaintext with a
+10-element prime key. All 15 eligible SP 800-22 tests passed at the
+$\alpha=0.01$ significance level. Results are reproducible using
+\texttt{tests/sts\_pipeline.py} in the reference implementation
+repository.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Known-Answer Tests}
+\label{sec:kats}
+% ─────────────────────────────────────────────────────────────────────────────
+
+The reference KAT corpus (\texttt{tests/kat/v6\_vectors.json}) contains 30
+vectors covering the empty message, single characters, boundary block
+sizes, 1-element and 10-element keys, non-empty and binary AAD, multiple
+nonces for the same message, same-message determinism, distinct-message
+nonce distinctness, authentication-tag tamper, undersized ciphertext,
+wrong key, and wrong AAD. Conforming implementations must produce
+byte-identical ciphertext for every positive vector and raise a matching
+error for every negative vector. The generator
+(\texttt{tests/gen\_kats.py}) can be used to verify parity on any port.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Fuzz Testing}
+\label{sec:fuzz}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Two fuzz harnesses are provided. The Python harness
+(\texttt{tests/fuzz\_atheris.py}, using \texttt{atheris}) targets
+\texttt{decrypt\_bytes\_v8} and the fixed-width token decoder, verifying
+that no exception other than \texttt{ValueError} escapes the public API.
+The Rust harness (\texttt{rust/fuzz/fuzz\_targets/decode\_bytes.rs}, using
+\texttt{cargo-fuzz}) targets the Rust \texttt{decrypt\_bytes\_v8} entry
+point with multiple key sizes and AAD values. No panics were observed
+across $10^6$ corpus entries in either harness.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Known Caveats}
+\label{sec:caveats}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{description}
+  \item[Plaintext length cap.] The block padding scheme stores the
+        plaintext length as a 2-byte big-endian integer, capping messages
+        at 65{,}535 codepoints. Exceeding the cap raises an error
+        immediately; there is no silent truncation. Callers requiring
+        larger messages must split at the application layer.
+
+  \item[Ciphertext expansion.] Fixed at exactly $20\times$ per real
+        codepoint (Section~\ref{sec:comparison}), a deliberate
+        traffic-analysis-resistance design trade-off, not a bug.
+
+  \item[Padding length-bucket leakage.] Ciphertext length reveals the
+        power-of-two padding bucket $\{16,32,\ldots,65536\}$, leaking up to
+        $\lceil\log_2 n\rceil$ bits of length information
+        (Lemma~\ref{lem:length-det}); it does not reveal the exact
+        codepoint count within a bucket, and — because the token ceiling
+        is fixed per bucket — it does not vary with $\mathsf{sk}$, the
+        nonce, or the associated data, so no averaging attack across
+        repeated encryptions of one message under varying AAD can extract
+        more than the bucket itself. Callers needing full length-hiding
+        must still layer a fixed-frame transport.
+
+  \item[Scope of $\mathsf{sk}$ and $\mathbf{k}$ compromise.] $\mathsf{sk}$
+        is the sole cryptographic secret in this construction: every HMAC
+        domain derivation — the noise schedule, the padding, the
+        per-position addends, the keystream, and the tag — is keyed by
+        $\mathsf{sk}$ alone (Section~\ref{sec:domains}). Consequently, an
+        adversary who compromises $\mathsf{sk}$ but not $\mathbf{k}$ can
+        recover any real token's plaintext codepoint directly: the
+        per-position addend's raw HMAC output depends only on
+        $\mathsf{sk}$, so for a given token the adversary can, for each of
+        the $\approx586{,}000$ candidate primes in $\mathcal{P}$, compute
+        the corresponding addend and check whether the resulting quotient
+        is an exact integer in a valid codepoint range — an
+        $\mathcal{O}(|\mathcal{P}|)$ trial-division search that succeeds in
+        microseconds. $\mathbf{k}$'s secrecy therefore adds \textbf{no}
+        independent confidentiality margin once $\mathsf{sk}$ is known:
+        compromise of $\mathsf{sk}$ alone is equivalent to a full break,
+        regardless of whether $\mathbf{k}$ also leaked. Operationally,
+        $\mathbf{k}$ and $\mathsf{sk}$ must therefore be protected with
+        equal rigor, as a single unit — not because splitting them across
+        separate storage or trust domains buys compartmentalized
+        defense-in-depth (it does not), but because $\mathsf{sk}$
+        compromise alone is already fatal. This is consistent with, and
+        does not weaken, the security theorems of
+        Section~\ref{sec:security}, which assume the entire key material
+        is secret from the adversary, exactly as for any symmetric AEAD
+        scheme (a leaked AES-256 key is likewise a full break of AES-GCM).
+\end{description}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+% ─────────────────────────────────────────────────────────────────────────────
+
+We have presented NAPQES, an AEAD scheme whose entire security reduces to
+the pseudorandomness of HMAC-SHA256. The construction avoids all algebraic
+structures targeted by known quantum algorithms, relies solely on
+FIPS-approved primitives, and keys two independently sampled secrets — an
+arithmetic-layer prime tuple $\mathbf{k}$ and a uniform 256-bit HMAC key
+$\mathsf{sk}$ — together with a synthetic, message-bound nonce that makes
+accidental nonce reuse across distinct messages negligible and degrades
+identical-message reuse only to disclosed plaintext equality. We prove
+IND-CPA-det, INT-CTXT, and IND-CCA-det security under the standard,
+uniform-key PRF assumption on HMAC-SHA256, with no key-entropy term and no
+simulation gap, and prove that ciphertext length is a deterministic
+function of the padded-length bucket alone. The scheme has been validated
+against a 30-vector Known-Answer Test corpus, the full NIST SP 800-22
+statistical suite, and a fuzz harness covering the complete decoder
+pipeline across Python, Rust, and C reference implementations.
+
+Remaining open limitations are documented in Section~\ref{sec:caveats}:
+the fixed $20\times$ ciphertext expansion inherent in the noise-injection
+design, the 16-bit plaintext length cap, the padding length-bucket leak,
+and the scope of what $\mathsf{sk}$ and $\mathbf{k}$ compromise each imply.
+Future work includes a TVLA side-channel analysis of the constant-time
+Rust implementation, a FIPS 140-3 module boundary definition, and a
+performance evaluation on embedded ARM Cortex-M4 and RISC-V targets.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{nist-gcm}
+  M. Dworkin,
+  \emph{Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC},
+  NIST SP 800-38D, November 2007.
+
+\bibitem{rfc7539}
+  Y. Nir, A. Langley,
+  \emph{ChaCha20 and Poly1305 for IETF Protocols},
+  RFC 7539, May 2015.
+
+\bibitem{ascon2021}
+  C. Dobraunig, M. Eichlseder, F. Mendel, M. Schl\"{a}ffer,
+  \emph{Ascon v1.2: Lightweight Authenticated Encryption and Hashing},
+  Journal of Cryptology, 34(3), 2021.
+
+\bibitem{grover96}
+  L. K. Grover,
+  \emph{A fast quantum mechanical algorithm for database search},
+  Proceedings of STOC '96, pp. 212--219, 1996.
+
+\bibitem{bbbv1997}
+  C. H. Bennett, E. Bernstein, G. Brassard, U. Vazirani,
+  \emph{Strengths and Weaknesses of Quantum Computing},
+  SIAM Journal on Computing, 26(5), pp. 1510--1523, 1997.
+
+\bibitem{zalka1999}
+  C. Zalka,
+  \emph{Grover's quantum searching algorithm is optimal},
+  Physical Review A, 60(4), pp. 2746--2751, 1999.
+
+\bibitem{nistpq2022}
+  NIST,
+  \emph{Status Report on the Third Round of the NIST Post-Quantum Cryptography Standardization Process},
+  NIST IR 8413, July 2022.
+
+\bibitem{joux2006}
+  A. Joux,
+  \emph{Authentication failures in NIST version of GCM},
+  NIST Comment, 2006.
+
+\bibitem{joux-nonce}
+  T. Iwata, K. Ohashi, K. Minematsu,
+  \emph{Breaking and Repairing GCM Security Proofs},
+  CRYPTO 2012, LNCS 7417, pp. 31--49.
+
+\bibitem{rfc5869}
+  H. Krawczyk, P. Eronen,
+  \emph{HMAC-based Extract-and-Expand Key Derivation Function (HKDF)},
+  RFC 5869, May 2010.
+
+\bibitem{nist-drbg}
+  E. Barker, J. Kelsey,
+  \emph{Recommendation for Random Number Generation Using Deterministic Random Bit Generators},
+  NIST SP 800-90A Rev 1, June 2015.
+
+\bibitem{bellare2000ae}
+  M. Bellare, C. Namprempre,
+  \emph{Authenticated Encryption: Relations among Notions and Analysis of the Generic Composition Paradigm},
+  ASIACRYPT 2000, LNCS 1976, pp. 531--545.
+
+\bibitem{rogaway2006}
+  P. Rogaway, T. Shrimpton,
+  \emph{A Provable-Security Treatment of the Key-Wrap Problem},
+  EUROCRYPT 2006, LNCS 4004, pp. 373--390.
+
+\bibitem{sp800-22}
+  A. Rukhin, J. Soto, J. Nechvatal, et al.,
+  \emph{A Statistical Test Suite for Random and Pseudorandom Number Generators for Cryptographic Applications},
+  NIST SP 800-22 Rev 1a, April 2010.
+
+\end{thebibliography}
+
+\end{document}

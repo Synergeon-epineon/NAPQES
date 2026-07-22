@@ -63,16 +63,21 @@ authentication tag.
 is v8}: it keys the arithmetic (token) layer and the HMAC domain-derivation
 layer with two \emph{independently sampled} secrets, $\mathbf{k}$ (a prime
 tuple) and $\mathsf{sk}$ (a uniform 256-bit string), and derives the nonce
-synthetically as $N=\mathrm{HMAC}(\mathsf{sk}, \texttt{0x0A}\|A\|M)$ in the
-manner of AES-GCM-SIV, rather than sampling it independently at random. This
+synthetically as $N=\mathrm{HMAC}(\mathsf{sk}, \texttt{0x0A}\|\mathrm{be4}(|A|)\|A\|M)$
+(audit finding CVF6, second review round: this abbreviated formula must
+include the AAD length prefix $\mathrm{be4}(|A|)$, matching
+Definition~\ref{def:synthnonce} exactly, or it is not injective in
+$(A,M)$) in the manner of AES-GCM-SIV, rather than sampling it independently at random. This
 single change closes three findings that apply to every earlier wire format
 (v1--v7): exact key recovery under nonce reuse, a non-standard
 low-entropy-key PRF hypothesis, and a security-reduction simulation gap.
-We prove IND-CPA, INT-CTXT, and IND-CCA security for v8 under the standard,
-uniform-key PRF assumption on HMAC-SHA256 (Theorems~\ref{thm:ind-cpa-v8},
-\ref{thm:int-ctxt}, \ref{thm:ind-cca}), with no key-entropy or
-key-guessing term, and with nonce misuse degrading gracefully to disclosed
-message-equality leakage instead of key recovery. The legacy, single-secret
+We prove IND-CPA-det (Definition~\ref{def:ind-cpa-det}, the
+restricted-query notion appropriate to a deterministic, misuse-resistant
+scheme's synthetic nonce), INT-CTXT, and IND-CCA-det security for v8
+under the standard, uniform-key PRF assumption on HMAC-SHA256
+(Theorems~\ref{thm:ind-cpa-v8}, \ref{thm:int-ctxt}, \ref{thm:ind-cca}), with
+no key-entropy or key-guessing term, and with nonce misuse degrading
+gracefully to disclosed message-equality leakage instead of key recovery. The legacy, single-secret
 v7 wire format is retained, fully specified, and proved secure under a
 weaker, explicit key-entropy assumption
 (Theorem~\ref{thm:ind-cpa}, Remark~\ref{rem:min-K}) for backward
@@ -137,8 +142,12 @@ remaining far above all recommended thresholds.
         construction (Section~\ref{sec:v8}): an independent
         HMAC-domain-derivation secret $\mathsf{sk}$ and arithmetic-layer
         key $\mathbf{k}$, sampled independently, together with a synthetic,
-        message-bound nonce $N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|A\|M)$.
-        We prove IND-CPA, INT-CTXT, and IND-CCA security for v8
+        message-bound nonce $N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|\mathrm{be4}(|A|)\|A\|M)$
+        (Definition~\ref{def:synthnonce}; see also the second-round audit
+        finding CVF6 remark in Section~\ref{sec:wire-format-v7}).
+        We prove IND-CPA-det (Definition~\ref{def:ind-cpa-det}, the
+        restricted-query notion a deterministic scheme's synthetic nonce
+        requires), INT-CTXT, and IND-CCA-det security for v8
         (Theorem~\ref{thm:ind-cpa-v8} and Corollary~\ref{cor:v8-security})
         under the \emph{standard, uniform-key} PRF assumption on
         HMAC-SHA256, with no key-entropy term, and show that nonce reuse
@@ -305,13 +314,40 @@ $2^{7(\ell-1)} \leq x < 2^{7\ell}$ for $x>0$ (equivalently, $b_{\ell-1} \neq
         it replaces for block-mode tokens, Section~\ref{sec:wire-format-v7}),
         so a conforming decoder rejects any input requiring more than
         $\lceil 64/7 \rceil = 10$ groups, and truncated input (a
-        continuation-flagged byte with no following byte).
+        continuation-flagged byte with no following byte);
+  \item \emph{A maximal-width ($10$-group) encoding whose value is still
+        $\geq 2^{64}$} --- a full $10$-group encoding carries up to $70$
+        bits ($g_9$ contributes bits $63$--$69$), so the group-count check
+        of item~2 above alone is insufficient: canonical $10$-group
+        encodings can represent values up to $2^{70}-1$, including values
+        in $[2^{64}, 2^{70})$ that this definition simultaneously declares
+        out of range (audit finding CVF8, second review round). A
+        conforming decoder additionally \textbf{MUST reject} any
+        $10$-group encoding whose most-significant group $g_9 \notin
+        \{0,1\}$ --- equivalently, only bit $63$ (the low-order bit of
+        $g_9$) may be set, since any of bits $64$--$69$ of $g_9$ being set
+        would encode a value $\geq 2^{64}$.
 \end{enumerate}
 These rules make the mapping between integers and their encodings a
 bijection on $[0, 2^{64})$, eliminating the ambiguity (multiple valid
 encodings of the same integer) that overlong LEB128 encodings would
-otherwise introduce.
+otherwise introduce, and restoring the bijection claim item~3 above would
+otherwise violate on its own (Remark~\ref{rem:v2cvf8}).
 \end{definition}
+
+\begin{remark}[Audit finding CVF8, second review round: the group-count bound alone does not enforce $x<2^{64}$]
+\label{rem:v2cvf8}
+The fix is a specification-only change to the decoder's canonicality rule
+above; it does not alter $\mathrm{varint}(\cdot)$'s encoder side (encoded
+values are always $<2^{64}$ by construction, since every varint-encoded
+quantity in this paper is a stream-format length or chunk count well below
+that bound) or any wire-format byte layout. Out of scope for this fix: the
+audit reviews this specification, not the reference implementations;
+\texttt{napqes.py}'s streaming-mode LEB128 decoder does not yet enforce
+any canonicality or maximum-width check at all (stricter than even the
+pre-fix rule above), which is a residual implementation gap for a future
+code-hardening pass, not addressed here.
+\end{remark}
 
 \subsection{Key}
 
@@ -325,7 +361,7 @@ cryptographically secure DRBG.  The serialised key material is:
 The cardinality of $\mathcal{P}$ is approximately 586\,000; a 10-element
 ordered tuple provides a key space of:
 \[
-  \frac{|\mathcal{P}|!}{(|\mathcal{P}|-10)!} \approx 1.1 \times 10^{58} \approx 2^{196}.
+  \frac{|\mathcal{P}|!}{(|\mathcal{P}|-10)!} \approx 4.8 \times 10^{57} \approx 2^{191.6}.
 \]
 
 The relevant security quantity for Theorem~\ref{thm:ind-cpa} below is not
@@ -336,7 +372,7 @@ the raw bit-length $8\cdot 5K = 40K$ of $\mathsf{key\_bytes}$, but the
   \;\approx\; K\log_2|\mathcal{P}|,
 \]
 i.e.\ exactly $\log_2$ of the ordered-tuple key-space size above
-($\approx 196$ bits for $K=10$, $\approx 19$ bits for $K=1$). Because
+($\approx 191.6$ bits for $K=10$, $\approx 19.16$ bits for $K=1$). Because
 $\mathsf{kb}$ is a deterministic, injective encoding of $\mathbf{k}$,
 $H_\infty(\mathsf{kb}) = H_\infty(\mathbf{k})$: injective post-processing
 of a random variable never increases its min-entropy above the source's,
@@ -344,6 +380,31 @@ and here it does not decrease it either (Remark~\ref{rem:min-K} discusses
 the one place this is not quite free --- HMAC's own key-length handling
 for $5K>64$ bytes). This distinction --- $H_\infty(\mathbf{k}) \ll 40K$ ---
 is the subject of audit finding \textbf{CVF8} below.
+
+\begin{remark}[Audit finding CVF3 (second review round): key-space and min-entropy figures were numerically wrong and internally contradictory]
+\label{rem:v2cvf3}
+The key-space and min-entropy figures above previously read
+$1.1\times10^{58}\approx2^{196}$ and $H_\infty\approx196$ bits for $K=10$
+(and $\approx19$ bits for $K=1$), computed from an incorrect
+$\approx19.6$--$19.7$ bits-per-prime coefficient rather than the paper's
+own $\log_2|\mathcal{P}|\approx19.16$ bits. This directly contradicted
+Remark~\ref{rem:min-K} below, which already used the correct $19.16\,K$
+formula and so computed a different figure ($\approx191.6$ bits) for the
+same $K=10$ default. The correct values are
+$\frac{|\mathcal{P}|!}{(|\mathcal{P}|-10)!}\approx4.8\times10^{57}\approx2^{191.6}$
+and $H_\infty(\mathbf{k})\approx191.6$ bits for $K=10$ ($\approx19.16$ bits
+for $K=1$), consistent with Remark~\ref{rem:min-K}. This was audit finding
+\textbf{CVF3} (second review round). The stale figures derived from the
+incorrect coefficient have been corrected throughout: in this subsection,
+in Remark~\ref{rem:min-K}, in the traffic-analysis lemma's scope remark
+(the $2^{197}$--$2^{257}$ prime-tuple range, now $2^{191.6}$--$2^{249.1}$
+for $K=10$--$13$), and in the Post-Quantum Analysis section's
+classical/post-Grover key-search figures (now $\approx2^{191.6}$ and
+$\approx2^{95.8}$ instead of $\approx2^{196}$ and $\approx2^{98}$). The
+$K\geq7$ minimum-security-level floor and the $\approx128$-bit post-Grover
+target in Remark~\ref{rem:min-K} already used the correct coefficient and
+are unaffected; only the reported numbers change.
+\end{remark}
 
 \subsection{Domain-Separated HMAC Derivation}
 
@@ -593,12 +654,25 @@ under this v7 encoding; Section~\ref{sec:hiding-lemma-erratum} discusses the
 v6 argument's error precisely.
 \end{remark}
 
+\begin{remark}[Audit finding CVF7, second review round: the symbol $N$ was overloaded between the 16-byte nonce and the real-plus-noise token count]
+\label{rem:v2cvf7}
+This subsection, and the ciphertext-space bullet of
+Definition~\ref{def:aead-triple}, previously reused the letter $N$ for two
+distinct quantities: the 16-byte nonce, and the real-plus-noise token
+count of a message. The traffic-analysis lemma (Lemma~\ref{lem:tar})
+already avoided this by writing $N_{\mathrm{tok}}$; this subsection and
+Definition~\ref{def:aead-triple} did not. The token count is renamed to
+$N_{\mathrm{tok}}$ below and in Definition~\ref{def:aead-triple}, reserving
+$N$ exclusively for the nonce; no formula, encoding, or byte layout is
+changed by this rename.
+\end{remark}
+
 Each token is serialised as $\mathrm{be8}(\mathrm{token})$ instead of
 $\mathrm{varint}(\mathrm{token})$:
 \[
-  B = \mathrm{be8}(\mathrm{token}[0]) \| \mathrm{be8}(\mathrm{token}[1]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N-1]),
+  B = \mathrm{be8}(\mathrm{token}[0]) \| \mathrm{be8}(\mathrm{token}[1]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N_{\mathrm{tok}}-1]),
 \]
-so $\lvert B \rvert = 8N$ where $N$ (real $+$ noise tokens) depends only on
+so $\lvert B \rvert = 8N_{\mathrm{tok}}$ where $N_{\mathrm{tok}}$ (real $+$ noise tokens) depends only on
 the padded codepoint count and $(\mathsf{kb}, N_{\text{once}})$ via the
 noise-position oracle (domain \texttt{0x00}) --- not on codepoint values.
 The overall ciphertext is unchanged in shape:
@@ -616,7 +690,7 @@ as
 \]
 i.e.\ the encode-then-mask order is: (1) assemble the fixed-width token
 blob $B$ from the token vector $(\mathrm{token}[0], \ldots,
-\mathrm{token}[N-1])$ produced by the token-construction loop above
+\mathrm{token}[N_{\mathrm{tok}}-1])$ produced by the token-construction loop above
 (Definitions~\ref{def:isnoise}--\ref{def:realaddend}); (2) generate the
 domain-\texttt{0x07} keystream $\mathrm{ks}_{0x07}(N)$ as the
 concatenation of 32-byte $\mathrm{Derive}_{0x07}$ blocks indexed
@@ -651,8 +725,16 @@ exactly and explicitly binds $A$, whereas an earlier revision's inline
 formula, $T = \mathrm{Derive}_{0x03}(\mathsf{kb}, N \| \widetilde{B})$, omitted
 the AAD and was — read through the then-stated nonce-first
 $\mathrm{Derive}_d$ formula — inconsistent with the AAD-binding tag the
-reference code actually computed). The minimum valid ciphertext length is
-48 bytes.
+reference code actually computed). \textbf{Parse-time rejection floor:} a
+decryptor rejects any input with $|C| < 48$ bytes (the 16-byte nonce plus
+the 32-byte tag) outright. This 48-byte figure is a necessary parsing
+precondition, not the minimum length of a well-formed ciphertext (audit
+finding CVF10, second review round): every message, including the empty
+string, pads to at least $B=16$ codepoints plus the 2-codepoint length
+prefix, i.e.\ at least $R=18$ real tokens, so $|\widetilde{B}| \geq 8\cdot 18=144$
+bytes and the true minimum length of a well-formed v7 ciphertext is
+$\approx 16+144+32=192$ bytes (larger once noise tokens are added), not
+$48$.
 
 \subsection{Online-AE Streaming Format (v6s-ae)}
 \label{sec:streaming-ae}
@@ -662,6 +744,23 @@ end of the stream, causing \texttt{decrypt\_stream} to release plaintext before
 the tag is verified (RUP, formerly CAV-001).  The online-AE streaming format
 eliminates this by attaching a per-chunk HMAC-SHA256 tag to each segment of the
 masked varint blob.
+
+\begin{remark}[Audit finding CVF11, second review round: the streaming format retains the CVF1 codepoint-length leak, undocumented]
+\label{rem:v2cvf11}
+Both streaming formats mask a $\mathrm{varint}(\cdot)$ (LEB128) blob, not
+the fixed-width $\mathrm{be8}$ encoding that Section~\ref{sec:wire-format-v7}
+(audit finding CVF1, first round) introduced for block mode. Consequently a
+token's serialised byte-length still grows with the plaintext codepoint
+value in streaming mode, exactly the channel CVF1 closed for block mode.
+This is a deliberate, and harmless, design choice rather than a newly
+reintroduced defect: a streaming ciphertext already discloses the exact
+plaintext length to any observer by construction (each chunk's length
+prefix $\mathrm{be4}(\ell_i)$ is sent in the clear), so the additional,
+finer-grained per-token length variation carries no confidentiality cost
+beyond what streaming mode already concedes. This paper previously left
+that scoping implicit; it is stated explicitly here so a reader does not
+wrongly assume the CVF1 fix is universal across every wire format.
+\end{remark}
 
 \[
   S = N \;\|\; \Bigl[\,\mathrm{be4}(\ell_i) \| \widetilde{C}_i \| T_i\,\Bigr]_{i=0}^{n-1} \;\|\; \mathrm{be4}(0) \| T_{\mathrm{final}},
@@ -800,8 +899,12 @@ following typed spaces:
         imposed by the 2-codepoint big-endian length prefix written during
         padding (Section~\ref{sec:construction}, ``Plaintext Padding'').
   \item Ciphertext space $\mathcal{C} = \{0,1\}^{*}$; every output of
-        $\mathsf{Enc}$ has length $16 + 8N + 32$ bytes, where $N$ is the
-        real-plus-noise token count for that message (minimum 48 bytes).
+        $\mathsf{Enc}$ has length $16 + 8N_{\mathrm{tok}} + 32$ bytes, where
+        $N_{\mathrm{tok}}$ is the real-plus-noise token count for that
+        message (Remark~\ref{rem:v2cvf7}); the parse-time rejection floor
+        is $48$ bytes, but the true minimum length of a well-formed
+        ciphertext is $\approx 192$ bytes (audit finding CVF10, second
+        review round; see Section~\ref{sec:wire-format-v7}).
 \end{itemize}
 
 \paragraph{$\mathsf{KeyGen}(1^{\lambda}) \to \mathbf{k}$.}
@@ -1066,20 +1169,65 @@ Theorem~\ref{thm:int-ctxt} require --- the simulation gap Remark~\ref{rem:cvf13}
 identified for v7 does not arise for v8.
 \end{lemma}
 
-\begin{theorem}[IND-CPA, v8]\label{thm:ind-cpa-v8}
+\begin{remark}[Audit finding CVF1 (second review round): the v8 IND-CPA theorem was proved against the unrestricted left-or-right game, which a deterministic scheme cannot satisfy]
+\label{rem:cvf25}
+Because $\mathsf{Encrypt}_{v8}(\mathbf{k},\mathsf{sk},A,M)$ draws no
+randomness beyond the message-derived synthetic nonce
+(Definition~\ref{def:synthnonce}), it is a \emph{pure function} of
+$(A,M)$: querying it twice on the same pair returns the identical
+ciphertext. An earlier draft of Theorem~\ref{thm:ind-cpa-v8} nonetheless
+described $\mathsf{Encrypt}_{v8}$ as ``already randomized, via the
+synthetic nonce'' --- a synthetic nonce is a deterministic function of its
+input and contributes no randomness whatsoever --- and proved the theorem
+against Definition~\ref{def:ind-cpa}'s \emph{unrestricted} experiment
+verbatim, in which $\mathcal{A}$'s only challenge constraint is
+$|m_0|=|m_1|$ and it retains full encryption-oracle access before and
+after the challenge. That combination is unsound: an adversary can query
+$y=\mathsf{Encrypt}_{v8}(A^*,m_0)$, then submit the challenge
+$(A^*,m_0,m_1)$ with $|m_0|=|m_1|$, receive $c^*$, and output $b'=0$ iff
+$c^*=y$; since the scheme is deterministic, $c^*=y$ with certainty when
+$b=0$ and $c^*\neq y$ except with negligible probability when $b=1$,
+giving advantage $\approx\tfrac12$ against a claimed bound of
+$\mathrm{Adv}^{\mathrm{PRF}}+q^2/2^{128}$. The proof's freshness step ---
+``the hiding argument applies verbatim ... only on [the nonce] being
+fresh, which the collision bound above supplies'' --- is exactly where
+this breaks down: Lemma~\ref{lem:v8-cvf3} bounds the probability that
+\emph{two distinct} $(A,M)$ pairs collide in synthetic nonce, and says
+nothing about the case where the challenge pair $(A^*,m_b)$ is itself
+among the adversary's own oracle queries; in that case the challenge
+nonce coincides with a previously observed nonce with probability
+\emph{one}, not $q^2/2^{128}$, so the freshness hypothesis the hiding
+argument needs is not established. Because Corollary~\ref{cor:v8-security}'s
+IND-CCA bound is obtained by composing on top of this same IND-CPA claim,
+it inherits the identical defect. \textbf{Fix:} Theorem~\ref{thm:ind-cpa-v8}
+below is restated and reproved against Definition~\ref{def:ind-cpa-det},
+the restricted-query notion standard for deterministic/misuse-resistant
+AE, rather than against Definition~\ref{def:ind-cpa} unmodified --- this
+is a correction to the security definition and proof only, not to
+$\mathsf{Enc}_{v8}$ itself. The alternative remediation (making
+$\mathsf{Enc}_{v8}$ genuinely randomized, e.g.\ by folding a fresh random
+salt into the domain-\texttt{0x0A} input and transmitting it alongside
+the ciphertext) was not taken, since it would reopen exactly the
+nonce-misuse-resistance property $\mathsf{Enc}_{v8}$ is designed to
+provide (Lemma~\ref{lem:v8-cvf3}).
+\end{remark}
+
+\begin{theorem}[IND-CPA-det, v8]\label{thm:ind-cpa-v8}
 Let $\Pi_{v8}=(\mathsf{KeyGen}_{v8},\mathsf{Enc}_{v8},\mathsf{Dec}_{v8})$
 (Definitions~\ref{def:keygen-v8}, \ref{def:synthnonce},
 \ref{def:aead-triple-v8}) be the v8 NAPQES construction, with
 $\mathsf{Encrypt}_{v8}(\mathbf{k},\mathsf{sk},A,M)\triangleq
-\mathsf{Enc}_{v8}(\mathbf{k},\mathsf{sk},A,M)$ its (already randomized,
-via the synthetic nonce) public encryption oracle, and let
-$\mathbf{Exp}^{\mathrm{ind\text{-}cpa}}_{\Pi_{v8},\mathcal{A}}(\lambda)$ be
-Definition~\ref{def:ind-cpa}'s experiment with $\mathsf{Encrypt}$ replaced
-by $\mathsf{Encrypt}_{v8}$ throughout. For any PPT adversary $\mathcal{A}$
-making at most $q$ encryption queries, there exists a PRF adversary
-$\mathcal{B}_1'$ with similar running time such that
+\mathsf{Enc}_{v8}(\mathbf{k},\mathsf{sk},A,M)$ its \emph{deterministic}
+public encryption oracle (Remark~\ref{rem:cvf25}), and let
+$\mathbf{Exp}^{\mathrm{ind\text{-}cpa\text{-}det}}_{\Pi_{v8},\mathcal{A}}(\lambda)$
+be Definition~\ref{def:ind-cpa-det}'s restricted-query experiment with
+$\mathsf{Encrypt}$ replaced by $\mathsf{Encrypt}_{v8}$ throughout. For any
+PPT adversary $\mathcal{A}$ respecting Definition~\ref{def:ind-cpa-det}'s
+restrictions (i)--(ii) and making at most $q$ encryption queries (counted
+jointly across both phases), there exists a PRF adversary $\mathcal{B}_1'$
+with similar running time such that
 \[
-  \mathrm{Adv}^{\mathrm{IND\text{-}CPA}}_{\Pi_{v8}}(\mathcal{A})
+  \mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}_{\Pi_{v8}}(\mathcal{A})
   \;\leq\;
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')
   + \frac{q^2}{2^{128}},
@@ -1087,13 +1235,17 @@ $\mathcal{B}_1'$ with similar running time such that
 where $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')$
 is the \emph{standard, uniform-key} HMAC-SHA256 PRF advantage --- with
 \textbf{no} key-guessing term $q_F\cdot2^{-H_\infty(\mathbf{k})}$ and no
-PRF-under-non-uniform-$D$ caveat.
+PRF-under-non-uniform-$D$ caveat. Unlike Theorem~\ref{thm:ind-cpa}, this is
+\emph{not} a claim against the unrestricted Definition~\ref{def:ind-cpa};
+no unrestricted-IND-CPA statement is made for $\Pi_{v8}$, nor can one be,
+for a deterministic scheme (Remark~\ref{rem:cvf25}).
 \end{theorem}
 
 \begin{proof}
 Identical to the proof of Theorem~\ref{thm:ind-cpa}, with every occurrence
-of $\mathsf{kb}$ replaced by $\mathsf{sk}$, subject to two changes
-justified by Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} above. First,
+of $\mathsf{kb}$ replaced by $\mathsf{sk}$, subject to three changes
+justified by Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} and
+Definition~\ref{def:ind-cpa-det} above. First,
 Lemma~\ref{lem:key-guess}'s guessing event $\mathrm{Guess}$ (an adversary
 offline-guessing the HMAC key) no longer applies: by
 Lemma~\ref{lem:v8-cvf8}, $\mathsf{sk}\xleftarrow{\$}\{0,1\}^{256}$ is drawn
@@ -1110,32 +1262,58 @@ oracle --- a construction that Lemma~\ref{lem:v8-cvf13} shows is
 distributed identically to the real/ideal games regardless of
 $\mathcal{B}_1'$ not knowing $\mathsf{sk}^*$, closing the simulation gap
 of Remark~\ref{rem:cvf13} that the analogous v7 reduction is subject to.
-The nonce-collision term $q^2/2^{128}$ carries over unchanged: by
-Lemma~\ref{lem:v8-cvf3}, two queries collide in synthetic nonce only with
-probability at most
-$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')+2^{-128}$,
-which is already absorbed into the stated PRF term and the $q^2/2^{128}$
-birthday bound over $q$ queries respectively --- no additional term is
-introduced. The hiding argument (Lemma~\ref{lem:hiding}) and the
-traffic-analysis argument (Lemma~\ref{lem:tar}) apply verbatim with
-$\mathsf{kb}\to\mathsf{sk}$, since neither depends on how the nonce is
-generated, only on it being fresh (which the collision bound above
-supplies).
+Third (the fix for Remark~\ref{rem:cvf25}'s CVF1, second-review-round finding): the
+nonce-collision term $q^2/2^{128}$ does \emph{not} carry over unchanged
+by Lemma~\ref{lem:v8-cvf3} alone --- that lemma bounds collisions only
+between \emph{distinct} $(A,M)$ pairs, and says nothing if the challenge
+pair $(A^*,m_b)$ itself appears among $\mathcal{A}$'s $q$ oracle queries.
+Definition~\ref{def:ind-cpa-det}'s restriction (ii) rules this out
+directly: $\mathcal{A}$ is forbidden from querying $(A^*,m_0)$ or
+$(A^*,m_1)$ in either phase, so every $(A_i,M_i)$ among its $q$ queries is
+distinct from $(A^*,m_b)$ regardless of which challenge message the
+challenger encrypted. Lemma~\ref{lem:v8-cvf3} therefore applies validly to
+every pair $\{(A_i,M_i),(A^*,m_b)\}$, giving
+$\Pr[N^*=N_i]\leq\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')+2^{-128}$
+for each $i\leq q$, which a union bound over the $q$ queries (together
+with the pairwise-collision terms among $N_1,\ldots,N_q$ that
+Lemma~\ref{lem:hiding}'s proof already bounds) turns into the stated
+$q^2/2^{128}$ term --- no additional term is introduced. This is the
+precise step Remark~\ref{rem:cvf25} identifies as unsound in the
+unrestricted game; restriction (ii) is what restores it, at the cost of
+proving a restricted-query notion rather than the unrestricted one. The
+hiding argument (Lemma~\ref{lem:hiding}) applies verbatim
+with $\mathsf{kb}\to\mathsf{sk}$, since it depends only on domain
+\texttt{0x07} being a secure PRF applied at a nonce that is now soundly
+established as fresh in the Lemma~\ref{lem:v8-cvf3} sense (rather than
+merely asserted), not on how that nonce is generated. The
+traffic-analysis argument (Lemma~\ref{lem:tar}), by contrast, does
+\textbf{not} carry over to v8 (audit finding CVF2, second review round;
+Remark~\ref{rem:cvf2-v2-tar-scope}): Lemma~\ref{lem:tar}'s ``same nonce''
+hypothesis is satisfied in the v7 proof above because the IND-CPA
+challenger there samples $N^*$ independently of $b$, but it is never
+satisfied here, since $N^*=N_{v8}(\mathsf{sk},A^*,m_b)$ is itself a
+function of the message actually encrypted. This bound therefore
+establishes only that $c^*$'s \emph{content} ($\widetilde{B}$ and $T$) is
+indistinguishable from uniform given a fresh nonce; length-independence of
+$|c^*|$ from $b$ is instead established separately, by construction, via
+the fixed per-bucket token ceiling of Remark~\ref{rem:v8-length-oracle}.
 \end{proof}
 
-\begin{corollary}[INT-CTXT and IND-CCA, v8]\label{cor:v8-security}
+\begin{corollary}[INT-CTXT and IND-CCA-det, v8]\label{cor:v8-security}
 Let $\Pi_{v8}$ be as in Theorem~\ref{thm:ind-cpa-v8}. For any PPT adversary
 making at most $q$ encryption queries, $q_v$ (resp.\ $q_d$)
-verification/decryption queries, there exist PRF adversaries
-$\mathcal{B}_2'$ (resp.\ $\mathcal{B}_1',\mathcal{B}_2'$) with similar
-running time such that
+verification/decryption queries, \textbf{and, for the IND-CCA bound only,
+respecting Definition~\ref{def:ind-cpa-det}'s restrictions (i)--(ii) on its
+own encryption-oracle queries} (Remark~\ref{rem:cvf25-cca} below), there
+exist PRF adversaries $\mathcal{B}_2'$ (resp.\ $\mathcal{B}_1',\mathcal{B}_2'$)
+with similar running time such that
 \[
   \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\Pi_{v8}}(\mathcal{A})
   \leq
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2')
   + \frac{q_v}{2^{256}},
   \qquad
-  \mathrm{Adv}^{\mathrm{IND\text{-}CCA}}_{\Pi_{v8}}(\mathcal{A})
+  \mathrm{Adv}^{\mathrm{IND\text{-}CCA\text{-}det}}_{\Pi_{v8}}(\mathcal{A})
   \leq
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1')
   +
@@ -1144,8 +1322,32 @@ running time such that
   + \frac{q_d}{2^{256}},
 \]
 both against the standard, uniform-key HMAC-SHA256 PRF assumption, with no
-key-entropy term.
+key-entropy term. The INT-CTXT bound carries \emph{no} query restriction:
+it has no left-or-right challenge, so $\mathcal{A}$'s determinism-derived
+trivial win (Remark~\ref{rem:cvf25}) does not apply to it.
 \end{corollary}
+
+\begin{remark}[Restriction (i)--(ii) propagates to the v8 IND-CCA game]
+\label{rem:cvf25-cca}
+Section~\ref{sec:ind-cca}'s IND-CCA experiment (Theorem~\ref{thm:ind-cca})
+has the identical left-or-right challenge step as the IND-CPA experiment
+--- $\mathcal{A}$ submits $(A^*,m_0,m_1)$, receives $c^*$, and continues
+with encryption- and decryption-oracle access --- so instantiated with
+$\mathsf{Encrypt}_{v8}$ it is subject to the exact same trivial
+distinguisher Remark~\ref{rem:cvf25} describes for IND-CPA: query
+$\mathsf{Encrypt}_{v8}(A^*,m_0)$, compare against $c^*$. The
+IND-CCA-det notion this corollary states therefore carries forward
+Definition~\ref{def:ind-cpa-det}'s restrictions (i)--(ii) onto
+$\mathcal{A}$'s \emph{encryption}-oracle queries (its decryption-oracle
+queries are unrestricted apart from the standard
+$(c^*,aad^*)$ exclusion, which concerns integrity, not determinism, and is
+unaffected). This restriction descends automatically to the reduction: the
+forger/distinguisher $\mathcal{B}_1'$ built in the proof below only ever
+forwards $\mathcal{A}$'s own encryption queries to the IND-CPA-det
+challenger, so if $\mathcal{A}$ respects (i)--(ii), so does the simulated
+IND-CPA-det adversary, and Theorem~\ref{thm:ind-cpa-v8} may be invoked
+unmodified.
+\end{remark}
 
 \begin{proof}
 Theorem~\ref{thm:int-ctxt}'s proof (Case~1/Case~2) and
@@ -1162,15 +1364,22 @@ Theorem~\ref{thm:ind-cpa-v8} in place of Theorem~\ref{thm:ind-cpa} at the
 one point (Theorem~\ref{thm:ind-cca}'s ``Game $H_1$ reduces to IND-CPA''
 step) where the IND-CPA bound is used, reproduces both proofs verbatim
 with the key-guessing term dropped, exactly as in
-Theorem~\ref{thm:ind-cpa-v8}.
+Theorem~\ref{thm:ind-cpa-v8}'s proof; Remark~\ref{rem:cvf25-cca} justifies
+why this substitution remains valid once $\mathcal{A}$ is restricted per
+Definition~\ref{def:ind-cpa-det}.
 \end{proof}
 
 \begin{remark}[Scope and residual]
 \label{rem:v8-scope}
 Theorem~\ref{thm:ind-cpa-v8} and Corollary~\ref{cor:v8-security} ---
 assembled from Lemmas~\ref{lem:v8-cvf3}--\ref{lem:v8-cvf13} --- close CVF3,
-CVF8, and CVF13, and are the security statements this paper recommends new
-deployments rely on. The v7 wire format, key schedule, and their
+CVF8, CVF13, and this report's second-round finding CVF1
+(Remark~\ref{rem:cvf25}), and are the security statements this paper
+recommends new deployments rely on; note that, unlike CVF3/CVF8/CVF13,
+closing the second-round CVF1 finding changed \emph{which} notion is
+proved (restricted-query IND-CPA-det/IND-CCA-det, Definition~\ref{def:ind-cpa-det}),
+not merely the bound, since no unrestricted IND-CPA/IND-CCA claim is
+sound for a deterministic scheme. The v7 wire format, key schedule, and their
 previously-documented residuals (Remarks~\ref{rem:cvf8-kdf},
 \ref{rem:cvf8-kdf-erratum}, \ref{rem:cvf13}) are unchanged and remain
 available, fully specified and separately proved
@@ -1180,13 +1389,84 @@ above must migrate to $\mathsf{KeyGen}_{v8}$/$\mathsf{Enc}_{v8}$/
 $\mathsf{Dec}_{v8}$. \textbf{This migration is the paper's recommended
 default as of this version.} The v8 schedule is implemented in
 \texttt{rust/src/lib.rs} (\texttt{generate\_v8\_key},
-\texttt{encrypt\_bytes\_v8}, \texttt{decrypt\_bytes\_v8}) with unit tests
-covering round-trip correctness, tamper/AAD-mismatch rejection,
-same-message determinism (the disclosed MRAE trade-off), and
-distinct-message nonce distinctness. The Python (\texttt{napqes.py}) and C
-(\texttt{C/napqes.c}) reference implementations have not yet been ported
-to v8; this is tracked in \texttt{docs/CAVEATS.md} as a follow-up so all
-three languages offer the misuse-resistant path.
+\texttt{encrypt\_bytes\_v8}, \texttt{decrypt\_bytes\_v8}), \texttt{napqes.py}
+(\texttt{generate\_v8\_key}, \texttt{encrypt\_bytes\_v8},
+\texttt{decrypt\_bytes\_v8}), and \texttt{C/napqes.c}
+(\texttt{napqes\_encrypt\_bytes\_v8}, \texttt{napqes\_decrypt\_bytes\_v8}),
+with unit tests covering round-trip correctness, tamper/AAD-mismatch
+rejection, same-message determinism (the disclosed MRAE trade-off),
+distinct-message nonce distinctness, and \textbf{ciphertext-length
+determinism across varied AAD/keys} (Remark~\ref{rem:v8-length-oracle}'s
+fix). \textbf{Unlike CVF3, CVF8, and CVF13, the audit finding CVF2 (second
+review round) was not closed by the original v8 synthetic-nonce
+construction alone --- it was, in fact, strengthened by it --- and
+required an additional, dedicated fix to the token-emission schedule,
+shipped as of 2026-07-21 and detailed in Remark~\ref{rem:v8-length-oracle}.}
+\end{remark}
+
+\begin{remark}[Second-round audit finding CVF2: v8's message-derived nonce turns the padding-bucket leak into a reliable oracle under varied AAD]
+\label{rem:v8-length-oracle}
+Because $N=N_{v8}(\mathsf{sk},A,M)$ depends on $M$ (Definition~\ref{def:synthnonce}),
+the token count $N_{\mathrm{tok}}=R+W$ --- where $R=B+2$ is the real-token
+count determined solely by the padding bucket $B$, and $W$ is the number
+of interleaved noise tokens, pseudorandom in the nonce (domain
+\texttt{0x00}) --- also varies with $M$ through $N$ for v8, so
+$|C|=16+8N_{\mathrm{tok}}+32$ depends on plaintext content beyond the
+padding bucket alone. A single v8 ciphertext does not thereby leak more
+than the pre-existing, single-shot CAV-003 bucket leak (Section~\ref{sec:caveats}):
+since domain \texttt{0x0A} is a PRF keyed by the secret $\mathsf{sk}$, the
+distribution of $W$ given a single, as-yet-unqueried $(A,M)$ pair looks
+the same regardless of which admissible message produced it. The residual
+becomes concrete, however, as soon as an observer can obtain
+\emph{several} ciphertexts of one fixed target message $M$ under distinct
+associated-data values $A_1,\ldots,A_\ell$ --- a mild capability, since $A$
+is ordinarily unauthenticated routing metadata rather than a secret.
+Because $R$ depends only on $M$'s padded length while each $A_i$ yields an
+independent nonce and hence an independent noise count $W_i$, the samples
+$N_{\mathrm{tok},i}=R+W_i$ share the same $R$ but vary independently in
+$W_i$; averaging them drives the empirical mean toward
+$R+\mathbb{E}[W]$, and since the padding buckets
+$R\in\{18,34,66,130,\ldots\}$ are well separated (each roughly double the
+previous), a modest number of samples identifies $M$'s padding bucket
+$B=\max(16,2^{\lceil\log_2(n+1)\rceil})$ with confidence approaching
+certainty. This turns the single-shot, noisy CAV-003 leak into a reliable
+bucket oracle for v8, harming even a purely passive observer who never
+interacts with an encryption oracle in the sense of
+Definition~\ref{def:ind-cpa}. It does \emph{not} recover the exact
+codepoint count $n$: every length in a bucket's range
+$[2^{j-1},2^j-1]$ shares the same $R$ and the same noise distribution, so
+the precise length remains hidden. The weakness is specific to v8: under
+v7 the nonce is sampled independently of the plaintext, so
+Lemma~\ref{lem:tar} genuinely applies and repeated encryptions of $M$
+under varying $A$ do not resolve $W$ any better than a single ciphertext
+does.
+
+\textbf{Fix shipped (2026-07-21).} $N_{\mathrm{tok}}$ is padded, with
+additional filler tokens structurally identical to genuine noise tokens,
+up to a fixed ceiling of $R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens per
+message (\texttt{MAX\_NOISE\_RUN}$=19$, the same constant that already
+bounded worst-case per-message expansion --- Table~\ref{tab:comparison}'s
+$4$--$20\times$ figure). Because the ceiling depends only on $R$ (hence
+only on the padding bucket $B$), every v8 ciphertext of a given bucket now
+has \emph{exactly} $R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens regardless
+of $\mathsf{sk}$, $A$, or the specific message, so
+$|C|=16+8R(\mathrm{MAX\_NOISE\_RUN}+1)+32$ is once again a deterministic
+function of the padding bucket alone --- restoring, by direct
+construction rather than by Lemma~\ref{lem:tar}, exactly the guarantee
+that lemma gives v7. The averaging attack above no longer applies: there
+is no residual variance in $N_{\mathrm{tok}}$ left to average out. The
+cost is that v8 always pays the worst-case $\mathrm{MAX\_NOISE\_RUN}+1=20\times$
+expansion (Table~\ref{tab:comparison}) rather than the $\approx 13.4\times$
+average case; v7 is unaffected and keeps its original, uncapped-ceiling
+behaviour. On decryption, the real-token count $R$ is recovered directly
+from the (now fixed-ratio) total token count before the noise/real
+decision loop runs, and decoding stops once $R$ real tokens have been
+extracted, discarding any trailing filler tokens.
+Implemented identically in \texttt{napqes.py}
+(\texttt{\_encrypt\_v8\_core}/\texttt{\_decrypt\_v8\_core}),
+\texttt{rust/src/lib.rs} (\texttt{encrypt\_bytes\_v8}/\texttt{decrypt\_core\_v8}),
+and \texttt{C/napqes.c} (\texttt{encrypt\_core\_det\_v8}/\texttt{decrypt\_core\_v8}).
+Section~\ref{sec:caveats}'s CAV-003 entry is updated accordingly.
 \end{remark}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -1214,6 +1494,83 @@ unforgeability of the ciphertext coincide here. Arguments below that elide
 $N$ or $A$ (e.g.\ writing $\mathsf{Enc}(\mathbf{k}, m)$) do so only where the
 elided argument is fixed or immaterial to the hybrid being analysed;
 the fully-typed calls are always as given in Definition~\ref{def:aead-triple}.
+
+\begin{remark}[Audit findings CVF12/CVF13, second review round: v7's theorems read as unconditional, and whether v7 should be dropped entirely]
+\label{rem:v2cvf12-13}
+Theorems~\ref{thm:ind-cpa}, \ref{thm:int-ctxt}, and \ref{thm:ind-cca} below
+are stated as ordinary, unconditional security theorems, even though this
+section's own remarks concede two open gaps specific to the legacy v7
+construction: Remark~\ref{rem:cvf13} (the reduction $\mathcal{B}_1$/$\mathcal{B}_2$
+cannot simulate $\mathrm{NAPQES}.\mathsf{Enc}$ from oracle access alone,
+since the arithmetic layer uses $\mathbf{k}$ directly, outside any HMAC
+call) and Remark~\ref{rem:prf-d}/Remark~\ref{rem:cvf8} (the PRF advantage
+invoked is against the non-uniform, low-min-entropy key distribution $D$
+of prime tuples, not the standard uniform-key HMAC-SHA256 assumption). A
+reader could therefore mistake the v7 theorems below for unconditional
+guarantees. \textbf{This is now stated explicitly in each v7 theorem's
+own preamble} (audit finding CVF12) rather than only in separately-linked
+remarks. Audit finding CVF13 goes further and recommends removing the
+legacy v7 construction from this paper entirely, now that v8
+(Section~\ref{sec:v8}) is the recommended default and does not inherit
+either gap (v8's independent $\mathsf{sk}$ lets its reductions sample
+$\mathbf{k}$ directly without needing to extract it from an oracle, and
+its PRF assumption is the standard uniform-key one --- see the abstract
+and Theorem~\ref{thm:ind-cpa-v8}). We considered this and decided to
+retain v7, unmodified, for backward compatibility with existing v7
+ciphertexts and deployments (Section~\ref{sec:algorithm-triple} already
+retitles it as legacy-only); removing a wire format that deployed systems
+may already depend on is a breaking change out of proportion to a
+documentation finding. \textbf{Only Theorem~\ref{thm:ind-cpa-v8} and
+Corollary~\ref{cor:v8-security} (v8) carry unconditional guarantees under
+the standard, uniform-key PRF assumption; every v7 theorem in this section
+is conditional on the two gaps above and is retained for backward-compatibility
+documentation only.}
+\end{remark}
+
+\begin{definition}[HMAC-SHA256 PRF advantage]\label{def:prf-adv}
+Let $F=\mathrm{HMAC\text{-}SHA256}:\{0,1\}^{*}\times\{0,1\}^{*}\to\{0,1\}^{256}$
+and let $D$ be a distribution over keys $\kappa\in\{0,1\}^{*}$ (either the
+uniform distribution on $\{0,1\}^{256}$, or the non-uniform prime-tuple
+distribution of the Key subsection, as named in context). For a PPT
+distinguisher $\mathcal{B}$ with oracle access to either $F(\kappa,\cdot)$
+for $\kappa\xleftarrow{\$}D$, or a function $\rho:\{0,1\}^{*}\to\{0,1\}^{256}$
+sampled uniformly from all functions of that type, define
+\[
+  \mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B})
+  \;=\;
+  \Bigl|\Pr\bigl[\mathcal{B}^{F(\kappa,\cdot)}=1\bigr]-\Pr\bigl[\mathcal{B}^{\rho(\cdot)}=1\bigr]\Bigr|,
+\]
+where the first probability is over $\kappa\xleftarrow{\$}D$ and
+$\mathcal{B}$'s coins, and the second over $\rho$ and $\mathcal{B}$'s
+coins. When $D$ is the uniform distribution this is the standard PRF
+advantage; Remark~\ref{rem:prf-d} discusses the non-uniform-$D$ case this
+paper also invokes for the legacy v7 construction.
+\end{definition}
+
+\begin{remark}[Audit finding CVF9, second review round: the PRF advantage was never formally defined, and truncated-output use was unjustified]
+\label{rem:v2cvf9}
+Every theorem in this section bounds an adversary's advantage in terms of
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$
+without Definition~\ref{def:prf-adv} above having previously been stated.
+Separately, several load-bearing derivations in this paper use a
+\emph{truncated} HMAC-SHA256 output rather than the full 256 bits: the v8
+synthetic nonce uses $[0{:}16]$ (128 bits, Definition~\ref{def:synthnonce}),
+and the noise/addend/character derivations use $[0{:}4]$ or $[0{:}8]$
+(Table~\ref{tab:domains}). For any fixed truncation length $\tau$, write
+$\mathrm{trunc}_\tau(x)=x[0{:}\tau]$. Because $\rho$ is a uniformly random
+function, $\mathrm{trunc}_\tau\circ\rho$ is itself uniformly random over
+$\{0,1\}^{8\tau}$, independently across distinct inputs; consequently, any
+distinguisher against $\mathrm{trunc}_\tau\circ F$ yields, by truncating
+every oracle answer it receives before continuing to run the original
+distinguisher, a distinguisher against $F$ itself with \emph{identical}
+advantage:
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{trunc}_\tau\circ F}(\mathcal{B})=\mathrm{Adv}^{\mathrm{PRF}}_{F}(\mathcal{B})$
+for every $\tau\leq 256$ and every $D$. This covers every truncated
+derivation used by this paper (nonce $[0{:}16]$, addend/char $[0{:}4]$,
+threshold $[0{:}8]$) under the single assumption already stated on full,
+untruncated HMAC-SHA256 output --- no separate assumption on truncated
+output is required.
+\end{remark}
 
 \subsection{IND-CPA Security}
 
@@ -1253,6 +1610,24 @@ query $F(\mathsf{kb},\cdot)$ at distinct inputs, and (by the cross-domain
 argument) derivations under different domains never collide either. No
 cross-group probabilistic term (as required under the pre-CVF2 mixed
 nonce-first/domain-first layout) is needed.
+
+\noindent
+\textbf{Domain \texttt{0x0A} (audit finding CVF5, second review round).}
+The remark above is stated for $d\in\{\texttt{0x00},\ldots,\texttt{0x09}\}$
+with the single uniform input shape $d\|N\|\mathsf{ctx}$ and the nonce
+always at byte offset $1..16$. The v8 synthetic-nonce domain
+\texttt{0x0A} (Definition~\ref{def:synthnonce}) is keyed under $\mathsf{sk}$
+rather than $\mathsf{kb}$ and has a different input shape,
+$\texttt{0x0A}\|\mathrm{be4}(|A|)\|A\|M$, with no nonce at bytes $1..16$
+--- it \emph{produces} the nonce, rather than consuming one. The two
+arguments above still cover it, and should be read as extended to
+$d\in\{\texttt{0x00},\ldots,\texttt{0x0A}\}$: cross-domain distinctness is
+unconditional regardless of input shape, since it only ever compares byte
+position~$0$; and intra-domain injectivity for \texttt{0x0A} holds because
+$\mathrm{be4}(|A|)\|A\|M$ is injective in $(A,M)$ by the same
+length-prefix argument used for domains $3,8,9$ above. There is no attack
+--- this is a formal-coverage gap in the remark's stated domain set and
+input-shape sentence, not a soundness gap in the argument itself.
 
 In the remainder of Section~\ref{sec:security} we treat all
 $F(\mathsf{kb},\cdot)$ evaluations as queries to a single PRF; the
@@ -1400,6 +1775,55 @@ caller relying on NAPQES to hide the distinction between two plaintexts
 that are equal-length only in bytes, not in codepoints, is not covered by
 Theorem~\ref{thm:ind-cpa} and should consult CAV-003 (Section~\ref{sec:caveats}).
 \end{remark}
+
+\begin{definition}[Restricted IND-CPA for deterministic/misuse-resistant AE (IND-CPA-det)]
+\label{def:ind-cpa-det}
+Let $\Pi=(\mathsf{KeyGen},\mathsf{Enc},\mathsf{Dec})$ be an AEAD triple
+whose public encryption oracle $\mathsf{Encrypt}(\mathbf{k},A,M)$ is
+\emph{deterministic} in $(A,M)$ --- as $\mathsf{Encrypt}_{v8}$ is
+(Definition~\ref{def:aead-triple-v8}), since its only nonce is the
+synthetic, message-derived $N_{v8}(\mathsf{sk},A,M)$
+(Definition~\ref{def:synthnonce}) and no further randomness is drawn. The
+experiment $\mathbf{Exp}^{\mathrm{ind\text{-}cpa\text{-}det}}_{\Pi,\mathcal{A}}(\lambda)$
+is Definition~\ref{def:ind-cpa}'s experiment
+$\mathbf{Exp}^{\mathrm{ind\text{-}cpa}}_{\Pi,\mathcal{A}}(\lambda)$
+verbatim (same five steps, same $|m_0|=|m_1|$ challenge constraint, same
+advantage and negligibility clause), \emph{except} that the PPT adversary
+$\mathcal{A}=(\mathcal{A}_1,\mathcal{A}_2)$ must additionally respect two
+restrictions standard for deterministic/misuse-resistant AE (Rogaway and
+Shrimpton, ``Deterministic Authenticated-Encryption: A Provable-Security
+Treatment of the Key-Wrap Problem'', Eurocrypt 2006); a violation causes
+the experiment to abort with $\mathcal{A}$ losing:
+\begin{enumerate}
+  \item[(i)] \textbf{No repeated queries.} $\mathcal{A}$ never issues two
+    encryption-oracle queries on an identical pair $(A,M)$, across the
+    pre- and post-challenge phases jointly.
+  \item[(ii)] \textbf{No challenge-message queries.} Writing
+    $(A^*,m_0,m_1)$ for the tuple $\mathcal{A}_1$ outputs, $\mathcal{A}$
+    never queries the encryption oracle, in either phase, on $(A^*,m_0)$
+    or on $(A^*,m_1)$.
+\end{enumerate}
+Restriction (i) holds without loss of generality for any deterministic
+scheme (a repeated query returns an already-known answer and gives
+$\mathcal{A}$ nothing it does not already have, but is disallowed here so
+the freshness argument below has a clean statement); restriction (ii) is
+the one that matters: for a deterministic $\mathsf{Encrypt}$, querying
+$(A^*,m_0)$ [or $(A^*,m_1)$] and comparing the result against the
+challenge ciphertext $c^*$ would otherwise reveal $b$ with certainty
+(Remark~\ref{rem:cvf25}). $\Pi$ is \emph{IND-CPA-det secure} if
+$\mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}_{\Pi}(\mathcal{A})
+\triangleq
+|\Pr[\mathbf{Exp}^{\mathrm{ind\text{-}cpa\text{-}det}}_{\Pi,\mathcal{A}}(\lambda)=1]-\tfrac12|$
+is negligible in $\lambda$ for every PPT $\mathcal{A}$ respecting
+(i)--(ii). This notion is strictly weaker than Definition~\ref{def:ind-cpa}
+(a strict subset of adversaries is admissible) and is the one
+Theorem~\ref{thm:ind-cpa-v8} is proved against, in place of the
+unrestricted Definition~\ref{def:ind-cpa}; it applies only to
+$\mathsf{Encrypt}_{v8}$ (Section~\ref{sec:v8}) and is \emph{not} used for
+the randomized-nonce v7 construction, for which the unrestricted
+Definition~\ref{def:ind-cpa} is meaningful and already proved
+(Theorem~\ref{thm:ind-cpa}).
+\end{definition}
 
 \begin{theorem}[IND-CPA]\label{thm:ind-cpa}
   Under the PRF assumption on HMAC-SHA256 (Remark~\ref{rem:prf-d} makes
@@ -1696,8 +2120,8 @@ Consequently, the one-time-pad identity applies: for any fixed deterministic $B$
 \smallskip
 \noindent\textbf{Equal byte-length of $B$ across $m_0, m_1$ (CVF1 fix).}
 Write $B = \mathrm{be8}(\mathrm{token}[0]) \| \cdots \| \mathrm{be8}(\mathrm{token}[N-1])$, so
-$|B| = 8N$ (Section~\ref{sec:wire-format-v7}). The token count $N$ (real $+$
-noise tokens) is determined entirely by: (i) the padded codepoint count,
+$|B| = 8N_{\mathrm{tok}}$ (Section~\ref{sec:wire-format-v7}). The token count
+$N_{\mathrm{tok}}$ (real $+$ noise tokens) is determined entirely by: (i) the padded codepoint count,
 which is equal for $m_0$ and $m_1$ because $|m_0|=|m_1|$
 (Definition~\ref{def:ind-cpa}) forces equal padded length
 (Remark~\ref{rem:equal-padded-derived} --- a derived fact, not an assumed
@@ -1706,8 +2130,8 @@ $\rho(N^*\|\texttt{0x00}\|\mathrm{be5}(\cdot))$, which depends only on
 $N^*$ and $\mathsf{kb}$ (via $\rho$) --- \emph{not} on the codepoint values
 being encrypted. Since the challenger uses the same $N^*$ and the same key
 regardless of which of $m_0, m_1$ is encrypted, the sequence of
-noise/real decisions at each $ct\_pos$ is identical in both cases, so $N$ ---
-and hence $|B| = 8N$ --- is identical for $m_0$ and $m_1$. Therefore $\tilde{B}$
+noise/real decisions at each $ct\_pos$ is identical in both cases, so
+$N_{\mathrm{tok}}$ --- and hence $|B| = 8N_{\mathrm{tok}}$ --- is identical for $m_0$ and $m_1$. Therefore $\tilde{B}$
 is uniformly distributed over strings of a length that is a deterministic
 function of the (equal) padded length alone, independently of the
 plaintext bit~$b$ and the view~$V$.
@@ -1811,11 +2235,41 @@ $B$'s internal structure. Lemma~\ref{lem:tar} instead formalises the
 noise/prime layer's actual, distinct contribution (audit finding CVF4):
 ciphertext length does not correlate with plaintext content, a property
 AES-GCM and ChaCha20-Poly1305 ciphertexts do not have, since their length
-is an exact linear function of plaintext length. The $2^{197}$--$2^{257}$
+is an exact linear function of plaintext length. The $2^{191.6}$--$2^{249.1}$
 prime-tuple key-space figures (Table~\ref{tab:comparison}) are a
 key-recovery-resistance statement about the keyed-HMAC construction as a
 whole, not a statement about what the token structure contributes to
 either Lemma~\ref{lem:hiding} or Lemma~\ref{lem:tar} individually.
+\end{remark}
+
+\begin{remark}[Second-round audit finding CVF2: Lemma~\ref{lem:tar}'s hypothesis fails for v8]
+\label{rem:cvf2-v2-tar-scope}
+Lemma~\ref{lem:tar} is stated for two plaintexts encrypted ``under the
+same key $\mathsf{kb}$ and the same nonce $N$'' --- a hypothesis satisfied
+whenever $N$ is sampled independently of which of $m_0,m_1$ is encrypted,
+as in the legacy v7 construction (Definition~\ref{def:aead-triple}), where
+the IND-CPA challenger fixes $N^*$ \emph{before} sampling $b$, so the same
+$N^*$ would have been used regardless of which message was chosen. This
+hypothesis is never satisfiable for two \emph{distinct} messages under the
+v8 synthetic nonce (Definition~\ref{def:synthnonce}): because
+$N=N_{v8}(\mathsf{sk},A,M)$ is itself a function of $M$, encrypting $m_0$
+versus $m_1$ under the same $\mathsf{sk}$ and the same $A^*$ generally
+produces two \emph{different} nonces
+$N_{v8}(\mathsf{sk},A^*,m_0)\neq N_{v8}(\mathsf{sk},A^*,m_1)$, so
+Lemma~\ref{lem:tar} cannot be invoked to conclude that $N_{\mathrm{tok}}$,
+and hence $|C|$, is the same for $m_0$ and $m_1$. The proof of
+Theorem~\ref{thm:ind-cpa-v8} previously asserted that Lemma~\ref{lem:tar}
+``applies verbatim \ldots\ only on it being fresh,'' which conflates two
+different notions of freshness: Lemma~\ref{lem:v8-cvf3} bounds only the
+probability that $N^*$ collides with an \emph{earlier query's} nonce, and
+says nothing about whether $N^*$ is the \emph{same value} across the two
+hypothetical challenge messages $m_0,m_1$ --- and for v8 it provably is
+not, since $N^*$ is computed from whichever message is actually encrypted.
+This was audit finding \textbf{CVF2} (second review round). The proof of
+Theorem~\ref{thm:ind-cpa-v8} has been corrected below to no longer cite
+Lemma~\ref{lem:tar}; Remark~\ref{rem:v8-length-oracle} states what is
+actually true of v8 ciphertext length, and records the residual this
+leaves open.
 \end{remark}
 
 \paragraph{Combining the bounds.}
@@ -1875,7 +2329,7 @@ $K=1$--$6$ ($H_\infty \approx 19$--$115$ bits) are \emph{not} admissible
 under this target: for $K=1$ in particular, $q_F\approx 2^{20}$ offline
 HMAC evaluations make the guessing term $\approx 1$, exactly the
 brute-force attack Remark~\ref{rem:cvf8} describes. The paper's default
-$K=10$ ($H_\infty\approx196$ bits) exceeds this minimum with margin.
+$K=10$ ($H_\infty\approx191.6$ bits) exceeds this minimum with margin.
 Implementations and future revisions of this specification MUST enforce
 $K\geq7$ (with the current $|\mathcal{P}|$) and SHOULD retain $K=10$ or
 larger; $K<7$ should be treated as a distinct, lower security level, not
@@ -2065,7 +2519,13 @@ fix is required for that sub-claim beyond confirming its absence.
 \end{remark}
 
 \begin{theorem}[INT-CTXT]\label{thm:int-ctxt}
-  Under the PRF assumption on HMAC-SHA256, NAPQES is INT-CTXT secure.
+  Under the PRF assumption on HMAC-SHA256 (audit finding CVF12, second
+  review round: this legacy v7 theorem is conditional on
+  Remark~\ref{rem:cvf13}'s simulation-gap caveat on reduction
+  $\mathcal{B}_2$, and, if invoked via Theorem~\ref{thm:ind-cpa}'s
+  key-guessing bound, on Remark~\ref{rem:prf-d}/Remark~\ref{rem:cvf8}'s
+  non-standard key-distribution caveat --- see Remark~\ref{rem:v2cvf12-13}
+  for the paper's full scope statement), NAPQES is INT-CTXT secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
   encryption queries and at most $q_v \geq 1$ forgery-submission
   (verification) attempts, there exists a PRF adversary $\mathcal{B}_2$
@@ -2423,7 +2883,13 @@ weakening.
 \end{remark}
 
 \begin{theorem}[IND-CCA]\label{thm:ind-cca}
-  Under the PRF assumption on HMAC-SHA256, NAPQES is IND-CCA secure.
+  Under the PRF assumption on HMAC-SHA256 (audit finding CVF12, second
+  review round: this legacy v7 theorem is conditional on
+  Remark~\ref{rem:cvf13}'s simulation-gap caveat on $\mathcal{B}_1$ and
+  $\mathcal{B}_2$, and on Remark~\ref{rem:prf-d}/Remark~\ref{rem:cvf8}'s
+  non-standard key-distribution caveat carried by the $\mathcal{B}_1$
+  term below --- see Remark~\ref{rem:v2cvf12-13} for the paper's full
+  scope statement), NAPQES is IND-CCA secure.
   Specifically, for any PPT adversary $\mathcal{A}$ making at most $q$
   encryption queries and $q_d$ decryption queries there exist PRF adversaries
   $\mathcal{B}_1$, $\mathcal{B}_2$ with similar running time such that:
@@ -2757,14 +3223,14 @@ provide no speedup against the construction.
 
 \paragraph{Key space.}
 With a 10-element prime-tuple key from $\mathcal{P}$, the key space is
-$\approx 2^{196}$.  Grover's algorithm halves the exponent, giving a
-post-quantum key-search complexity of $\approx 2^{98}$ \emph{sequential}
+$\approx 2^{191.6}$.  Grover's algorithm halves the exponent, giving a
+post-quantum key-search complexity of $\approx 2^{95.8}$ \emph{sequential}
 oracle queries (Remark~\ref{rem:cvf24}) --- like the SHA-256 figure
 above, this is a non-parallelizable depth bound, not a figure that
 shrinks with additional hardware: by the same BBBV~\cite{bbbv1997}/
 Zalka~\cite{zalka1999} argument, $S$ machines give only a $\sqrt{S}$
-speedup, so the wall-clock depth stays $\approx 2^{98}/\sqrt{S}$ and the
-total work is unchanged. Both the $2^{128}$ and $2^{98}$ figures are
+speedup, so the wall-clock depth stays $\approx 2^{95.8}/\sqrt{S}$ and the
+total work is unchanged. Both the $2^{128}$ and $2^{95.8}$ figures are
 therefore sequential-depth quantities far beyond feasibility, and at
 these output/key-space lengths Grover's algorithm is largely irrelevant
 to NAPQES's practical post-quantum security margin.
@@ -2818,13 +3284,50 @@ DRBG-failure event.  See \texttt{docs/CAVEATS.md} (CVF3) and
 \texttt{docs/audit\_mitigation\_responses.md} for the full analysis and
 mitigation status.}
 
-The primary trade-off is ciphertext expansion: NAPQES's noise-injection
-mechanism produces $4\text{--}20\times$ ciphertext expansion depending on the
-derived noise probability, compared to no expansion for AES-GCM and
-ChaCha20-Poly1305.  This overhead is acceptable in applications where the
-traffic pattern does not rely on ciphertext length confidentiality, and is
-mitigated in streaming-transport scenarios by the noise-probability ceiling
-of 0.99.
+The primary trade-off is ciphertext expansion. Each real token may be
+preceded by a geometric run of noise tokens drawn at the per-message
+probability $p\in[0.75,0.99]$; an uncapped run has expected length
+$1/(1-p)$ --- $4\times$ at $p=0.75$ but $100\times$ at the stated ceiling
+$p=0.99$, with no upper bound on any single run. For the recommended v8
+default, the token-emission loop caps consecutive noise tokens at
+$\mathrm{MAX\_NOISE\_RUN}=19$ (Remark~\ref{rem:v2cvf4}), turning this into
+a hard, deterministic worst case of exactly
+$\mathrm{MAX\_NOISE\_RUN}+1=20\times$ per real codepoint regardless of
+$p$ --- so $4\text{--}20\times$ (Table~\ref{tab:comparison}) is v8's
+accurate mean-to-worst-case range, and $p=0.99$ is the case the cap is
+sized against, not something that mitigates the expansion, as an earlier
+draft of this paragraph incorrectly stated. The legacy v7 construction
+applies no such cap (Remark~\ref{rem:v2cvf4}): its expansion remains
+bounded only in expectation, with an uncapped tail as $p\to0.99$ --- an
+accepted residual of the backward-compatibility-only construction.
+Compared to no expansion for AES-GCM and ChaCha20-Poly1305, this overhead
+is acceptable in applications where the traffic pattern does not rely on
+ciphertext length confidentiality.
+
+\begin{remark}[Audit finding CVF4 (second review round): the $4$--$20\times$ ciphertext-expansion claim was inconsistent with the $0.99$ noise-probability ceiling]
+\label{rem:v2cvf4}
+An uncapped geometric noise run has expected length $1/(1-p)$, which
+equals $20\times$ only at $p=0.95$ --- at the paper's own stated ceiling
+$p=0.99$ the expected run length is $100\times$, not $20\times$, and the
+prior text's claim that the range is ``mitigated \ldots\ by the
+noise-probability ceiling of $0.99$'' had the direction of the argument
+backwards, since $p=0.99$ is precisely the worst case, not a mitigant.
+This was audit finding \textbf{CVF4} (second review round). For the
+recommended v8 default this is fully closed: the token-emission loop
+(Section~\ref{sec:v8}) already caps consecutive noise tokens at
+$\mathrm{MAX\_NOISE\_RUN}=19$ (shipped alongside the
+Remark~\ref{rem:v8-length-oracle} fix for audit finding CVF2, second
+review round, which reuses the same constant), so v8's worst-case
+expansion is \emph{exactly} $\mathrm{MAX\_NOISE\_RUN}+1=20\times$
+regardless of $p$, making $4\text{--}20\times$ an accurate
+mean-to-worst-case range rather than an approximation. This cap is
+deliberately not applied to the legacy v7 construction, to keep
+previously-issued v7 ciphertexts decodable exactly as originally
+produced; v7's expansion therefore remains bounded only in expectation,
+with an uncapped tail as $p\to0.99$. This residual is accepted and
+documented (CAV-004) since v7 is retained for backward compatibility only
+and is no longer the recommended construction.
+\end{remark}
 
 \textbf{Nonce-reuse hazard (CVF3, legacy v7).}  Unlike AES-GCM and
 ChaCha20-Poly1305, where nonce reuse degrades confidentiality but does not
@@ -3003,17 +3506,37 @@ The following known caveats are documented in \texttt{docs/CAVEATS.md} and
         application layer.  A 4-byte length prefix is planned for the v7 wire
         format.
 
-  \item[CAV-003 — Padding length-bucket leakage (open, low).] Block-mode
-        ciphertext length reveals the power-of-two padding bucket
-        $\{16, 32, \ldots, 65536\}$, leaking up to $\lceil\log_2 n\rceil$ bits
-        of length information.  Callers needing full length-hiding must layer a
-        fixed-frame transport.  A fixed-frame padding option is planned for the
-        v7 wire format.
+  \item[CAV-003 — Padding length-bucket leakage (open, low for v7;
+        \textbf{fixed for v8} — audit finding CVF2, second review round).]
+        Block-mode ciphertext length reveals the power-of-two padding
+        bucket $\{16, 32, \ldots, 65536\}$, leaking up to
+        $\lceil\log_2 n\rceil$ bits of length information. Under v7 this
+        remains a single-shot, noisy leak (Lemma~\ref{lem:tar}). Under v8,
+        the synthetic nonce is derived from the message, so the natural
+        noise-token count used to vary with the message as well as the
+        bucket, letting an observer who obtains several ciphertexts of one
+        fixed message under varying associated data average out the noise
+        and recover the padding bucket reliably rather than merely
+        probabilistically (Remark~\ref{rem:v8-length-oracle}). This is
+        fixed as of 2026-07-21 by padding the v8 token count up to a fixed
+        per-bucket ceiling ($R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens),
+        so v8 ciphertext length is again a deterministic function of the
+        bucket alone, at the cost of always paying the worst-case
+        $20\times$ expansion. Callers needing full length-hiding (i.e.\ not
+        just bucket-only leakage) must still layer a fixed-frame
+        transport; that residual is unchanged by this fix.
 
-  \item[CAV-004 — Ciphertext expansion (informational).] Noise injection
-        produces $4\text{--}20\times$ ciphertext expansion relative to
-        plaintext size.  This is a deliberate confidentiality feature, not a
-        bug; it is documented in all datasheets.  No fix is planned.
+  \item[CAV-004 — Ciphertext expansion (informational; range corrected ---
+        audit finding CVF4, second review round).] Noise injection produces
+        $4\text{--}20\times$ ciphertext expansion for the recommended v8
+        default, now an exact worst case enforced by the
+        $\mathrm{MAX\_NOISE\_RUN}=19$ cap (Remark~\ref{rem:v2cvf4}); the
+        legacy v7 construction has no such cap, so its expansion is bounded
+        only in expectation ($\approx13.4\times$ mean, uncapped tail as $p$
+        approaches its $0.99$ ceiling). This is a deliberate
+        traffic-analysis-resistance design trade-off, not a bug; it is
+        documented in all datasheets. No further fix is planned beyond the
+        v8 cap already shipped.
 \end{description}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -3031,10 +3554,12 @@ suite, and a fuzz harness covering the complete decoder pipeline.
 \textbf{As of this version, v8} --- an independent HMAC-domain-derivation
 secret, an independent arithmetic-layer key, and a synthetic, message-bound
 nonce (Section~\ref{sec:v8}) --- \textbf{is the recommended construction for
-all new deployments}. It is proved IND-CPA, INT-CTXT, and IND-CCA secure
-under the standard, uniform-key PRF assumption on HMAC-SHA256
-(Theorem~\ref{thm:ind-cpa-v8}, Corollary~\ref{cor:v8-security}), with no
-key-entropy term, and it closes the exact-key-recovery-under-nonce-reuse
+all new deployments}. It is proved IND-CPA-det (the restricted-query,
+deterministic-AE analogue of IND-CPA that a message-derived synthetic
+nonce requires; Definition~\ref{def:ind-cpa-det}), INT-CTXT, and
+IND-CCA-det secure under the standard, uniform-key PRF assumption on
+HMAC-SHA256 (Theorem~\ref{thm:ind-cpa-v8}, Corollary~\ref{cor:v8-security}),
+with no key-entropy term, and it closes the exact-key-recovery-under-nonce-reuse
 hazard that applies to every earlier wire format (Table~\ref{tab:comparison},
 Section~\ref{sec:nonce-misuse}). The legacy, single-secret v7 construction
 remains fully specified and separately proved

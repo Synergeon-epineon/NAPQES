@@ -1,11 +1,11 @@
 # NAPQES Security Target — Adversary Model & Claim Boundaries
 
-**Version:** 0.2  
-**Date:** 2026-05-28  
-**Wire format:** v6 (frozen — see [`SPEC.md`](../SPEC.md))  
+**Version:** 0.3  
+**Date:** 2026-07-06  
+**Wire format:** v7 (frozen — see [`SPEC.md`](../SPEC.md)); supersedes v6 as of the CVF1 fix  
 **Status:** Pre-release (informal external cryptographer review in progress — see §9)
 
-> This document describes what NAPQES v6 is intended to achieve, what it
+> This document describes what NAPQES v7 is intended to achieve, what it
 > explicitly does not claim, and the conditions under which the security
 > goals are expected to hold. Every claim in this document must be
 > reachable from `napqes.py` line ranges or from `[roadmap]` markers; see
@@ -34,11 +34,11 @@ Known-Answer Tests in [`tests/kat/v6_vectors.json`](../tests/kat/v6_vectors.json
 
 | Threat | Addressed | Mechanism |
 |---|---|---|
-| Passive eavesdropper | Yes | Ciphertext confidentiality via token layer + noise tokens |
+| Passive eavesdropper | Yes | Ciphertext confidentiality via the domain-`0x07` HMAC keystream and the domain-`0x03` HMAC tag; the token/noise layer does not contribute additional content confidentiality (audit finding CVF4 — see `docs/audit_mitigation_responses.md`) |
 | Active attacker: ciphertext modification | Yes | HMAC-SHA256 auth tag verified before plaintext release (block API) |
 | Active attacker: AAD substitution | Yes | AAD is bound into the auth tag via `len(aad) \|\| aad` prefix |
 | Replay attack | Partial (application layer) | Nonce-bound: different nonces produce different tags; nonce reuse is the caller's responsibility |
-| Key-recovery from ciphertext | Yes (computational) | Key elements are not directly encoded; addends are HMAC-derived and computationally unpredictable without the key |
+| Key-recovery from ciphertext | Yes (computational), **under a fresh nonce only** | Key elements are not directly encoded; addends are HMAC-derived and computationally unpredictable without the key. **Under a reused nonce this guarantee fails catastrophically — see CVF3 below.** |
 | Frequency / divisibility analysis | Yes | Real and noise tokens share the same formula; noise positions are HMAC-derived |
 | Known-plaintext / chosen-plaintext | Yes (under standard HMAC assumptions) | Per-token HMAC-derived addends are computationally unpredictable |
 | Quantum adversary (full Grover / Shor) | Yes | See §5 (post-quantum considerations) |
@@ -48,9 +48,10 @@ Known-Answer Tests in [`tests/kat/v6_vectors.json`](../tests/kat/v6_vectors.json
 
 | Threat | Status | Rationale |
 |---|---|---|
-| Nonce reuse | Semantic security degrades | Standard AEAD limitation; callers must use fresh nonces |
+| Nonce reuse | **Catastrophic — full key recovery (CVF3)** | Not a "standard AEAD limitation": every internal value (noise positions, addends, keystream) is a deterministic function of (key, nonce) only, so a reused nonce plus two known-plaintext tokens at the same position yields the key element exactly. Callers must never reuse or explicitly supply a nonce; see `docs/audit_mitigation_responses.md` (CVF3) and `docs/CAVEATS.md`. |
 | Key compromise | Not addressed | Key management is out of scope |
-| Traffic analysis (timing, volume) | Not addressed | Transport-layer concern |
+| Traffic analysis: message timing / volume over time | Not addressed | Transport-layer concern |
+| Traffic analysis: per-message length correlation with content | Yes (mitigated) | Ciphertext byte-length is a function of `(key, nonce, padded length)` only via the noise-position oracle and noise probability (domains `0x00`/`0x02`), independent of codepoint values — see Lemma `lem:tar` in `docs/napseq-eprint-preprint.tex` and audit finding CVF4. This is distinct from, and does not depend on, the content-confidentiality mechanism above. |
 
 ---
 
@@ -70,9 +71,18 @@ eliminate frequency and ratio attacks.
 power-of-two length bucket. Messages in different buckets leak their
 bucket (see §6.3).
 
+**CVF1 (fixed).** Prior to the v7 fixed-width token encoding, this claim
+was false even *within* the same length bucket: the legacy v6 LEB128 token
+encoding made ciphertext byte-length depend on plaintext codepoint values,
+giving an IND-CPA distinguishing advantage ≈ 1 (see `docs/CAVEATS.md`
+CVF1 and the erratum in `docs/napseq-eprint-preprint.tex`). The v7
+fixed-width encoding makes ciphertext byte-length within a bucket
+depend only on the (content-independent) noise schedule, restoring this
+claim.
+
 ### 3.2 Ciphertext integrity / authenticity (INT-CTXT, IND-CCA)
 
-Any modification to a v6 ciphertext (nonce, varint blob, or auth tag)
+Any modification to a v7 ciphertext (nonce, token blob, or auth tag)
 causes `decrypt_bytes` to raise `ValueError` before returning any
 plaintext. Tag verification is performed with `hmac.compare_digest` to
 resist timing side-channels at the comparison point. (`napqes.py` approx.
@@ -84,7 +94,7 @@ non-malleability and IND-CCA.
 
 ### 3.3 AAD binding
 
-The authentication tag commits to both the payload (`nonce || varint_blob`)
+The authentication tag commits to both the payload (`nonce || masked_blob`)
 and the associated data via the construction:
 ```
 tag = HMAC(key_bytes, b'\x03' || uint32_be(len(aad)) || aad || payload)
@@ -242,9 +252,12 @@ The security of NAPQES v6 depends on:
    secret. Compromise of the key breaks all security properties.
 
 4. **Nonce freshness.** The 128-bit nonce is generated with
-   `secrets.token_bytes(16)` (CSPRNG). Nonce reuse weakens semantic
-   security (different messages may produce the same noise-position pattern)
-   but does not immediately allow tag forgery.
+   `secrets.token_bytes(16)` (CSPRNG). Nonce reuse does **not** merely
+   weaken semantic security — it is catastrophic and key-recoverable (see
+   CVF3 in `docs/audit_mitigation_responses.md` and `docs/CAVEATS.md`).
+   It does not immediately allow tag forgery, but two known-plaintext
+   tokens at the same real-token position under a reused nonce recover
+   that position's key element exactly.
 
 5. **No related-key attacks.** Deriving multiple sub-keys from a single
    master key (e.g. via KDF) is the caller's responsibility; NAPQES makes
