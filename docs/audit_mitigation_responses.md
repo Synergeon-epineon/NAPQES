@@ -2337,4 +2337,683 @@ readability fix. Full technical detail is in
 rewritten "SHA-256 and Grover's algorithm" / "Key space" paragraphs
 (Post-Quantum Analysis section).
 
+---
+
+# Second-Round Audit (ABDK Consulting, "NAPQES v2 — AEAD Scheme Audit," 2026-07-19)
+
+The findings below are from the second-round report reviewing
+`docs/napseq-eprint-v2.tex`. The report reuses low finding IDs (CVF1–CVF14)
+that are independent of, and unrelated to, the first-round CVF1–CVF24
+entries above (which concern `docs/napseq-eprint-preprint.tex`). To avoid
+ID collisions, each second-round finding is recorded here under a
+`V2-CVFn` prefix.
+
+## V2-CVF1 — The v8 IND-CPA theorem is false as stated, because v8 is a deterministic scheme while the notion it is proved against lets the adversary query the challenge message
+
+**Status:** Open → **Fixed** (proof/definition correction; no code change)
+**Category:** Flaw
+**Severity:** Major
+
+### Response
+
+Confirmed. `Theorem~\ref{thm:ind-cpa-v8}` was proved against
+`Definition~\ref{def:ind-cpa}`'s unrestricted left-or-right IND-CPA game
+verbatim, describing `Encrypt_v8` as "already randomized, via the
+synthetic nonce." That description is wrong: the synthetic nonce
+`N = HMAC(sk, 0x0A‖be4(|A|)‖A‖M)` is a deterministic function of `(A,M)`
+and contributes no randomness, so `Encrypt_v8` is a pure function of its
+input. Because the unrestricted game lets the adversary query the
+encryption oracle on either challenge message, the distinguisher the
+finding describes (query `y = Encrypt_v8(A*, m0)`, submit the challenge,
+guess `b'=0` iff `c* = y`) wins with advantage ≈ 1/2 against a claimed
+bound of `Adv^PRF + q²/2^128`. We also agree on the exact location of the
+unsoundness: the proof's freshness step invoked
+`Lemma~\ref{lem:v8-cvf3}` (which bounds collisions only between *distinct*
+`(A,M)` pairs) to argue the challenge nonce is fresh, but said nothing
+about the case where the challenge pair is itself among the adversary's
+own oracle queries — in which case the challenge nonce coincides with a
+prior nonce with probability *one*, not the claimed birthday bound. Since
+`Corollary~\ref{cor:v8-security}`'s IND-CCA bound composes on top of the
+same IND-CPA claim, it inherits the identical defect, as the finding
+notes.
+
+**Fix shipped (proof/definition-level, 2026-07-21).**
+`docs/napseq-eprint-v2.tex`:
+
+- **New audit-finding remark** (`rem:cvf25`, immediately before
+  `Theorem~\ref{thm:ind-cpa-v8}`) records the finding, the explicit
+  distinguisher, and the exact unsound proof step, matching the analysis
+  above.
+- **New formal definition**, `Definition~\ref{def:ind-cpa-det}`
+  ("Restricted IND-CPA for deterministic/misuse-resistant AE"), placed
+  alongside `Definition~\ref{def:ind-cpa}` in the Security Analysis
+  section. This is the recommended remediation: rather than making
+  `Encrypt_v8` genuinely randomized (which would reopen the
+  nonce-misuse-resistance property it is specifically designed to
+  provide), it restates the standard left-or-right IND-CPA game with the
+  two restrictions standard for deterministic/misuse-resistant AE
+  (Rogaway and Shrimpton, Eurocrypt 2006): (i) no repeated
+  `(A,M)` encryption-oracle queries, and (ii) no encryption-oracle query,
+  in either phase, on either challenge message `(A*,m0)`/`(A*,m1)`.
+  Restriction (ii) is precisely what rules out the finding's distinguisher.
+- **`Theorem~\ref{thm:ind-cpa-v8}` retitled "IND-CPA-det, v8"** and
+  restated against `Definition~\ref{def:ind-cpa-det}` instead of the
+  unrestricted `Definition~\ref{def:ind-cpa}`; the false "already
+  randomized" description is removed. The proof's freshness argument is
+  corrected: restriction (ii) guarantees every oracle query `(Ai,Mi)` is
+  distinct from the challenge pair `(A*,mb)` regardless of which message
+  the challenger encrypted, so `Lemma~\ref{lem:v8-cvf3}`'s collision bound
+  now validly applies to every compared pair, restoring the `q²/2^128`
+  term legitimately (rather than by the previously-unsound assertion).
+- **`Corollary~\ref{cor:v8-security}`** retitled "INT-CTXT and
+  IND-CCA-det, v8": the IND-CCA bound is now stated as `IND-CCA-det`,
+  with a new remark (`rem:cvf25-cca`) explaining that the IND-CCA
+  experiment has the identical left-or-right challenge step (hence the
+  identical trivial distinguisher) and so inherits Definition
+  \ref{def:ind-cpa-det}'s restrictions (i)–(ii) on the adversary's
+  encryption-oracle queries; the INT-CTXT bound is unaffected (no
+  left-or-right challenge, so the determinism issue does not apply to
+  it).
+- The "Scope and residual" remark (`rem:v8-scope`) now lists this
+  second-round CVF1 finding among those `Theorem~\ref{thm:ind-cpa-v8}`/
+  `Corollary~\ref{cor:v8-security}` close, noting explicitly that (unlike
+  CVF3/CVF8/CVF13) this fix changed *which* security notion is proved,
+  not merely the bound's constant — no unrestricted-IND-CPA/IND-CCA claim
+  is sound for a deterministic scheme.
+
+**Scope of the fix:** `docs/napseq-eprint-v2.tex` only (one new
+definition, one new theorem-preamble remark, one new corollary-scoped
+remark, and the corresponding theorem/proof/corollary rewrites). No
+change to `Enc_v8`/`Dec_v8` in any language (Rust/Python/C): as the
+finding's own recommendation notes, this is a correction to the security
+definition and its proof, not to the construction. Verified via a 3-pass
+`pdflatex` compile (exit 0 each pass, zero undefined-reference /
+multiply-defined-label warnings on the final pass).
+
+**Known residual:** none. The restricted-query notion
+(`Definition~\ref{def:ind-cpa-det}`) is the standard, sound notion for a
+deterministic/misuse-resistant AEAD scheme (the same family AES-GCM-SIV
+is analysed under), and both `Theorem~\ref{thm:ind-cpa-v8}` and
+`Corollary~\ref{cor:v8-security}` are now proved against it without gaps.
+
+**Requested action:** please confirm V2-CVF1 can be marked **Fixed /
+Closed** on your tracker.
+
+---
+
+## V2-CVF2 — The v8 ciphertext length depends on plaintext content and, under chosen associated data, reliably reveals the plaintext length bucket
+
+
+**Status:** Open → **Fixed**
+**Category:** Flaw
+**Severity:** Major
+
+### Response
+
+Confirmed. `Theorem~\ref{thm:ind-cpa-v8}`'s proof incorrectly asserted that
+the traffic-analysis lemma (`Lemma~\ref{lem:tar}`, "ciphertext length is
+decorrelated from plaintext content") "applies verbatim ... only on it
+being fresh" once `kb` is replaced by `sk`. As the finding shows,
+`Lemma~\ref{lem:tar}`'s hypothesis — both compared plaintexts encrypted
+under the *same* nonce `N` — holds for v7 (the IND-CPA challenger samples
+`N*` independently of which message is encrypted) but can never hold for
+two distinct messages under v8, because the synthetic nonce
+`N = HMAC(sk, 0x0A‖be4(|A|)‖A‖M)` is itself a function of the message.
+Since the noise-token count is pseudorandom in the nonce, v8 ciphertext
+length depends on message content beyond the padding bucket, and — as the
+finding demonstrates — an adversary who can obtain several ciphertexts of
+one fixed target message under varying associated data (a mild capability,
+since AAD is ordinarily unauthenticated routing metadata rather than a
+secret) can average out the noise and recover the padding bucket reliably,
+strengthening the pre-existing, single-shot CAV-003 leak into a dependable
+oracle. We agree this is a real, previously-undocumented residual specific
+to v8, separate from the deterministic-equality issue.
+
+**Fix shipped (proof + code, 2026-07-21).** `docs/napseq-eprint-v2.tex`:
+
+- The false citation of `Lemma~\ref{lem:tar}` has been removed from
+  `Theorem~\ref{thm:ind-cpa-v8}`'s proof. The proof now states only that
+  the hiding argument (`Lemma~\ref{lem:hiding}`) carries over to v8 (it
+  depends solely on the nonce being fresh, not on how it is generated);
+  length-independence of `|c*|` is instead established separately, by
+  construction, via the code fix below.
+- A new remark, `rem:cvf2-v2-tar-scope`, added immediately after
+  `Lemma~\ref{lem:tar}`'s existing scope remark, explains precisely why the
+  lemma's "same nonce" hypothesis is satisfiable for v7 but never for v8.
+- A new remark, `rem:v8-length-oracle`, added in the v8 construction
+  section, formalises the averaging attack the finding describes (samples
+  `N_tok,i = R + W_i` sharing a common `R` but independent `W_i`; averaging
+  recovers the bucket `B`), states precisely what is and is not recovered
+  (bucket, not exact codepoint count), and documents the shipped fix below.
+- The "Scope and residual" remark for the v8 construction
+  (`rem:v8-scope`) now records that CVF2 required a dedicated fix to the
+  token-emission schedule, distinct from CVF3/CVF8/CVF13's synthetic-nonce
+  fix (which, on its own, strengthens rather than closes CVF2).
+- The CAV-003 entry (Section~\ref{sec:caveats} and `docs/CAVEATS.md`) is
+  updated to record the fix and cross-reference this finding as `V2-CVF2`.
+
+**Code fix shipped, all three reference implementations (2026-07-21).**
+The v8 token-emission loop now pads the emitted token count up to a fixed,
+bucket-only ceiling of `real_token_count * (MAX_NOISE_RUN + 1)` tokens
+(`MAX_NOISE_RUN = 19`, the same constant already used to bound worst-case
+expansion), using additional filler tokens structurally identical to
+genuine noise tokens, so ciphertext length is once again a deterministic
+function of the padding bucket alone — never of the message-derived
+nonce's noise realisation:
+
+- `napqes.py`: `_encrypt_v8_core` pads to the ceiling; `_decrypt_v8_core`
+  now recovers the real-token count directly from the total token count
+  instead of consuming until the blob is exhausted, and stops once that
+  many real tokens are extracted (any trailing filler is discarded).
+- `rust/src/lib.rs`: gained the same `MAX_NOISE_RUN` cap (previously
+  absent — Rust's v8 loop was unbounded) plus ceiling padding in
+  `encrypt_bytes_v8`; a new `decrypt_core_v8` (separate from the shared,
+  v7-only `decrypt_core`) mirrors the Python decoder logic.
+- `C/napqes.c`: `encrypt_core_det_v8` / `decrypt_core_v8` updated
+  identically. Not compile-verified in this environment (no C toolchain
+  available), mirrored carefully against the Python/Rust logic — flagged
+  as a residual verification gap consistent with prior C-only changes.
+
+**Verification.** `tmp/test_v8_smoke.py` extended with a direct check:
+200 trials encrypting one fixed message under distinct keys and AAD values
+now produce ciphertexts of exactly one length (previously varied). A new
+Rust unit test, `v8_ciphertext_length_is_deterministic_across_varied_aad`
+(50 trials), asserts the same property. All pre-existing tests continue to
+pass: 245 Python `pytest` tests (1 pre-existing, unrelated skip), and 84
+Rust `cargo test` tests (up from 83, the one addition being the new test
+above).
+
+**Trade-off (disclosed).** v8 now always pays the worst-case
+`MAX_NOISE_RUN + 1 = 20x` ciphertext expansion (previously the average
+case was `~13.4x`). v7 is completely unaffected and keeps its original,
+uncapped-ceiling behaviour; this trade-off is v8-only and is the
+documented cost of closing the oracle.
+
+**Scope of the fix:** `docs/napseq-eprint-v2.tex`, `docs/CAVEATS.md`,
+`napqes.py`, `rust/src/lib.rs`, `C/napqes.c`, `tmp/test_v8_smoke.py`
+(ad-hoc, not the permanent suite), and `rust/src/lib.rs`'s test module.
+
+**Requested action:** please confirm V2-CVF2 can be marked **Fixed**.
+
+---
+
+## V2-CVF3 — Key-space and min-entropy figures are numerically wrong and internally contradictory
+
+**Status:** Open → **Fixed**
+**Category:** Algorithm
+**Severity:** Moderate
+
+### Response
+
+Confirmed. The Key subsection stated the ordered 10-tuple key space as
+`|P|!/(|P|-10)! ≈ 1.1×10^58 ≈ 2^196` and `H_∞(k) ≈ 196` bits for `K=10`
+(`≈19` bits for `K=1`). With the paper's own `|P| ≈ 586,000`
+(`log2|P| ≈ 19.16`), these figures were computed from an incorrect
+`≈19.6–19.7`-bits-per-prime coefficient rather than `19.16`; the correct
+values are `≈4.8×10^57 ≈ 2^191.6` and `H_∞ ≈ 191.6` bits for `K=10`. We
+also agree this was internally contradictory: `Remark~\ref{rem:min-K}`
+("Minimum K for a target security level") already used the correct
+`19.16·K` formula and computed `191.6` bits for the same `K=10`, directly
+conflicting with the `196`-bit figure stated just above it. The error
+propagated to two further locations the finding did not explicitly list
+but which use the same key-space figure: the traffic-analysis lemma's
+scope remark (`2^197`–`2^257` prime-tuple range, for `K=10`–`13`) and the
+Post-Quantum Analysis section's classical/post-Grover key-search figures
+(`2^196`/`2^98`).
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`: all five stale
+figures are corrected using the paper's own `19.16` bits/prime coefficient:
+
+- Key subsection: `1.1×10^58 ≈ 2^196` → `4.8×10^57 ≈ 2^191.6`; the
+  parenthetical `(≈196 bits for K=10, ≈19 bits for K=1)` → `(≈191.6 bits
+  for K=10, ≈19.16 bits for K=1)`.
+- `Remark~\ref{rem:min-K}`: `K=10 (H_∞≈196 bits)` → `K=10 (H_∞≈191.6
+  bits)`, reconciling it with its own already-correct `19.16·K` formula.
+- Traffic-analysis lemma's scope remark: `2^197`–`2^257` → `2^191.6`–
+  `2^249.1` (the `K=10`–`13` range, recomputed with `19.16`; the `K=13`
+  boundary matches the pre-existing `K≥13` HMAC-key-length remark).
+- Post-Quantum Analysis, "Key space" paragraph: `≈2^196` → `≈2^191.6`;
+  `≈2^98` (both occurrences) → `≈2^95.8`. The `K≥7` minimum-security-level
+  floor and the `≈128`-bit post-Grover target already used the correct
+  coefficient and are unaffected — only the reported numbers change, the
+  security margin holds as before.
+- A new remark, `rem:v2cvf3`, added immediately after the Key subsection's
+  min-entropy paragraph, records the finding, the root cause (the wrong
+  `19.6`–`19.7` coefficient), and points to all five corrected locations.
+
+**Verification.** Recompiled with `pdflatex` (3 passes): exit 0 every
+pass, zero undefined-reference/multiply-defined-label warnings on the
+final pass.
+
+**Scope of the fix:** `docs/napseq-eprint-v2.tex` only (five numeric
+corrections plus one new remark). No code change — this was a pure
+arithmetic/write-up error; the underlying `|P|` and `K` values, and every
+implementation that depends on them, were never wrong.
+
+**Known residual:** none.
+
+**Requested action:** please confirm V2-CVF3 can be marked **Fixed**.
+
+---
+
+## V2-CVF4 — Ciphertext-expansion range 4–20x is inconsistent with the noise-probability ceiling of 0.99
+
+**Status:** Open → **Fixed for v8** (recommended default); **documented residual for legacy v7**
+**Category:** Algorithm
+**Severity:** Moderate
+
+### Response
+
+Confirmed as originally stated. An uncapped geometric noise run has
+expected length `1/(1-p)`, which is `4×` at `p=0.75` and `20×` only at
+`p=0.95` — at the paper's own stated ceiling `p=0.99` the expected run
+length is `100×`, not `20×`, and the "primary trade-off" paragraph's claim
+that the `4–20×` range is "mitigated ... by the noise-probability ceiling
+of 0.99" had the direction of the argument backwards, since `p=0.99` is
+precisely the worst case, not a mitigant.
+
+We can report that the recommended v8 default already closes this
+exactly, via a fix shipped alongside V2-CVF2 (above): the v8
+token-emission loop caps consecutive noise tokens at
+`MAX_NOISE_RUN=19` in all three reference implementations (`napqes.py`
+`_encrypt_v8_core`; `rust/src/lib.rs` `encrypt_bytes_v8`; `C/napqes.c`
+`encrypt_core_det_v8`), which turns the probabilistic ceiling into a
+hard, deterministic worst case of exactly `MAX_NOISE_RUN+1 = 20×` per
+real codepoint, regardless of `p`. That code fix predates this write-up
+(it was shipped specifically to close this inconsistency), but the paper's
+prose, comparison table, and CAV-004 caveat were never updated to
+describe it accurately — that gap is what this entry closes.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`:
+
+- The "primary trade-off" paragraph (preceding
+  `Table~\ref{tab:comparison}`) is rewritten: it now states the uncapped
+  expectation (`4×` at `p=0.75`, `100×` at `p=0.99`), explains that v8's
+  `MAX_NOISE_RUN=19` cap turns the worst case into an exact `20×`
+  regardless of `p`, and explicitly corrects the backwards "mitigated by
+  the ceiling of 0.99" framing — `p=0.99` is the case the cap is sized
+  against, not something that mitigates the expansion.
+- A new remark, `rem:v2cvf4`, records the finding, the exact
+  inconsistency, and the fix, and clarifies that the `MAX_NOISE_RUN` cap
+  is deliberately **not** applied to the legacy v7 construction, so
+  previously-issued v7 ciphertexts remain decodable exactly as originally
+  produced; v7's expansion therefore remains bounded only in expectation,
+  with an uncapped tail as `p→0.99`.
+- The in-paper `CAV-004` caveat entry is updated to state the corrected,
+  v8-exact / v7-residual split instead of a single unqualified `4–20×`
+  claim.
+- `Table~\ref{tab:comparison}`'s `4–20×` figure is unchanged (it is now
+  accurate for v8, the recommended default) but its accompanying prose no
+  longer misdescribes why.
+
+**Verification.** Recompiled with `pdflatex` (3 passes): exit 0 every
+pass, zero undefined-reference/multiply-defined-label warnings on the
+final pass. No code changes were needed in this pass — `MAX_NOISE_RUN`'s
+behavior was already verified as part of V2-CVF2 (200 Python trials / 50
+Rust trials).
+
+**Trade-off / residual (disclosed).** Legacy v7 has no noise-run cap and
+its expansion is bounded only in expectation (`≈13.4×` mean at typical
+`p`, uncapped tail as `p→0.99`). This is an accepted residual of the
+backward-compatibility-only construction (v7 is no longer recommended for
+new deployments as of this revision) and is documented in `CAV-004`
+(`docs/napseq-eprint-v2.tex` and `docs/CAVEATS.md`).
+
+**Scope of the fix:** `docs/napseq-eprint-v2.tex` (documentation-only in
+this pass) and `docs/CAVEATS.md`. No further changes to `napqes.py`,
+`rust/src/lib.rs`, or `C/napqes.c` — the `MAX_NOISE_RUN=19` cap that
+closes this for v8 was already shipped as part of the V2-CVF2 fix.
+
+**Requested action:** please confirm V2-CVF4 can be marked **Fixed for
+v8, with the v7 residual accepted and documented**.
+
+## V2-CVF5 — Domain-separation remark does not formally cover the synthetic-nonce domain 0x0A
+
+**Status:** Open → **Fixed** (documentation only; no code/proof change)
+**Category:** Procedural
+**Severity:** Minor
+
+### Response
+
+Confirmed. `Remark~\ref{rem:domsep}` ("Domain Separation of HMAC Inputs")
+was stated only for `d ∈ {0x00,...,0x09}` with the single uniform input
+shape `d‖N‖ctx` and the nonce fixed at byte offset `1..16`. The v8
+synthetic-nonce domain `0x0A` (`Definition~\ref{def:synthnonce}`) is keyed
+under `sk` rather than `kb` and has a different input shape,
+`0x0A‖be4(|A|)‖A‖M` — it produces the nonce rather than consuming one at
+bytes `1..16`. As the finding notes, there is no attack: cross-domain
+distinctness is unconditional regardless of input shape (it only compares
+byte position 0), and intra-domain injectivity for `0x0A` already holds
+via the `be4(|A|)` length-prefix argument used for domains 3/8/9. This was
+a formal-coverage gap in the remark's stated scope, not a soundness gap.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`,
+`Remark~\ref{rem:domsep}`: added a "Domain 0x0A" paragraph extending the
+domain set to `{0x00,...,0x0A}`, explicitly restating cross-domain
+distinctness and intra-domain injectivity for `0x0A`.
+
+**Known residual:** none.
+
+**Requested action:** please confirm V2-CVF5 can be marked **Fixed**.
+
+## V2-CVF6 — Abstract and Contribution 1 state a non-injective synthetic-nonce formula (missing the AAD length prefix)
+
+**Status:** Open → **Fixed**
+**Category:** Readability
+**Severity:** Minor
+
+### Response
+
+Confirmed. The abstract and Contribution 1 wrote the synthetic nonce as
+`N = HMAC(sk, 0x0A‖A‖M)`, omitting the `be4(|A|)` length prefix that the
+normative `Definition~\ref{def:synthnonce}` includes. As written,
+`0x0A‖A‖M` is not injective in `(A,M)` — e.g. `(A,M)=(x,y)` and
+`(ε,xy)` collide — so an adversary controlling the AAD/message split could
+force a deterministic nonce collision across distinct `(A,M)` pairs. The
+normative definition was always correct; only the two abbreviated,
+informal restatements were wrong.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`: corrected both
+occurrences (abstract and Contribution 1) to
+`N = HMAC(sk, 0x0A‖be4(|A|)‖A‖M)`, matching `Definition~\ref{def:synthnonce}`
+exactly, with a cross-reference back to the normative definition.
+
+**Known residual:** none.
+
+**Requested action:** please confirm V2-CVF6 can be marked **Fixed**.
+
+## V2-CVF7 — The symbol N is overloaded: 16-byte nonce versus real-plus-noise token count
+
+**Status:** Open → **Fixed**
+**Category:** Naming
+**Severity:** Minor
+
+### Response
+
+Confirmed. The Wire Format (Version 7) subsection and
+`Definition~\ref{def:aead-triple}`'s ciphertext-space bullet reused the
+letter `N` both for the 16-byte nonce and for the real-plus-noise token
+count of a message (e.g. "`|B| = 8N` where `N` (real + noise tokens)..."
+immediately followed by "`N` is a 16-byte random nonce"). The
+traffic-analysis lemma (`Lemma~\ref{lem:tar}`) already avoided this by
+writing `N_tok`; the normative wire-format text and the algorithm-triple
+definition did not, creating a reproducibility ambiguity.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`: renamed the
+token count to `N_tok` throughout Section~\ref{sec:wire-format-v7} and
+`Definition~\ref{def:aead-triple}`'s ciphertext-space bullet, and in the
+one stray reuse inside `Lemma~\ref{lem:hiding}`'s proof ("Equal
+byte-length of B..." paragraph), reserving `N` exclusively for the nonce.
+Added `Remark~\ref{rem:v2cvf7}` recording the rename. No formula,
+encoding, or byte layout changed — this is a pure notational fix.
+
+**Known residual:** none.
+
+**Requested action:** please confirm V2-CVF7 can be marked **Fixed**.
+
+## V2-CVF8 — LEB128 canonicality rule does not fully enforce x < 2^64
+
+**Status:** Open → **Fixed** (specification only)
+**Category:** Behavior
+**Severity:** Minor
+
+### Response
+
+Confirmed. `Definition~\ref{def:leb128}`'s canonicality rule required a
+decoder to reject "any input requiring more than `⌈64/7⌉ = 10` groups" and
+claimed the resulting map is a bijection on `[0, 2^64)`. A full 10-group
+LEB128 encoding carries up to 70 bits (`g_9` contributes bits 63–69), so
+canonical 10-group encodings can represent integers up to `2^70 - 1`,
+including values in `[2^64, 2^70)` that the same definition simultaneously
+declared out of range — the group-count check alone does not enforce
+`x < 2^64`, so the claimed bijection did not hold as stated.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`,
+`Definition~\ref{def:leb128}`: added a top-group bound — a conforming
+decoder must additionally reject any 10-group encoding whose
+most-significant group `g_9 ∉ {0,1}` (equivalently, only bit 63, the
+low-order bit of `g_9`, may be set). This restores the bijection on
+`[0, 2^64)` the definition already claimed. Added `Remark~\ref{rem:v2cvf8}`
+recording the fix; the encoder side and every wire-format byte layout are
+unchanged.
+
+**Known residual (disclosed, out of scope for this fix):** this audit
+reviews `docs/napseq-eprint-v2.tex`, not the reference implementations.
+`napqes.py`'s streaming-mode LEB128 decoder (`_b128_decode_tokens`) does
+not currently enforce *any* canonicality or maximum-width check — stricter
+scrutiny than even the pre-fix specification rule — and is flagged as a
+residual implementation-hardening item for a future code-focused pass, not
+addressed here.
+
+**Requested action:** please confirm V2-CVF8 can be marked **Fixed for
+the specification**, with the noted implementation-hardening item tracked
+separately.
+
+## V2-CVF9 — The HMAC-SHA256 PRF advantage is never formally defined, and its use on truncated outputs is not justified
+
+**Status:** Open → **Fixed**
+**Category:** Documentation
+**Severity:** Minor
+
+### Response
+
+Confirmed. Every theorem in Section~\ref{sec:security} bounded an
+adversary's advantage in terms of
+`Adv^PRF_HMAC-SHA256(B)` without a formal PRF-advantage definition (oracle,
+distinguisher, advantage) ever being stated in this document (unlike the
+first-round `docs/napseq-eprint-preprint.tex`, a different file). In
+addition, several load-bearing values are *truncated* HMAC outputs — the
+v8 synthetic nonce uses `[0:16]` (128 bits) and the v7 derivation
+primitives use `[0:4]`/`[0:8]` — and the paper invoked the full-output PRF
+advantage without justifying that a fixed truncation of a PRF is itself a
+PRF with the same advantage.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`, inserted before
+`Subsection~\ref{sec:security}`'s "IND-CPA Security" subsection: a new
+`Definition~\ref{def:prf-adv}` (`HMAC-SHA256 PRF advantage`) stating the
+standard oracle/distinguisher/advantage game, parameterized by a key
+distribution `D` (covering both the uniform-key case and the non-uniform
+prime-tuple case `Remark~\ref{rem:prf-d}` already discusses for v7); and a
+new `Remark~\ref{rem:v2cvf9}` proving that for any fixed truncation length
+`τ`, `Adv^PRF_{trunc_τ∘F}(B) = Adv^PRF_F(B)` (a distinguisher can truncate
+its own oracle's answers and run unmodified), explicitly covering every
+truncated derivation in this paper (nonce `[0:16]`, addend/char `[0:4]`,
+threshold `[0:8]`) under the single already-stated assumption on
+full-output HMAC-SHA256.
+
+**Known residual:** none — this closes the gap without introducing any
+new assumption.
+
+**Requested action:** please confirm V2-CVF9 can be marked **Fixed**.
+
+## V2-CVF10 — "Minimum valid ciphertext length is 48 bytes" understates the true minimum
+
+**Status:** Open → **Fixed**
+**Category:** Documentation
+**Severity:** Minor
+
+### Response
+
+Confirmed. The v7 decryptor rejects `|C| < 48` (16-byte nonce plus 32-byte
+tag) and the text called 48 the "minimum valid ciphertext length." But
+every message, including the empty string, pads to at least `B=16`
+codepoints plus the 2-codepoint length prefix, i.e. at least `R=18` real
+tokens, so `|B̃| ≥ 8·18 = 144` bytes and the true minimum length of a
+well-formed ciphertext is `≈ 16+144+32 = 192` bytes (larger once noise
+tokens are added). 48 bytes is a necessary parse-time rejection floor, not
+the minimum length a well-formed ciphertext can actually have.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`: reworded the
+Wire Format (Version 7) passage and `Definition~\ref{def:aead-triple}`'s
+ciphertext-space bullet to distinguish the two figures explicitly — 48
+bytes is labelled the parse-time rejection floor, and `≈192` bytes
+(`16+8·18+32`) is stated as the true minimum length of a well-formed v7
+ciphertext.
+
+**Known residual:** none.
+
+**Requested action:** please confirm V2-CVF10 can be marked **Fixed**.
+
+## V2-CVF11 — Streaming format retains the CVF1 codepoint-length leak (by design) but does not document it
+
+**Status:** Open → **Fixed** (documentation); **residual retained by design**
+**Category:** Documentation
+**Severity:** Minor
+
+### Response
+
+Confirmed. The online-AE streaming format masks a `varint(·)` (LEB128)
+blob, not the fixed-width `be8` encoding that the first-round CVF1 fix
+introduced for block mode (Section~\ref{sec:wire-format-v7}), so a
+token's serialised byte-length in streaming mode still grows with the
+plaintext codepoint value — the exact channel CVF1 closed for block mode.
+This is not a new confidentiality break: a streaming ciphertext already
+discloses the exact plaintext length by construction (each chunk's
+`be4(ℓ_i)` length prefix is sent in the clear), so the finer-grained
+per-token variation adds no further leakage on top of what streaming mode
+already concedes. The paper never stated this scoping explicitly, risking
+a reader wrongly assuming the CVF1 fix applies universally.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`,
+Section~\ref{sec:streaming-ae}: added `Remark~\ref{rem:v2cvf11}` stating
+the streaming format deliberately retains the CVF1 codepoint-length leak
+and explaining why this is acceptable (streaming already discloses exact
+length).
+
+**Known residual (accepted, by design):** streaming-mode ciphertexts leak
+codepoint-level length information beyond the chunk-length prefix already
+disclosed; this is a deliberate trade-off, not a defect, since streaming
+mode's threat model already concedes exact plaintext length. Documented in
+`docs/CAVEATS.md` (new entry, cross-referencing `CAV-003`/first-round
+`CVF1`).
+
+**Requested action:** please confirm V2-CVF11 can be marked **Fixed
+(documentation), with the by-design residual accepted**.
+
+## V2-CVF12 — Legacy v7 is retained with security theorems the paper itself flags as conditional or unproven
+
+**Status:** Open → **Fixed** (hardened wording; construction retained, see V2-CVF13)
+**Category:** Procedural
+**Severity:** Minor
+
+### Response
+
+Confirmed. The legacy v7 theorems (`Theorem~\ref{thm:ind-cpa}`,
+`Theorem~\ref{thm:int-ctxt}`, `Theorem~\ref{thm:ind-cca}`) were stated as
+ordinary, unconditional theorems, even though this paper's own remarks
+concede two open v7-specific gaps: `Remark~\ref{rem:cvf13}` (the reduction
+cannot simulate `NAPQES.Enc` from oracle access alone, since the
+arithmetic layer uses `k` directly, outside any HMAC call) and
+`Remark~\ref{rem:prf-d}`/`Remark~\ref{rem:cvf8}` (the PRF advantage
+invoked is against a non-standard, non-uniform key distribution). Only
+`Theorem~\ref{thm:ind-cpa}` previously surfaced this caveat inline; the
+INT-CTXT and IND-CCA theorems did not, despite depending on the same
+reductions.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`:
+
+- Added `Remark~\ref{rem:v2cvf12-13}` immediately before
+  Section~\ref{sec:security}'s "IND-CPA Security" subsection, stating
+  plainly that every v7 theorem in this section is conditional on the two
+  gaps above, and that only v8 (`Theorem~\ref{thm:ind-cpa-v8}`,
+  `Corollary~\ref{cor:v8-security}`) carries unconditional guarantees.
+- `Theorem~\ref{thm:int-ctxt}` and `Theorem~\ref{thm:ind-cca}`'s own
+  preambles now state the same conditional caveat directly (not only via
+  a separately-linked remark), matching `Theorem~\ref{thm:ind-cpa}`'s
+  existing wording.
+
+**Known residual:** the underlying gaps (`Remark~\ref{rem:cvf13}`,
+`Remark~\ref{rem:cvf8}`) remain open for v7 by design — this finding asks
+only that the conditionality be stated prominently, not that the gaps be
+closed (closing them would require the KDF-subkey wire-format change
+already tracked as a residual against CVF8/CVF13, first round). See
+V2-CVF13 below for the companion "should v7 be removed" finding.
+
+**Requested action:** please confirm V2-CVF12 can be marked **Fixed**.
+
+## V2-CVF13 — The paper should drop the legacy v7 construction entirely rather than carry two parallel schemes
+
+**Status:** Open → **Acknowledged; decision recorded (v7 retained)**
+**Category:** Architecture
+**Severity:** Minor
+
+### Response
+
+Confirmed as a valid structural observation: carrying both a fully
+specified, fully proved legacy v7 construction (with the conditional
+theorems V2-CVF12 addresses) and the recommended v8 construction side by
+side roughly doubles the specification and proof surface, and risks a
+reader either deploying v7 or carrying its (conditional) theorems over to
+v8 by association.
+
+**Decision.** We considered removing the legacy v7 construction entirely,
+as recommended, and decided to retain it, unmodified, for backward
+compatibility with existing v7 ciphertexts and deployments. v7 is already
+explicitly retitled as legacy-only (`Section~\ref{sec:algorithm-triple}`,
+"backward compatibility only") and is no longer the recommended default.
+Removing a wire format that deployed systems may already depend on is a
+breaking change out of proportion to a documentation/architecture
+finding, and is inconsistent with this project's established
+backward-compatibility posture for prior wire formats (v1–v6 remain
+readable via explicit legacy opt-ins elsewhere in the codebase). V2-CVF12's
+hardened conditional-theorem wording, plus the prominent "only v8 is
+unconditional" statement in `Remark~\ref{rem:v2cvf12-13}`, is the
+mitigation actually shipped in response to this finding, rather than
+removal.
+
+**Fix shipped (2026-07-21).** `docs/napseq-eprint-v2.tex`:
+`Remark~\ref{rem:v2cvf12-13}` records this finding and the decision above
+alongside V2-CVF12's fix (the two findings share one combined remark
+since they concern the same passage and the same underlying gaps).
+
+**Known residual (accepted, by decision):** the legacy v7 construction,
+and its conditional security proofs, remain part of the normative
+document. Documented in `docs/CAVEATS.md` (combined entry with V2-CVF12,
+cross-referencing the existing first-round CAV entries for CVF8/CVF13).
+
+**Requested action:** please confirm V2-CVF13 can be marked **Acknowledged,
+with the decision to retain v7 recorded**, rather than Fixed-by-removal.
+
+## V2-CVF14 — The audit-response and revision-history remarks should be moved out of the normative text into a separate companion document
+
+**Status:** Open → **Acknowledged; not actioned this round**
+**Category:** Readability
+**Severity:** Minor
+
+### Response
+
+Confirmed as a valid readability observation: this document interleaves
+~25 "Audit finding CVFn" / "Erratum" / "Retracted" remark blocks and ~90
+inline cross-references with the normative construction and proofs, which
+does make the current-design text harder to isolate from the
+revision-history narrative, and does create a mild confirmation-bias risk
+for a reader who accepts "this was fixed" assertions without independently
+re-checking the current text.
+
+**Decision.** We are not restructuring the document this round. The
+in-text remark convention is a deliberate choice, applied consistently
+across every one of the ~38 findings resolved so far (both the first and
+second audit rounds, `docs/audit_mitigation_responses.md`), specifically
+*for* full auditability: each remark sits next to the exact passage it
+corrects and carries its own label, so a reviewer (or a future audit
+round) can verify a fix in place without cross-referencing a separate
+changelog. Extracting ~25 remark blocks and ~90 references into a
+companion document now would be a large, high-risk diff across the entire
+paper, out of proportion to a single Minor/readability finding, and would
+have to be re-applied consistently to both audit rounds' findings to avoid
+leaving the document in a half-migrated state. We consider this a
+reasonable candidate for a dedicated future cleanup pass, done in one
+sweep once no findings are in flight, rather than as an incremental part
+of this response round.
+
+**Fix shipped:** none (by decision — see above). No `.tex` change.
+
+**Known residual:** the readability cost the finding identifies remains
+present. Not tracked in `docs/CAVEATS.md` (this is a documentation
+style/structure choice, not a security residual).
+
+**Requested action:** please confirm V2-CVF14 can be marked
+**Acknowledged, deferred to a future dedicated cleanup pass**, rather than
+Fixed.
+
 

@@ -513,7 +513,7 @@ customers are blocked by the current cap.
 | Field | Value |
 |---|---|
 | **ID** | CAV-003 |
-| **Severity** | Low (deliberate design trade-off; documented in datasheets) |
+| **Severity** | Low for v7 (deliberate design trade-off; documented in datasheets); **fixed for v8** (see V2-CVF2 below) |
 | **Affects** | `_pad_message` (napqes.py L174–195); all block-mode callers |
 | **Owner** | TBD |
 | **Target phase** | Phase 5 step 5.4 (v7 fixed-frame option) — or never if no customer demand |
@@ -526,15 +526,109 @@ plaintext length falls into, disclosing up to `⌈log₂(n)⌉` bits of length
 information. This is a distinct, deliberate leak from **CVF1** (fixed): CVF1
 was about ciphertext length leaking codepoint *values* even *within* the
 same bucket; CAV-003 is about the bucket boundary itself, which is an
-accepted design trade-off.
+accepted design trade-off for v7.
+
+**v8 escalation, since fixed (V2-CVF2, second-round audit, 2026-07-19).**
+Under v8, the synthetic nonce is derived from the message itself
+(`N = HMAC(sk, 0x0A‖be4(|A|)‖A‖M)`), so the noise-token count — and hence
+ciphertext length — used to vary with message content, not just the
+padding bucket, letting an observer who obtains several ciphertexts of one
+fixed target message under varying associated data average out the noise
+and recover the padding bucket *reliably* instead of merely
+probabilistically. This is now fixed by padding the v8 token count up to a
+fixed per-bucket ceiling (see "V2-CVF2" below).
 
 **Current mitigation.** Leakage is disclosed in BRD.md §6 item 5,
 module docstring (napqes.py L11–14), and SPEC.md §6. Customers requiring
-full length-hiding must layer a fixed-frame transport.
+full length-hiding must layer a fixed-frame transport (this residual
+applies equally to v7 and the now-fixed v8: both still disclose the
+padding bucket itself, exactly as documented here — only the *additional*
+v8 oracle amplification is what V2-CVF2 closes).
 
 **Future option.** A future wire format could include a documented
-fixed-frame padding option that hides plaintext length entirely. Ship only
-if customers request it.
+fixed-frame padding option that hides the padding bucket itself entirely.
+Ship only if customers request it.
+
+---
+
+## V2-CVF2 — v8's message-derived nonce turns the padding-bucket leak into a reliable oracle under varied AAD
+
+| Field | Value |
+|---|---|
+| **ID** | V2-CVF2 (second-round ABDK Consulting audit, 2026-07-19, "NAPQES v2 — AEAD Scheme Audit"; internal doc label `rem:v8-length-oracle`, `docs/napseq-eprint-v2.tex`) |
+| **Category** | Flaw |
+| **Severity** | Major |
+| **Affects** | v8 synthetic nonce (`Definition~\ref{def:synthnonce}`); `Theorem~\ref{thm:ind-cpa-v8}`'s proof; CAV-003; v8 token-emission loop in `napqes.py`, `rust/src/lib.rs`, `C/napqes.c` |
+| **Owner** | TBD |
+| **Status** | **Fixed** (2026-07-21, code fix shipped in all three reference implementations) |
+| **Risk retired** | — (new finding) |
+
+**Description.** The v8 IND-CPA proof asserted that the traffic-analysis
+lemma ("ciphertext length is decorrelated from plaintext content",
+`Lemma~\ref{lem:tar}`) "applies verbatim ... only on it being fresh" once
+`kb` is replaced by `sk`. This is incorrect: `Lemma~\ref{lem:tar}` requires
+both compared plaintexts to be encrypted under *the same nonce* `N`, which
+holds for v7 (the challenger samples `N*` independently of which message is
+encrypted) but can never hold for two distinct messages under v8, since
+`N = HMAC(sk, 0x0A‖be4(|A|)‖A‖M)` is itself a function of `M`. Because the
+noise-token count is pseudorandom in the nonce, and the nonce differs per
+message under v8, v8 ciphertext length depends on plaintext content beyond
+the padding bucket. Concretely, an observer who can obtain several
+ciphertexts of one fixed target message `M` under varying associated data
+`A` (mild, since AAD is ordinarily unauthenticated routing metadata) gets
+independent noise-count samples that all share the same real-token count;
+averaging them recovers `M`'s padding bucket with confidence approaching
+certainty, turning the single-shot CAV-003 leak into a reliable oracle for
+an otherwise-passive observer. It does not recover the exact codepoint
+count, only the power-of-two bucket.
+
+**Fix (proof + code, 2026-07-21).** `docs/napseq-eprint-v2.tex`: the false
+citation of `Lemma~\ref{lem:tar}` has been removed from
+`Theorem~\ref{thm:ind-cpa-v8}`'s proof, which now states only that the
+hiding argument (`Lemma~\ref{lem:hiding}`) carries over to v8 (it depends
+only on the nonce being fresh, not on how it is generated). A new scope
+remark (`rem:cvf2-v2-tar-scope`) explains why `Lemma~\ref{lem:tar}`'s
+"same nonce" hypothesis fails for v8, and a new remark
+(`rem:v8-length-oracle`) formalises the averaging attack described above
+and documents the code fix below. The "Scope and residual" remark for the
+v8 construction now records that CVF2 required a dedicated fix to the
+token-emission schedule, distinct from CVF3/CVF8/CVF13's synthetic-nonce
+fix.
+
+**Code fix shipped, all three languages (2026-07-21).** The v8
+token-emission loop now pads the emitted token count up to a fixed,
+bucket-only ceiling of `real_token_count * (MAX_NOISE_RUN + 1)` tokens
+(`MAX_NOISE_RUN = 19`, the same constant already used to bound worst-case
+expansion), using additional filler tokens structurally identical to
+genuine noise tokens:
+
+- `napqes.py`: `_encrypt_v8_core` pads to the ceiling; `_decrypt_v8_core`
+  now recovers the real-token count directly from the total token count
+  (`n_tokens // (MAX_NOISE_RUN + 1)`) instead of consuming until the blob
+  is exhausted, and stops once that many real tokens are extracted.
+- `rust/src/lib.rs`: `encrypt_bytes_v8` gained the same
+  `MAX_NOISE_RUN`-capped loop plus ceiling padding (Rust's v8 previously
+  had no noise-run cap at all); a new `decrypt_core_v8` (separate from the
+  shared, v7-only `decrypt_core`) mirrors the Python decoder logic.
+- `C/napqes.c`: `encrypt_core_det_v8` and `decrypt_core_v8` updated
+  identically (encode-side ceiling loop; decode-side upfront `real_count`
+  derivation). Not compile-verified in this environment (no C toolchain
+  available), mirrored carefully against the Python/Rust logic.
+
+Because the ceiling depends only on the real-token count (hence only on
+the padding bucket), every v8 ciphertext of a given bucket now has
+*exactly* the same length regardless of key, AAD, or message content
+within that bucket — verified by `tmp/test_v8_smoke.py` (200 trials, one
+fixed message, distinct keys/AAD, single resulting length) and a new Rust
+unit test (`v8_ciphertext_length_is_deterministic_across_varied_aad`, 50
+trials). All existing tests continue to pass (245 Python `pytest` tests,
+84 Rust `cargo test` tests).
+
+**Trade-off.** v8 now always pays the worst-case `MAX_NOISE_RUN + 1 = 20x`
+ciphertext expansion (previously the average case was `~13.4x`); v7 is
+unaffected and keeps its original, uncapped-ceiling behaviour.
+
+**Requested action:** confirm V2-CVF2 can be marked **Fixed**.
 
 ---
 
@@ -571,3 +665,151 @@ The v6 binary format is ~53% smaller than the legacy v3 hex encoding.
 
 **No fix planned.** Expansion is a core property of the design. Document
 the expansion bound explicitly in all datasheets.
+
+---
+
+## V2-CVF4 — Ciphertext-expansion range 4–20x was inconsistent with the 0.99 noise-probability ceiling
+
+| Field | Value |
+|---|---|
+| **ID** | V2-CVF4 (second-round ABDK Consulting audit, 2026-07-19, "NAPQES v2 — AEAD Scheme Audit"; internal doc label `rem:v2cvf4`, `docs/napseq-eprint-v2.tex`) |
+| **Category** | Algorithm |
+| **Severity** | Moderate |
+| **Affects** | `Table tab:comparison`'s ciphertext-expansion row; the "primary trade-off" paragraph; `CAV-004` above; v8 token-emission loop (already capped) |
+| **Owner** | TBD |
+| **Status** | **Fixed for v8** (2026-07-21, documentation only — the code fix already shipped as part of V2-CVF2); **open residual for legacy v7** (by design) |
+| **Risk retired** | — (documentation correction; v8's underlying risk was already retired by the pre-existing `MAX_NOISE_RUN` cap) |
+
+**Description.** An uncapped geometric noise run has expected length
+`1/(1-p)`: `4×` at `p=0.75`, but `100×` — not `20×` — at the paper's own
+stated ceiling `p=0.99`, with no upper bound on any single run. The
+paper's "primary trade-off" paragraph claimed the `4–20×` range was
+"mitigated ... by the noise-probability ceiling of 0.99," which has the
+argument backwards: `p=0.99` is the worst case, not a mitigant.
+
+**Resolution.** The v8 token-emission loop (`napqes.py`
+`_encrypt_v8_core`; `rust/src/lib.rs` `encrypt_bytes_v8`; `C/napqes.c`
+`encrypt_core_det_v8`) already caps consecutive noise tokens at
+`MAX_NOISE_RUN=19` — the same cap shipped for `V2-CVF2` above — which
+turns the probabilistic ceiling into a hard, deterministic worst case of
+exactly `MAX_NOISE_RUN+1 = 20×` per real codepoint, regardless of `p`.
+This makes v8's documented `4–20×` figure accurate. What was missing was
+the write-up: the paper's prose, the `CAV-004` entry, and this file did
+not previously explain the cap or correct the backwards "mitigated by
+0.99" framing. `docs/napseq-eprint-v2.tex` has been updated (new
+`rem:v2cvf4` remark, rewritten trade-off paragraph, corrected `CAV-004`
+item) to state this accurately.
+
+**Residual (legacy v7, not fixed, by design).** `MAX_NOISE_RUN` is
+deliberately **not** applied to the legacy v7 construction, so that
+previously-issued v7 ciphertexts remain decodable exactly as originally
+produced. v7's ciphertext expansion therefore remains bounded only in
+expectation (`≈13.4×` mean at typical `p`), with an uncapped tail as
+`p→0.99`. This is an accepted trade-off since v7 is retained for backward
+compatibility only and is no longer the recommended construction.
+
+**Requested action:** confirm V2-CVF4 can be marked **Fixed for v8, v7
+residual accepted**.
+
+---
+
+## V2-CVF11 — Streaming format retains the codepoint-length leak (CAV-003/first-round CVF1), undocumented
+
+| Field | Value |
+|---|---|
+| **ID** | V2-CVF11 (second-round ABDK Consulting audit, 2026-07-19, "NAPQES v2 — AEAD Scheme Audit"; internal doc label `rem:v2cvf11`, `docs/napseq-eprint-v2.tex`) |
+| **Category** | Documentation |
+| **Severity** | Minor |
+| **Affects** | Online-AE streaming format (`Section~\ref{sec:streaming-ae}`, `encrypt_stream_ae`/`decrypt_stream_ae`); basic streaming format |
+| **Owner** | TBD |
+| **Status** | **Fixed (documentation)**; **residual retained by design** |
+| **Risk retired** | — (clarifies an existing, accepted trade-off; no new exposure) |
+
+**Description.** Both streaming formats mask a `varint(·)` (LEB128) blob,
+not the fixed-width `be8` encoding that the first-round `CVF1` fix
+introduced for block mode (`Section~\ref{sec:wire-format-v7}`).
+Consequently a token's serialised byte-length in streaming mode still
+grows with the plaintext codepoint value — precisely the channel `CVF1`
+closed for block mode. This was never a newly introduced defect: a
+streaming ciphertext already discloses the exact plaintext length by
+construction (each chunk's `be4(ℓ_i)` length prefix is sent in the
+clear), so the additional, finer-grained per-token length variation adds
+no confidentiality cost beyond what streaming mode already concedes. The
+paper simply never stated this scoping explicitly, risking a reader
+wrongly assuming the block-mode `CVF1` fix applies universally across
+every wire format.
+
+**Fix (documentation only, 2026-07-21).** `docs/napseq-eprint-v2.tex`,
+Section~\ref{sec:streaming-ae}: added `Remark~\ref{rem:v2cvf11}` stating
+explicitly that the streaming format deliberately retains the codepoint
+length leak and why that is acceptable.
+
+**Residual (accepted, by design).** Streaming-mode ciphertexts leak
+codepoint-level length information beyond the chunk-length prefix already
+disclosed in the clear. This is a deliberate trade-off tied to streaming
+mode's threat model (which already concedes exact plaintext length via
+`be4(ℓ_i)`), not a defect, and is the same class of residual as
+`CAV-003` above, scoped specifically to streaming ciphertexts (block-mode
+v7 ciphertexts do not have this residual, per the `CVF1` fix).
+
+**Requested action:** confirm V2-CVF11 can be marked **Fixed
+(documentation), with the by-design residual accepted**.
+
+---
+
+## V2-CVF12 / V2-CVF13 — Legacy v7 retained with conditional security proofs; decision recorded against removing it
+
+| Field | Value |
+|---|---|
+| **ID** | V2-CVF12 and V2-CVF13 (second-round ABDK Consulting audit, 2026-07-19, "NAPQES v2 — AEAD Scheme Audit"; internal doc label `rem:v2cvf12-13`, `docs/napseq-eprint-v2.tex`) |
+| **Category** | Procedural (CVF12) / Architecture (CVF13) |
+| **Severity** | Minor |
+| **Affects** | `Theorem~\ref{thm:ind-cpa}`, `Theorem~\ref{thm:int-ctxt}`, `Theorem~\ref{thm:ind-cca}` (legacy v7); `Section~\ref{sec:algorithm-triple}` |
+| **Owner** | TBD |
+| **Status** | **Fixed (CVF12, hardened wording)**; **Acknowledged, v7 retained by decision (CVF13)** |
+| **Risk retired** | — (same underlying residual as the first-round `CVF8`/`CVF13` entries below; this documents its second-round reaffirmation) |
+
+**Description.** CVF12: the legacy v7 theorems were stated as ordinary,
+unconditional theorems even though this paper's own remarks concede two
+open v7-specific gaps — the simulation-gap caveat (first-round `CVF13`:
+the reduction cannot simulate `NAPQES.Enc` from oracle access alone, since
+the arithmetic layer uses `k` directly, outside any HMAC call) and the
+non-standard key-distribution caveat (first-round `CVF8`: the PRF
+advantage invoked is against a non-uniform, low-min-entropy prime-tuple
+distribution, not the standard uniform-key assumption). Only
+`Theorem~\ref{thm:ind-cpa}` previously surfaced this inline. CVF13: given
+v7 is superseded by v8 as the recommended default, the audit recommends
+removing the legacy v7 construction and its proofs from the paper
+entirely, rather than carrying two parallel, non-interoperable schemes
+with different (v7: conditional, v8: unconditional) guarantees side by
+side.
+
+**Fix (CVF12, documentation, 2026-07-21).** `docs/napseq-eprint-v2.tex`:
+added `Remark~\ref{rem:v2cvf12-13}` (immediately before the "IND-CPA
+Security" subsection) stating plainly that every v7 theorem in
+`Section~\ref{sec:security}` is conditional on the two gaps above, and
+that only v8 (`Theorem~\ref{thm:ind-cpa-v8}`, `Corollary~\ref{cor:v8-security}`)
+carries unconditional guarantees; `Theorem~\ref{thm:int-ctxt}` and
+`Theorem~\ref{thm:ind-cca}`'s own preambles now state the same
+conditional caveat directly, matching `Theorem~\ref{thm:ind-cpa}`.
+
+**Decision (CVF13, acknowledged, not actioned).** We considered removing
+the legacy v7 construction entirely and decided to retain it, unmodified,
+for backward compatibility with existing v7 ciphertexts and deployments.
+v7 is already explicitly retitled as legacy-only and no longer the
+recommended default (`Section~\ref{sec:algorithm-triple}`); removing a
+wire format that deployed systems may depend on is a breaking change out
+of proportion to a documentation/architecture finding. CVF12's hardened
+conditional-theorem wording is the mitigation shipped in response to this
+finding, in place of removal.
+
+**Residual (accepted, by decision).** The legacy v7 construction, and its
+conditional security proofs (tracked since the first-round audit as
+`CVF8` and `CVF13` below), remain part of the normative document. Closing
+the underlying gaps for real would require the KDF-subkey wire-format
+change already noted as a residual against those first-round entries —
+still deferred, not part of this fix.
+
+**Requested action:** confirm V2-CVF12 can be marked **Fixed**, and
+V2-CVF13 can be marked **Acknowledged, with the decision to retain v7
+recorded**.

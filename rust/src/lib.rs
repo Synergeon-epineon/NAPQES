@@ -319,6 +319,54 @@ pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Vec<u32> {
     decrypt_core(nonce, cypher, key, &kb)
 }
 
+/// v8-only decrypt core: bounded, `MAX_NOISE_RUN`-capped, lock-step with
+/// `encrypt_bytes_v8`'s emission loop, and aware of the fixed per-bucket
+/// token ceiling (V2-CVF2 fix). Unlike the shared, v7-only [`decrypt_core`]
+/// (which classifies every token position independently and consumes the
+/// whole `cypher` slice), this recovers the real-token count directly from
+/// `cypher.len()` up front — since `encrypt_bytes_v8` always pads to
+/// exactly `real_count * (MAX_NOISE_RUN + 1)` tokens — and stops as soon as
+/// that many real tokens have been extracted, discarding any trailing
+/// filler tokens rather than feeding them through the noise/real decision.
+fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Result<Vec<u32>, String> {
+    let ceiling_unit = MAX_NOISE_RUN + 1;
+    let n_tokens = cypher.len() as u64;
+    if n_tokens % ceiling_unit != 0 {
+        return Err(
+            "Malformed v8 ciphertext: token count is not a multiple of the padding ceiling; \
+             expected exactly real_token_count * (MAX_NOISE_RUN + 1) tokens.".into(),
+        );
+    }
+    let real_count = n_tokens / ceiling_unit;
+    let noise_p = derive_noise_p(kb, nonce);
+    let kk = key.len() as u64;
+    let mut padded: Vec<u32> = Vec::new();
+    let mut real_idx: u64 = 0;
+    let mut ct_pos: u64 = 0;
+    while real_idx < real_count {
+        let mut noise_run: u64 = 0;
+        while noise_run < MAX_NOISE_RUN
+            && ct_pos < n_tokens
+            && is_noise_pos(kb, nonce, ct_pos, noise_p)
+        {
+            ct_pos += 1;
+            noise_run += 1;
+        }
+        if ct_pos >= n_tokens {
+            return Err(
+                "Truncated v8 ciphertext: token stream ended mid noise-run before the \
+                 expected real token.".into(),
+            );
+        }
+        let k = key[(real_idx % kk) as usize];
+        let addend = derive_addend(kb, nonce, real_idx, k);
+        padded.push(((cypher[ct_pos as usize] - addend) / k) as u32);
+        ct_pos += 1;
+        real_idx += 1;
+    }
+    Ok(unpad_message(&padded))
+}
+
 // ─── Constant-time tag comparison ────────────────────────────────────────────
 
 /// Compare two equal-length byte slices in constant time.
@@ -743,6 +791,22 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
 /// Size in bytes of the v8 independently-sampled HMAC subkey `sk`.
 pub const SK_SIZE: usize = 32;
 
+/// Hard cap on consecutive noise tokens emitted before a real token in the
+/// v8 token-emission loop (never applied to v7, matching `napqes.py` /
+/// `C/napqes.c`). As of the V2-CVF2 fix, this cap also fixes the *total*
+/// per-real-token budget: every v8 ciphertext is padded with additional
+/// filler tokens up to a deterministic per-bucket ceiling of
+/// `real_token_count * (MAX_NOISE_RUN + 1)` tokens (see
+/// `encrypt_bytes_v8` / `decrypt_core_v8`). Without this, the *natural*
+/// token count varies with the message-derived synthetic nonce even for a
+/// fixed padding bucket, letting an observer who collects several
+/// ciphertexts of one message under varying AAD average out the noise and
+/// reliably recover the padding bucket (`docs/CAVEATS.md`, V2-CVF2). After
+/// this fix, v8 ciphertext length is a deterministic function of the
+/// padding bucket alone, at the cost of always paying the worst-case ~20x
+/// expansion instead of the ~13.4x average case.
+pub const MAX_NOISE_RUN: u64 = 19;
+
 /// Generate a v8 key pair: an arithmetic-layer prime tuple and an
 /// independently-sampled, uniformly random 256-bit HMAC subkey.
 ///
@@ -797,13 +861,15 @@ pub fn encrypt_bytes_v8(
     let mut real_idx: u64 = 0;
     let mut ct_pos: u64 = 0;
     for &c in &padded {
+        let mut noise_run: u64 = 0;
         loop {
-            if is_noise_pos(sk, &nonce, ct_pos, noise_p) {
+            if noise_run < MAX_NOISE_RUN && is_noise_pos(sk, &nonce, ct_pos, noise_p) {
                 let k = primes[(real_idx % kk) as usize];
                 let nc = derive_noise_char(sk, &nonce, ct_pos);
                 let na = derive_noise_token_addend(sk, &nonce, ct_pos, k);
                 cypher.push(nc * k + na);
                 ct_pos += 1;
+                noise_run += 1;
             } else {
                 let k = primes[(real_idx % kk) as usize];
                 let addend = derive_addend(sk, &nonce, real_idx, k);
@@ -813,6 +879,16 @@ pub fn encrypt_bytes_v8(
                 break;
             }
         }
+    }
+    // V2-CVF2 fix: pad up to the fixed, bucket-only ceiling so ciphertext
+    // length never depends on the message-derived nonce's noise realisation.
+    let ceiling = (padded.len() as u64) * (MAX_NOISE_RUN + 1);
+    while (cypher.len() as u64) < ceiling {
+        let k = primes[(real_idx % kk) as usize];
+        let nc = derive_noise_char(sk, &nonce, ct_pos);
+        let na = derive_noise_token_addend(sk, &nonce, ct_pos, k);
+        cypher.push(nc * k + na);
+        ct_pos += 1;
     }
     let blob = fixed_encode_tokens(&cypher);
     let ks = varint_keystream(sk, &nonce, blob.len());
@@ -854,7 +930,7 @@ pub fn decrypt_bytes_v8(
     let ks = varint_keystream(sk, nonce, masked.len());
     let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let tokens = fixed_decode_tokens(&blob).map_err(|e| format!("varint decode error: {}", e))?;
-    let codepoints = decrypt_core(nonce, &tokens, primes, sk);
+    let codepoints = decrypt_core_v8(nonce, &tokens, primes, sk)?;
     let s: String = codepoints.into_iter().filter_map(char::from_u32).collect();
     Ok(s)
 }
@@ -1007,6 +1083,26 @@ mod tests {
         let ct1 = encrypt_bytes_v8("message one", &primes, &sk, b"aad").unwrap();
         let ct2 = encrypt_bytes_v8("message two", &primes, &sk, b"aad").unwrap();
         assert_ne!(&ct1[..NONCE_SIZE], &ct2[..NONCE_SIZE]);
+    }
+
+    /// V2-CVF2 fix: ciphertext length must be a deterministic function of
+    /// the padding bucket alone, never of the message-derived synthetic
+    /// nonce's noise realisation. Encrypt the SAME message under many
+    /// distinct keys and AAD values and confirm every ciphertext has
+    /// EXACTLY the same length -- the property whose absence let an
+    /// observer average out noise across varied-AAD ciphertexts of one
+    /// message to recover the padding bucket reliably.
+    #[test]
+    fn v8_ciphertext_length_is_deterministic_across_varied_aad() {
+        let mut lengths = std::collections::HashSet::new();
+        for i in 0..50u32 {
+            let (primes, sk) = generate_v8_key(10, 1_000_000, 9_999_999);
+            let aad = format!("aad-{}", i);
+            let ct = encrypt_bytes_v8("fixed target message", &primes, &sk, aad.as_bytes())
+                .unwrap();
+            lengths.insert(ct.len());
+        }
+        assert_eq!(lengths.len(), 1, "expected one deterministic length, got {:?}", lengths);
     }
 
     #[test]
