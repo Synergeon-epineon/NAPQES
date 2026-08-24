@@ -1,16 +1,20 @@
 /*
- * C KAT harness for NAPSEQ v6.
+ * C KAT harness for NAPSEQ.
  *
- * Reads tests/kat/v6_vectors.json relative to the repo root, and for every
- * vector:
- *   positive — calls napqes_decrypt_bytes() and asserts the plaintext matches;
- *              also calls napqes_encrypt_bytes_with_nonce() and asserts byte-
- *              exact output matches ciphertext_hex (cross-check).
- *   negative — hex-decodes tampered_hex and asserts napqes_decrypt_bytes()
- *              returns NULL (auth failure).
+ * Reads tests/kat/v6_vectors.json (legacy v7) and tests/kat/v8_vectors.json
+ * relative to the repo root, and for every vector:
+ *   positive — decrypts and asserts the plaintext matches; also re-encrypts
+ *              deterministically and asserts byte-exact output matches
+ *              ciphertext_hex (cross-check against the Python reference).
+ *              v7 needs an injected nonce; v8 derives its nonce synthetically
+ *              from (sk, A, M), so its public API is already deterministic.
+ *   negative — hex-decodes tampered_hex and asserts decryption returns NULL.
  *
  * Build:
  *   make -C C kat-test
+ *
+ * Usage:
+ *   kat-test [v7_vectors.json] [v8_vectors.json]
  *
  * Exit codes:
  *   0  all assertions passed
@@ -175,6 +179,21 @@ static int split_vectors(const char *json, const char **starts,
     int depth = 0;
     const char *obj_start = NULL;
     while (*p && count < max) {
+        /* Skip over string literals. Braces are legal inside JSON strings
+         * (KAT `message` and `description` fields contain them), and counting
+         * them as structure desynchronises the depth tracker: object
+         * boundaries then land mid-vector, so json_str() reads fields from
+         * the neighbouring vector or truncates them. */
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"') {
+                if (*p == '\\' && *(p + 1)) p++;
+                p++;
+            }
+            if (!*p) break;
+            p++;
+            continue;
+        }
         if (*p == '{') {
             if (depth == 0) obj_start = p;
             depth++;
@@ -213,8 +232,263 @@ static char *read_file(const char *path) {
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
+/* ── Padding-profile checks (audit finding V3-CVF2) ────────────────────────
+ * These are not cross-language KATs (the profile is a sender-side parameter
+ * that never appears in the wire format); they assert the two properties the
+ * paper claims: `frame(F)` makes |C| independent of the plaintext length, and
+ * the default `bucket` profile does not. Decryption is profile-agnostic. */
+static int test_pad_profiles(void) {
+    uint64_t primes[10];
+    uint8_t sk[NAPQES_SK_SIZE];
+    if (napqes_generate_v8_key(primes, 10, NAPQES_MIN_KEY_PRIME,
+                               NAPQES_MAX_KEY_PRIME, sk) != 0) {
+        printf("[FAIL] PAD: key generation failed\n");
+        return 1;
+    }
+
+    static const size_t lens[] = { 1, 5, 40, 200, 511 };
+    const size_t nlens = sizeof(lens) / sizeof(lens[0]);
+    napqes_pad_profile_t frame = { NAPQES_PAD_FRAME, 512 };
+    napqes_pad_profile_t coarse = { NAPQES_PAD_COARSE, 3 };
+    int failures = 0;
+
+    size_t frame_len = 0;
+    size_t bucket_lens[sizeof(lens) / sizeof(lens[0])];
+    for (size_t i = 0; i < nlens; ++i) {
+        char *msg = (char *)malloc(lens[i] + 1);
+        if (!msg) { printf("[FAIL] PAD: oom\n"); return failures + 1; }
+        memset(msg, 'a', lens[i]);
+        msg[lens[i]] = '\0';
+
+        size_t ct_len = 0;
+        uint8_t *ct = napqes_encrypt_bytes_v8_profiled(msg, primes, 10, sk,
+                                                       NULL, 0, &frame, &ct_len);
+        if (!ct) {
+            printf("[FAIL] PAD: frame(512) encryption failed for n=%zu\n", lens[i]);
+            failures++; free(msg); continue;
+        }
+        if (i == 0) frame_len = ct_len;
+        else if (ct_len != frame_len) {
+            printf("[FAIL] PAD: frame(512) length varies (%zu vs %zu)\n",
+                   ct_len, frame_len);
+            failures++;
+        }
+        /* Profile-agnostic decryption: no profile argument is passed. */
+        char *pt = napqes_decrypt_bytes_v8(ct, ct_len, primes, 10, sk, NULL, 0);
+        if (!pt || strcmp(pt, msg) != 0) {
+            printf("[FAIL] PAD: frame(512) round-trip failed for n=%zu\n", lens[i]);
+            failures++;
+        }
+        free(pt); free(ct);
+
+        size_t b_len = 0;
+        uint8_t *bct = napqes_encrypt_bytes_v8(msg, primes, 10, sk, NULL, 0, &b_len);
+        if (!bct) {
+            printf("[FAIL] PAD: default encryption failed for n=%zu\n", lens[i]);
+            failures++; free(msg); continue;
+        }
+        bucket_lens[i] = b_len;
+        free(bct);
+
+        size_t c_len = 0;
+        uint8_t *cct = napqes_encrypt_bytes_v8_profiled(msg, primes, 10, sk,
+                                                        NULL, 0, &coarse, &c_len);
+        if (!cct) {
+            printf("[FAIL] PAD: coarse(3) encryption failed for n=%zu\n", lens[i]);
+            failures++;
+        }
+        free(cct);
+        free(msg);
+    }
+
+    int bucket_varies = 0;
+    for (size_t i = 1; i < nlens; ++i)
+        if (bucket_lens[i] != bucket_lens[0]) bucket_varies = 1;
+    if (!bucket_varies) {
+        printf("[FAIL] PAD: default bucket profile unexpectedly hides length\n");
+        failures++;
+    }
+
+    /* Invalid profiles must be rejected rather than silently clamped. */
+    napqes_pad_profile_t bad_stride = { NAPQES_PAD_COARSE, 5 };   /* 5 does not divide 12 */
+    napqes_pad_profile_t bad_frame  = { NAPQES_PAD_FRAME, 1000 }; /* not a power of two */
+    napqes_pad_profile_t small_frame = { NAPQES_PAD_FRAME, 512 }; /* message will not fit */
+    size_t dummy = 0;
+    const napqes_pad_profile_t *bad[] = { &bad_stride, &bad_frame };
+    for (size_t i = 0; i < 2; ++i) {
+        uint8_t *ct = napqes_encrypt_bytes_v8_profiled("hello", primes, 10, sk,
+                                                       NULL, 0, bad[i], &dummy);
+        if (ct) {
+            printf("[FAIL] PAD: invalid profile #%zu was accepted\n", i);
+            failures++; free(ct);
+        }
+    }
+    char *big = (char *)malloc(601);
+    if (big) {
+        memset(big, 'a', 600); big[600] = '\0';
+        uint8_t *ct = napqes_encrypt_bytes_v8_profiled(big, primes, 10, sk,
+                                                       NULL, 0, &small_frame, &dummy);
+        if (ct) {
+            printf("[FAIL] PAD: oversized message accepted by frame(512)\n");
+            failures++; free(ct);
+        }
+        free(big);
+    }
+
+    if (failures == 0) printf("[PASS] PAD (padding profiles: bucket/coarse/frame)\n");
+    return failures;
+}
+
+/* ── v8 corpus ────────────────────────────────────────────────────────────
+ * Cross-language KAT pass over tests/kat/v8_vectors.json. v8 derives its
+ * nonce synthetically from (sk, A, M), so re-encryption is deterministic
+ * through the public API and no test-only nonce injection is needed.
+ *
+ * This is the leg that pins the noise schedule: theta(N) is now derived by
+ * integer arithmetic, so C must agree with Python bit for bit rather than
+ * "to within a rounding mode". Returns the number of failures. */
+static int run_v8_corpus(const char *path, int *passed, int *skipped) {
+    char *json = read_file(path);
+    if (!json) {
+        fprintf(stderr, "ERROR: cannot open %s\n", path);
+        return 1;
+    }
+
+    const char *vec_body = strstr(json, "\"vectors\"");
+    if (vec_body) {
+        vec_body = strchr(vec_body, '[');
+        if (vec_body) vec_body++;
+    }
+    if (!vec_body) vec_body = json;
+
+    const char *starts[MAX_VECTORS], *ends[MAX_VECTORS];
+    int nv = split_vectors(vec_body, starts, ends, MAX_VECTORS);
+    if (nv == 0) {
+        fprintf(stderr, "ERROR: no vectors found in %s\n", path);
+        free(json);
+        return 1;
+    }
+
+    int failed = 0;
+    for (int i = 0; i < nv; i++) {
+        size_t obj_len = (size_t)(ends[i] - starts[i]);
+        char *obj = malloc(obj_len + 1);
+        if (!obj) { failed++; continue; }
+        memcpy(obj, starts[i], obj_len);
+        obj[obj_len] = '\0';
+
+        char *id     = json_str(obj, "id");
+        char *kind   = json_str(obj, "kind");
+        char *sk_hex = json_str(obj, "sk_hex");
+        char *aad_h  = json_str(obj, "aad_hex");
+        uint64_t key[32];
+        size_t klen = 0;
+
+        if (!id || !kind || !sk_hex || parse_key_array(obj, key, &klen) != 0) {
+            free(id); free(kind); free(sk_hex); free(aad_h); free(obj);
+            (*skipped)++;
+            continue;
+        }
+
+        size_t sk_len = 0, aad_len = 0;
+        uint8_t *sk  = hex_decode(sk_hex, &sk_len);
+        uint8_t *aad = (aad_h && aad_h[0] != '\0') ? hex_decode(aad_h, &aad_len) : NULL;
+        if (!sk || sk_len != NAPQES_SK_SIZE) {
+            printf("[FAIL] %s: bad sk_hex\n", id);
+            failed++;
+            free(sk); free(aad); free(id); free(kind); free(sk_hex); free(aad_h); free(obj);
+            continue;
+        }
+
+        if (strcmp(kind, "positive") == 0) {
+            char *ct_hex = json_str(obj, "ciphertext_hex");
+            char *msg    = json_str(obj, "message");
+
+            int has_nonascii = 0;
+            if (msg)
+                for (const unsigned char *q = (const unsigned char *)msg; *q; q++)
+                    if (*q > 127) { has_nonascii = 1; break; }
+
+            if (!ct_hex || !msg) {
+                printf("[SKIP] %s: missing fields\n", id);
+                (*skipped)++;
+            } else if (has_nonascii) {
+                /* The C port maps one input byte to one codepoint; Python maps
+                 * one Unicode codepoint. The two agree exactly on ASCII. */
+                printf("[SKIP] %s: non-ASCII message (C port is byte-API only)\n", id);
+                (*skipped)++;
+            } else {
+                size_t ct_len = 0;
+                uint8_t *ct = hex_decode(ct_hex, &ct_len);
+                int ok = 1;
+
+                char *plain = ct ? napqes_decrypt_bytes_v8(ct, ct_len, key, klen,
+                                                           sk, aad, aad_len)
+                                 : NULL;
+                if (!plain || strcmp(plain, msg) != 0) {
+                    printf("[FAIL] %s decrypt: got \"%s\", want \"%s\"\n",
+                           id, plain ? plain : "(null)", msg);
+                    ok = 0;
+                }
+                free(plain);
+
+                size_t enc_len = 0;
+                uint8_t *enc = napqes_encrypt_bytes_v8(msg, key, klen, sk,
+                                                       aad, aad_len, &enc_len);
+                if (!enc || enc_len != ct_len || !ct || memcmp(enc, ct, ct_len) != 0) {
+                    char *enc_hex = enc ? hex_encode(enc, enc_len) : NULL;
+                    printf("[FAIL] %s encrypt: got  %s\n"
+                           "                    want %s\n",
+                           id, enc_hex ? enc_hex : "(null)", ct_hex);
+                    free(enc_hex);
+                    ok = 0;
+                }
+                free(enc);
+                free(ct);
+
+                if (ok) { printf("[PASS] %s\n", id); (*passed)++; }
+                else failed++;
+            }
+            free(ct_hex); free(msg);
+
+        } else if (strcmp(kind, "negative") == 0) {
+            char *tampered_h = json_str(obj, "tampered_hex");
+            if (!tampered_h) {
+                printf("[SKIP] %s: missing tampered_hex\n", id);
+                (*skipped)++;
+            } else {
+                size_t ct_len = 0;
+                uint8_t *ct = hex_decode(tampered_h, &ct_len);
+                char *plain = napqes_decrypt_bytes_v8(ct, ct_len, key, klen,
+                                                      sk, aad, aad_len);
+                if (plain == NULL) {
+                    printf("[PASS] %s (rejected)\n", id);
+                    (*passed)++;
+                } else {
+                    printf("[FAIL] %s: decrypt succeeded on invalid ciphertext\n", id);
+                    failed++;
+                    free(plain);
+                }
+                free(ct);
+            }
+            free(tampered_h);
+
+        } else {
+            printf("[SKIP] %s: unknown kind '%s'\n", id, kind);
+            (*skipped)++;
+        }
+
+        free(sk); free(aad);
+        free(id); free(kind); free(sk_hex); free(aad_h); free(obj);
+    }
+
+    free(json);
+    return failed;
+}
+
 int main(int argc, char *argv[]) {
     const char *vec_path = (argc > 1) ? argv[1] : "../tests/kat/v6_vectors.json";
+    const char *v8_path  = (argc > 2) ? argv[2] : "../tests/kat/v8_vectors.json";
     char *json = read_file(vec_path);
     if (!json) {
         fprintf(stderr, "ERROR: cannot open %s\n", vec_path);
@@ -395,6 +669,11 @@ int main(int argc, char *argv[]) {
     }
 
     free(json);
+
+    failed += run_v8_corpus(v8_path, &passed, &skipped);
+
+    int pad_failures = test_pad_profiles();
+    if (pad_failures) failed += pad_failures; else passed++;
 
     printf("\nC KAT results: %d passed, %d failed, %d skipped\n",
            passed, failed, skipped);

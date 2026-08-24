@@ -17,7 +17,9 @@
 //! Run:
 //!   cargo test --lib kat_cross_check -- --nocapture
 
-use crate::{decrypt_bytes, encrypt_bytes_with_nonce, NONCE_SIZE};
+use crate::{
+    decrypt_bytes, decrypt_bytes_v8, encrypt_bytes_v8, encrypt_bytes_with_nonce, NONCE_SIZE,
+};
 use serde_json::Value;
 use std::path::Path;
 
@@ -223,4 +225,139 @@ fn negative_returns_err() {
         // Not a hard failure: negative vectors may also hit SKIP-PHASE2 paths
         eprintln!("PARITY-NOTE: no negative vectors exercised");
     }
+}
+
+// ---------------------------------------------------------------------------
+// v8 cross-language parity (tests/kat/v8_vectors.json)
+//
+// v8 encryption is deterministic in `(primes, sk, aad, message)` — the nonce
+// is a synthetic IV, so no KAT-only nonce-injection entry point is needed and
+// the *public* `encrypt_bytes_v8` is compared byte-for-byte against Python.
+//
+// These vectors exist because the v7 corpus above does not exercise v8 at
+// all, which is how the Rust port's missing domain-0x0B format subkey went
+// undetected (docs/CAVEATS.md, V3-CVF1 Residual 4).
+// ---------------------------------------------------------------------------
+
+fn load_v8_vectors() -> Vec<Value> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = Path::new(manifest_dir)
+        .parent()
+        .unwrap()
+        .join("tests/kat/v8_vectors.json");
+
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+
+    let doc: Value = serde_json::from_str(&content).expect("Invalid JSON in v8_vectors.json");
+
+    doc["vectors"]
+        .as_array()
+        .expect("vectors array missing")
+        .clone()
+}
+
+fn v8_key(vec: &Value) -> Vec<u64> {
+    vec["key"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect()
+}
+
+fn v8_sk(vec: &Value) -> [u8; crate::SK_SIZE] {
+    let bytes = hex_decode(vec["sk_hex"].as_str().unwrap());
+    bytes
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| panic!("sk_hex must decode to {} bytes, got {}", crate::SK_SIZE, v.len()))
+}
+
+#[test]
+fn v8_positive_encrypt_matches_python() {
+    let vectors = load_v8_vectors();
+    let mut tested = 0;
+
+    for vec in vectors.iter().filter(|v| v["kind"] == "positive") {
+        let id = vec["id"].as_str().unwrap();
+        let message = vec["message"].as_str().unwrap_or("");
+        let expected_ct = hex_decode(vec["ciphertext_hex"].as_str().unwrap());
+        let aad = hex_decode(vec["aad_hex"].as_str().unwrap_or(""));
+        let sk = v8_sk(vec);
+        let key = v8_key(vec);
+
+        let got_ct = encrypt_bytes_v8(message, &key, &sk, &aad)
+            .unwrap_or_else(|e| panic!("[{}] encrypt_bytes_v8 returned Err: {}", id, e));
+
+        assert_eq!(
+            got_ct.len(),
+            expected_ct.len(),
+            "[{}] v8 ciphertext length differs: got {}, want {}",
+            id,
+            got_ct.len(),
+            expected_ct.len()
+        );
+        assert!(
+            got_ct == expected_ct,
+            "[{}] v8 ciphertext differs from the Python KAT (first differing byte at {:?})",
+            id,
+            got_ct.iter().zip(expected_ct.iter()).position(|(a, b)| a != b)
+        );
+        eprintln!("[PASS] {} — v8 encrypt matches Python KAT", id);
+        tested += 1;
+    }
+
+    eprintln!("\nRust v8 KAT encrypt: {} passed", tested);
+    assert!(tested > 0, "No v8 positive vectors were tested");
+}
+
+#[test]
+fn v8_positive_decrypt_roundtrip() {
+    let vectors = load_v8_vectors();
+    let mut tested = 0;
+
+    for vec in vectors.iter().filter(|v| v["kind"] == "positive") {
+        let id = vec["id"].as_str().unwrap();
+        let message = vec["message"].as_str().unwrap_or("");
+        let ct = hex_decode(vec["ciphertext_hex"].as_str().unwrap());
+        let aad = hex_decode(vec["aad_hex"].as_str().unwrap_or(""));
+        let sk = v8_sk(vec);
+        let key = v8_key(vec);
+
+        let pt = decrypt_bytes_v8(&ct, &key, &sk, &aad)
+            .unwrap_or_else(|e| panic!("[{}] decrypt_bytes_v8 returned Err: {}", id, e));
+        assert_eq!(pt, message, "[{}] v8 roundtrip failed", id);
+        eprintln!("[PASS] {} — v8 decrypt of the Python ciphertext", id);
+        tested += 1;
+    }
+
+    eprintln!("\nRust v8 KAT decrypt: {} passed", tested);
+    assert!(tested > 0, "No v8 positive vectors were tested");
+}
+
+#[test]
+fn v8_negative_returns_err() {
+    let vectors = load_v8_vectors();
+    let mut tested = 0;
+
+    for vec in vectors.iter().filter(|v| v["kind"] == "negative") {
+        let id = vec["id"].as_str().unwrap();
+        let ct = hex_decode(vec["tampered_hex"].as_str().unwrap());
+        let aad = hex_decode(vec["aad_hex"].as_str().unwrap_or(""));
+        let sk = v8_sk(vec);
+        let key = v8_key(vec);
+
+        let result = decrypt_bytes_v8(&ct, &key, &sk, &aad);
+        assert!(
+            result.is_err(),
+            "[{}] expected Err but got Ok({:?})",
+            id,
+            result.unwrap()
+        );
+        eprintln!("[PASS] {} — correctly returned Err", id);
+        tested += 1;
+    }
+
+    eprintln!("\nRust v8 KAT negative: {} passed", tested);
+    assert!(tested > 0, "No v8 negative vectors were tested");
 }

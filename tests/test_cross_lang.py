@@ -39,6 +39,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RUST_DIR = _REPO_ROOT / "rust"
 _C_DIR = _REPO_ROOT / "C"
 _VECTORS = _REPO_ROOT / "tests" / "kat" / "v6_vectors.json"
+_V8_VECTORS = _REPO_ROOT / "tests" / "kat" / "v8_vectors.json"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,7 +127,13 @@ class TestPythonToRust:
 # ---------------------------------------------------------------------------
 
 class TestPythonToC:
-    """C KAT harness must decrypt all Python-generated block-mode vectors."""
+    """C KAT harness must decrypt all Python-generated block-mode vectors.
+
+    Both corpora are passed: v7 (``v6_vectors.json``) and v8
+    (``v8_vectors.json``). The v8 leg is what pins the noise schedule --
+    ``theta(N)`` is derived by integer arithmetic, so C must reproduce
+    Python's ciphertexts bit for bit rather than up to a rounding mode.
+    """
 
     @pytest.fixture(scope="class", autouse=True)
     def build_c_kat(self):
@@ -140,8 +147,7 @@ class TestPythonToC:
     def test_c_kat_harness_passes(self):
         """C kat-test must exit 0 with no FAILed vectors."""
         exe = "kat-test.exe" if sys.platform == "win32" else "./kat-test"
-        vec_path = str(_VECTORS)
-        result = _run([exe, vec_path], cwd=_C_DIR)
+        result = _run([exe, str(_VECTORS), str(_V8_VECTORS)], cwd=_C_DIR)
         if result.returncode != 0:
             pytest.fail(
                 f"C KAT harness failed (exit {result.returncode}):\n{result.stdout}"

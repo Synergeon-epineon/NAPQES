@@ -118,7 +118,12 @@ class TestGeneratePrimeNumbers:
     def test_all_results_in_default_range(self):
         primes = napqes.generate_prime_numbers(count=5)
         for p in primes:
-            assert 1_000_000 <= p <= 15_000_000
+            assert napqes.MIN_KEY_PRIME <= p <= napqes.MAX_KEY_PRIME
+
+    def test_default_range_matches_normative_interval(self):
+        # docs/napseq-eprint-v3.tex Notation: P = [10^6, 9.9e6].
+        assert napqes.MIN_KEY_PRIME == 1_000_000
+        assert napqes.MAX_KEY_PRIME == 9_900_000
 
     def test_no_duplicates(self):
         primes = napqes.generate_prime_numbers(count=10)

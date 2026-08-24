@@ -226,13 +226,93 @@ static double derive_noise_p(const uint8_t *kb, size_t klen, const uint8_t *nonc
     return 0.75 + t * (0.99 - 0.75);
 }
 
+/* Endpoints of the v8 noise-threshold interval, as fixed-width 64-bit
+ * integers (docs/napseq-eprint-v3.tex, Section "Noise Probability"):
+ * floor(0.75 * 2^64) and floor(0.99 * 2^64). */
+#define THETA_MIN 13835058055282163712ULL
+#define THETA_MAX 18262276632972456099ULL
+
+/* High 64 bits of the 128-bit product a*b, i.e. floor(a*b / 2^64).
+ * The limb fallback keeps this exact on toolchains without a 128-bit type
+ * (notably MSVC), so theta(N) is identical on every target. */
+static uint64_t mulhi64(uint64_t a, uint64_t b) {
+#if defined(__SIZEOF_INT128__)
+    return (uint64_t)(((unsigned __int128)a * (unsigned __int128)b) >> 64);
+#else
+    uint64_t a_lo = a & 0xFFFFFFFFULL, a_hi = a >> 32;
+    uint64_t b_lo = b & 0xFFFFFFFFULL, b_hi = b >> 32;
+    uint64_t p_ll = a_lo * b_lo;
+    uint64_t p_lh = a_lo * b_hi;
+    uint64_t p_hl = a_hi * b_lo;
+    uint64_t p_hh = a_hi * b_hi;
+    uint64_t mid  = (p_ll >> 32) + (p_lh & 0xFFFFFFFFULL) + (p_hl & 0xFFFFFFFFULL);
+    return p_hh + (p_lh >> 32) + (p_hl >> 32) + (mid >> 32);
+#endif
+}
+
+/* v8 noise threshold theta(N) = THETA_MIN + floor(tau * delta / 2^64), the
+ * integer counterpart of derive_noise_p(). Integer arithmetic throughout, so
+ * there is no rounding mode, no excess precision and no licence to contract
+ * the expression into an FMA -- the three reasons the IEEE-754 form was only
+ * conditionally reproducible across languages and platforms. The legacy v7
+ * path keeps derive_noise_p() and stays byte-compatible. */
+static uint64_t derive_noise_threshold_v8(const uint8_t *kb, size_t klen,
+                                          const uint8_t *nonce) {
+    uint8_t d[32];
+    hmac_with_sep(kb, klen, nonce, 0x02, NULL, 0, d);
+    return THETA_MIN + mulhi64(u64_from_be8(d), THETA_MAX - THETA_MIN);
+}
+
+static int is_noise_pos_v8(const uint8_t *kb, size_t klen,
+                           const uint8_t *nonce, uint64_t ct_pos,
+                           uint64_t theta) {
+    uint8_t idx[5]; be5_write(idx, ct_pos);
+    uint8_t d[32];
+    hmac_with_sep(kb, klen, nonce, 0x00, idx, 5, d);
+    return u64_from_be8(d) < theta;
+}
+
+/* Reject a prime tuple that is empty, composite, undersized or repeating.
+ * The correctness argument recovers c from c*k + a by exact division, which
+ * needs gcd(a, k) = 1 for every addend a in [1, k-1] -- true only when k is
+ * prime. Called from both v8 entry points so that a caller supplying a
+ * malformed key gets a failure here rather than a silently undecryptable
+ * ciphertext, matching _validate_key in the Python port. */
+static int validate_key(const uint64_t *primes, size_t klen) {
+    if (klen == 0) return 0;
+    for (size_t i = 0; i < klen; ++i) {
+        if (!napqes_is_prime(primes[i])) return 0;
+        if (primes[i] < NAPQES_MIN_KEY_PRIME) return 0;
+        for (size_t j = 0; j < i; ++j) {
+            if (primes[j] == primes[i]) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Width of the AAD length prefix in the v8 block-mode domains 0x03 (auth
+ * tag) and 0x0A (synthetic nonce); the legacy v7 format keeps 4 bytes. */
+#define AAD_LEN_WIDTH_V8 8u
+#define AAD_LEN_WIDTH_V7 4u
+
+/* Big-endian length prefix of `width` bytes (width <= 8). */
+static void be_len_prefix(size_t n, size_t width, uint8_t out[8]) {
+    uint64_t v = (uint64_t)n;
+    for (size_t i = 0; i < width; ++i) {
+        out[width - 1 - i] = (uint8_t)(v & 0xFF);
+        v >>= 8;
+    }
+}
+
 static void compute_auth_tag(const uint8_t *kb, size_t klen,
                              const uint8_t *aad, size_t aad_len,
                              const uint8_t *payload, size_t payload_len,
+                             size_t aad_len_width,
                              uint8_t out[32]) {
     /* CVF2 fix: HMAC over the unified domain-first layout
-     * 0x03 || nonce || be32(aad_len) || aad || masked_blob, where
-     * payload = nonce || masked_blob (payload_len >= NAPQES_NONCE_SIZE). */
+     * 0x03 || nonce || be(aad_len) || aad || masked_blob, where
+     * payload = nonce || masked_blob (payload_len >= NAPQES_NONCE_SIZE).
+     * V3-CVF1: aad_len_width is 8 for v8, 4 for legacy v7. */
     const uint8_t *nonce = payload;
     const uint8_t *masked_blob = payload + NAPQES_NONCE_SIZE;
     size_t masked_blob_len = payload_len - NAPQES_NONCE_SIZE;
@@ -250,19 +330,15 @@ static void compute_auth_tag(const uint8_t *kb, size_t klen,
         opad[i] = k0[i] ^ 0x5c;
     }
     uint8_t sep = 0x03;
-    uint8_t aad_len_be[4] = {
-        (uint8_t)((aad_len >> 24) & 0xFF),
-        (uint8_t)((aad_len >> 16) & 0xFF),
-        (uint8_t)((aad_len >> 8)  & 0xFF),
-        (uint8_t)(aad_len & 0xFF),
-    };
+    uint8_t aad_len_be[8];
+    be_len_prefix(aad_len, aad_len_width, aad_len_be);
     sha256_ctx c;
     uint8_t inner[32];
     sha256_init(&c);
     sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
     sha256_update(&c, &sep, 1);
     sha256_update(&c, nonce, NAPQES_NONCE_SIZE);
-    sha256_update(&c, aad_len_be, 4);
+    sha256_update(&c, aad_len_be, aad_len_width);
     if (aad_len) sha256_update(&c, aad, aad_len);
     sha256_update(&c, masked_blob, masked_blob_len);
     sha256_final(&c, inner);
@@ -316,7 +392,7 @@ static void derive_format_subkey(const uint8_t sk[NAPQES_SK_SIZE], uint8_t forma
     sha256_final(&c, out);
 }
 
-/* Domain 0x0A: N = HMAC(sk_fmt, 0x0A || be4(len(aad)) || aad || message)[0:16].
+/* Domain 0x0A: N = HMAC(sk_fmt, 0x0A || be8(len(aad)) || aad || message)[0:16].
  * SIV-style synthetic nonce: deterministic in (sk_fmt, aad, message), so
  * re-encrypting an identical (aad, message) reproduces the identical nonce
  * (and hence identical ciphertext) — the disclosed MRAE trade-off — while
@@ -335,16 +411,14 @@ static void synthetic_nonce(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
         opad[i] = k0[i] ^ 0x5c;
     }
     uint8_t sep = 0x0a;
-    uint8_t aad_len_be[4] = {
-        (uint8_t)((aad_len >> 24) & 0xFF), (uint8_t)((aad_len >> 16) & 0xFF),
-        (uint8_t)((aad_len >> 8)  & 0xFF), (uint8_t)(aad_len & 0xFF),
-    };
+    uint8_t aad_len_be[8];
+    be_len_prefix(aad_len, AAD_LEN_WIDTH_V8, aad_len_be);
     uint8_t inner[SHA256_DIGEST_SIZE];
     sha256_ctx c;
     sha256_init(&c);
     sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
     sha256_update(&c, &sep, 1);
-    sha256_update(&c, aad_len_be, 4);
+    sha256_update(&c, aad_len_be, AAD_LEN_WIDTH_V8);
     if (aad_len) sha256_update(&c, aad, aad_len);
     if (message_len) sha256_update(&c, message, message_len);
     sha256_final(&c, inner);
@@ -358,25 +432,50 @@ static void synthetic_nonce(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
 
 /* ── Padding ──────────────────────────────────────────────────────────────── */
 
-static size_t next_block_size(size_t n) {
-    if (n == 0) return 16;
-    size_t bl = 0;
-    size_t v = n;
-    while (v) { ++bl; v >>= 1; }
-    size_t p = (size_t)1 << bl;
-    return p < 16 ? 16 : p;
+/* Padded block size B for an n-codepoint message under `profile` (NULL means
+ * the default NAPQES_PAD_BUCKET). Returns 0 on an invalid profile or on a
+ * message that does not fit the requested frame; every success is a member of
+ * the same 13-element set {2^4, ..., 2^16} and is strictly greater than n,
+ * which is what keeps the decoder profile-agnostic (V3-CVF2). */
+static size_t padding_block_size(size_t n, const napqes_pad_profile_t *profile) {
+    unsigned e = 0;
+    for (size_t v = n; v; v >>= 1) ++e;
+    if (e < NAPQES_PAD_MIN_EXP) e = NAPQES_PAD_MIN_EXP;
+
+    if (!profile || profile->kind == NAPQES_PAD_BUCKET) return (size_t)1 << e;
+
+    if (profile->kind == NAPQES_PAD_COARSE) {
+        unsigned span = NAPQES_PAD_MAX_EXP - NAPQES_PAD_MIN_EXP;
+        unsigned g = (unsigned)profile->param;
+        if (g == 0 || span % g != 0) return 0;
+        unsigned steps = (e - NAPQES_PAD_MIN_EXP + g - 1) / g;  /* ceil */
+        return (size_t)1 << (NAPQES_PAD_MIN_EXP + g * steps);
+    }
+
+    if (profile->kind == NAPQES_PAD_FRAME) {
+        uint32_t f = profile->param;
+        if (f == 0 || (f & (f - 1)) != 0) return 0;      /* not a power of two */
+        unsigned fe = 0;
+        for (uint32_t v = f; v > 1; v >>= 1) ++fe;
+        if (fe < NAPQES_PAD_MIN_EXP || fe > NAPQES_PAD_MAX_EXP) return 0;
+        if (n >= (size_t)f) return 0;                    /* frame too small */
+        return (size_t)f;
+    }
+    return 0;
 }
 
 /* Pads `msg` (len n) into newly-malloc'd codepoint array of length 2+block.
  * Caller frees. Returns NULL on failure. *out_len receives total length.
+ * `block` comes from padding_block_size() and must exceed n.
  * Padding codepoints are HMAC-derived (domain 0x06) to match the Python
  * reference and enable cross-implementation KATs. */
 static uint32_t *pad_message(const uint32_t *msg, size_t n,
                              const uint8_t *kb, size_t klen,
                              const uint8_t *nonce,
+                             size_t block,
                              size_t *out_len) {
     if (n > 0xFFFF) return NULL;
-    size_t block = next_block_size(n);
+    if (block <= n) return NULL;
     size_t total = 2 + block;
     uint32_t *out = (uint32_t *)malloc(total * sizeof(uint32_t));
     if (!out) return NULL;
@@ -461,7 +560,8 @@ static int encrypt_core_det(const uint32_t *msg, size_t n,
     double noise_p = derive_noise_p(kb, kb_len, nonce);
 
     size_t padded_len = 0;
-    uint32_t *padded = pad_message(msg, n, kb, kb_len, nonce, &padded_len);
+    uint32_t *padded = pad_message(msg, n, kb, kb_len, nonce,
+                                   padding_block_size(n, NULL), &padded_len);
     if (!padded) { free(kb); return -1; }
 
     /* Growable byte buffer for the fixed-width token blob. */
@@ -579,13 +679,18 @@ static int encrypt_core_det_v8(const uint32_t *msg, size_t n,
                                const uint64_t *primes, size_t klen,
                                const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
                                const uint8_t nonce[NAPQES_NONCE_SIZE],
+                               const napqes_pad_profile_t *pad_profile,
                                uint8_t **blob_out, size_t *blob_len) {
     if (klen == 0) return -1;
 
-    double noise_p = derive_noise_p(sk_fmt, SHA256_DIGEST_SIZE, nonce);
+    uint64_t noise_theta = derive_noise_threshold_v8(sk_fmt, SHA256_DIGEST_SIZE, nonce);
+
+    size_t block = padding_block_size(n, pad_profile);
+    if (block == 0) return -1;   /* invalid profile, or message exceeds frame */
 
     size_t padded_len = 0;
-    uint32_t *padded = pad_message(msg, n, sk_fmt, SHA256_DIGEST_SIZE, nonce, &padded_len);
+    uint32_t *padded = pad_message(msg, n, sk_fmt, SHA256_DIGEST_SIZE, nonce,
+                                   block, &padded_len);
     if (!padded) return -1;
 
     size_t cap = padded_len * TOKEN_WIDTH * 2 + 64;
@@ -607,7 +712,7 @@ static int encrypt_core_det_v8(const uint32_t *msg, size_t n,
             }
             uint64_t k = primes[real_idx % klen];
             if (noise_run < NAPQES_MAX_NOISE_RUN
-                && is_noise_pos(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos, noise_p)) {
+                && is_noise_pos_v8(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos, noise_theta)) {
                 uint64_t nc  = derive_noise_char(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos);
                 uint64_t nad = derive_noise_token_addend(sk_fmt, SHA256_DIGEST_SIZE, nonce, ct_pos, k);
                 fixed_encode(nc * k + nad, buf + len);
@@ -677,12 +782,30 @@ static uint32_t *decrypt_core_v8(const uint8_t *blob, size_t blob_len,
                                  size_t *out_len) {
     if (klen == 0) return NULL;
     if (blob_len % TOKEN_WIDTH != 0) return NULL;
-    double noise_p = derive_noise_p(sk_fmt, SHA256_DIGEST_SIZE, nonce);
+    uint64_t noise_theta = derive_noise_threshold_v8(sk_fmt, SHA256_DIGEST_SIZE, nonce);
 
     size_t n_tokens = blob_len / TOKEN_WIDTH;
     size_t ceiling_unit = (size_t)NAPQES_MAX_NOISE_RUN + 1;
     if (n_tokens % ceiling_unit != 0) return NULL;
     size_t real_count = n_tokens / ceiling_unit;
+
+    /* V3-CVF8: real_count must be B + 2 for one of the 13 reachable padded
+     * block sizes B in {2^NAPQES_PAD_MIN_EXP, ..., 2^NAPQES_PAD_MAX_EXP}.
+     * Divisibility by ceiling_unit alone does not imply this, and without
+     * this check an out-of-range real_count reaches the malloc below.
+     * Reached only after the tag has verified (see
+     * napqes_decrypt_bytes_v8), so this rejects a malformed ciphertext,
+     * never an unauthenticated attacker input. */
+    {
+        int legal = 0;
+        if (real_count >= 2) {
+            size_t b = real_count - 2;
+            for (unsigned e = NAPQES_PAD_MIN_EXP; e <= NAPQES_PAD_MAX_EXP; ++e) {
+                if (b == ((size_t)1 << e)) { legal = 1; break; }
+            }
+        }
+        if (!legal) return NULL;
+    }
 
     uint64_t *tokens = (uint64_t *)malloc((n_tokens + 1) * sizeof(uint64_t));
     if (!tokens) return NULL;
@@ -700,14 +823,26 @@ static uint32_t *decrypt_core_v8(const uint8_t *blob, size_t blob_len,
         unsigned noise_run = 0;
         while (noise_run < NAPQES_MAX_NOISE_RUN
                && ct_pos < n_tokens
-               && is_noise_pos(sk_fmt, SHA256_DIGEST_SIZE, nonce, (uint64_t)ct_pos, noise_p)) {
+               && is_noise_pos_v8(sk_fmt, SHA256_DIGEST_SIZE, nonce, (uint64_t)ct_pos, noise_theta)) {
             ct_pos++;
             noise_run++;
         }
         if (ct_pos >= n_tokens) { free(tokens); free(padded); return NULL; }
         uint64_t k = primes[real_idx % klen];
         uint64_t addend = derive_addend(sk_fmt, SHA256_DIGEST_SIZE, nonce, real_idx, k);
-        uint64_t cp = (tokens[ct_pos] - addend) / k;
+        uint64_t token = tokens[ct_pos];
+        /* A genuine real token is exactly c*k + addend with addend in
+         * [1, k-1]. Checking that explicitly, rather than subtracting and
+         * dividing, keeps the three ports in lock-step: the bare subtraction
+         * wraps here and in Rust release builds, and panics in Rust debug
+         * builds. */
+        if (token < addend || (token - addend) % k != 0) {
+            free(tokens); free(padded); return NULL;
+        }
+        uint64_t cp = (token - addend) / k;
+        if (cp > 0x10FFFFULL || (cp >= 0xD800ULL && cp <= 0xDFFFULL)) {
+            free(tokens); free(padded); return NULL;
+        }
         padded[padded_n++] = (uint32_t)cp;
         ct_pos++;
         real_idx++;
@@ -770,7 +905,7 @@ uint8_t *napqes_encrypt_bytes(const char *message,
     free(blob);
 
     uint8_t tag[NAPQES_TAG_SIZE];
-    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, tag);
+    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, AAD_LEN_WIDTH_V7, tag);
     free(kb);
     memcpy(out + payload_len, tag, NAPQES_TAG_SIZE);
     *out_len = total;
@@ -823,7 +958,7 @@ uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
     free(blob);
 
     uint8_t tag[NAPQES_TAG_SIZE];
-    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, tag);
+    compute_auth_tag(kb, kb_len, aad, aad_len, out, payload_len, AAD_LEN_WIDTH_V7, tag);
     free(kb);
     memcpy(out + payload_len, tag, NAPQES_TAG_SIZE);
     *out_len = total;
@@ -845,7 +980,7 @@ char *napqes_decrypt_bytes(const uint8_t *ciphertext, size_t ct_len,
     uint8_t *kb = key_bytes_alloc(key, klen, &kb_len);
     if (!kb) return NULL;
     uint8_t calc_tag[NAPQES_TAG_SIZE];
-    compute_auth_tag(kb, kb_len, aad, aad_len, ciphertext, payload_len, calc_tag);
+    compute_auth_tag(kb, kb_len, aad, aad_len, ciphertext, payload_len, AAD_LEN_WIDTH_V7, calc_tag);
     if (!constant_time_eq(recv_tag, calc_tag, NAPQES_TAG_SIZE)) {
         free(kb); return NULL;
     }
@@ -889,12 +1024,24 @@ uint8_t *napqes_encrypt_bytes_v8(const char *message,
                                  const uint8_t sk[NAPQES_SK_SIZE],
                                  const uint8_t *aad, size_t aad_len,
                                  size_t *out_len) {
+    return napqes_encrypt_bytes_v8_profiled(message, primes, klen, sk,
+                                            aad, aad_len, NULL, out_len);
+}
+
+uint8_t *napqes_encrypt_bytes_v8_profiled(const char *message,
+                                          const uint64_t *primes, size_t klen,
+                                          const uint8_t sk[NAPQES_SK_SIZE],
+                                          const uint8_t *aad, size_t aad_len,
+                                          const napqes_pad_profile_t *pad_profile,
+                                          size_t *out_len) {
     if (!message || !out_len || !primes || !sk) return NULL;
+    if (!validate_key(primes, klen)) return NULL;
     size_t n = strlen(message);
-    if (n == 0) { *out_len = 0; uint8_t *e = (uint8_t *)malloc(1); if (e) e[0] = 0; return e; }
     if (n > 0xFFFF) return NULL;
 
-    uint32_t *cp = (uint32_t *)malloc(n * sizeof(uint32_t));
+    /* v8 pads even the empty string through the normal path (minimum
+     * well-formed ciphertext is 2928 bytes), matching napqes.py. */
+    uint32_t *cp = (uint32_t *)malloc((n ? n : 1) * sizeof(uint32_t));
     if (!cp) return NULL;
     for (size_t i = 0; i < n; ++i) cp[i] = (uint8_t)message[i];
 
@@ -906,7 +1053,8 @@ uint8_t *napqes_encrypt_bytes_v8(const char *message,
 
     uint8_t *blob = NULL;
     size_t blob_len = 0;
-    if (encrypt_core_det_v8(cp, n, primes, klen, sk_fmt, nonce, &blob, &blob_len) != 0) {
+    if (encrypt_core_det_v8(cp, n, primes, klen, sk_fmt, nonce, pad_profile,
+                            &blob, &blob_len) != 0) {
         free(cp); return NULL;
     }
     free(cp);
@@ -927,7 +1075,7 @@ uint8_t *napqes_encrypt_bytes_v8(const char *message,
     free(blob);
 
     uint8_t tag[NAPQES_TAG_SIZE];
-    compute_auth_tag(sk_fmt, SHA256_DIGEST_SIZE, aad, aad_len, out, payload_len, tag);
+    compute_auth_tag(sk_fmt, SHA256_DIGEST_SIZE, aad, aad_len, out, payload_len, AAD_LEN_WIDTH_V8, tag);
     memcpy(out + payload_len, tag, NAPQES_TAG_SIZE);
     *out_len = total;
     return out;
@@ -938,7 +1086,7 @@ char *napqes_decrypt_bytes_v8(const uint8_t *ciphertext, size_t ct_len,
                               const uint8_t sk[NAPQES_SK_SIZE],
                               const uint8_t *aad, size_t aad_len) {
     if (!ciphertext || !primes || !sk) return NULL;
-    if (ct_len == 0) { char *e = (char *)malloc(1); if (e) e[0] = 0; return e; }
+    if (!validate_key(primes, klen)) return NULL;
     if (ct_len < NAPQES_NONCE_SIZE + NAPQES_TAG_SIZE) return NULL;
 
     size_t payload_len = ct_len - NAPQES_TAG_SIZE;
@@ -948,7 +1096,7 @@ char *napqes_decrypt_bytes_v8(const uint8_t *ciphertext, size_t ct_len,
     derive_format_subkey(sk, NAPQES_FORMAT_BLOCK_V8, sk_fmt);
 
     uint8_t calc_tag[NAPQES_TAG_SIZE];
-    compute_auth_tag(sk_fmt, SHA256_DIGEST_SIZE, aad, aad_len, ciphertext, payload_len, calc_tag);
+    compute_auth_tag(sk_fmt, SHA256_DIGEST_SIZE, aad, aad_len, ciphertext, payload_len, AAD_LEN_WIDTH_V8, calc_tag);
     if (!constant_time_eq(recv_tag, calc_tag, NAPQES_TAG_SIZE)) return NULL;
 
     const uint8_t *nonce  = ciphertext;
@@ -968,7 +1116,15 @@ char *napqes_decrypt_bytes_v8(const uint8_t *ciphertext, size_t ct_len,
     if (!cp) return NULL;
     char *s = (char *)malloc(out_len + 1);
     if (!s) { free(cp); return NULL; }
-    for (size_t i = 0; i < out_len; ++i) s[i] = (char)(cp[i] & 0xFF);
+    /* This port maps one input byte to one codepoint, so it can only
+     * represent what it encoded. Rejecting anything wider is honest about
+     * that limit; truncating to the low byte would silently return a
+     * plaintext different from the one the Python and Rust ports recover
+     * (docs/napseq-eprint-v3.tex, Remark "Implementation domains"). */
+    for (size_t i = 0; i < out_len; ++i) {
+        if (cp[i] > 0xFFu) { free(s); free(cp); return NULL; }
+        s[i] = (char)cp[i];
+    }
     s[out_len] = '\0';
     free(cp);
     return s;
@@ -978,10 +1134,20 @@ char *napqes_encrypt_str_v8(const char *message,
                             const uint64_t *primes, size_t klen,
                             const uint8_t sk[NAPQES_SK_SIZE],
                             const uint8_t *aad, size_t aad_len) {
+    return napqes_encrypt_str_v8_profiled(message, primes, klen, sk,
+                                          aad, aad_len, NULL);
+}
+
+char *napqes_encrypt_str_v8_profiled(const char *message,
+                                     const uint64_t *primes, size_t klen,
+                                     const uint8_t sk[NAPQES_SK_SIZE],
+                                     const uint8_t *aad, size_t aad_len,
+                                     const napqes_pad_profile_t *pad_profile) {
     if (!message) return NULL;
-    if (message[0] == '\0') { char *e = (char *)malloc(1); if (e) e[0] = 0; return e; }
     size_t bin_len = 0;
-    uint8_t *bin = napqes_encrypt_bytes_v8(message, primes, klen, sk, aad, aad_len, &bin_len);
+    uint8_t *bin = napqes_encrypt_bytes_v8_profiled(message, primes, klen, sk,
+                                                    aad, aad_len, pad_profile,
+                                                    &bin_len);
     if (!bin) return NULL;
     size_t enc_len = base64_encoded_len(bin_len);
     char *out = (char *)malloc(enc_len + 1);
@@ -996,7 +1162,6 @@ char *napqes_decrypt_str_v8(const char *cypher,
                             const uint8_t sk[NAPQES_SK_SIZE],
                             const uint8_t *aad, size_t aad_len) {
     if (!cypher) return NULL;
-    if (cypher[0] == '\0') { char *e = (char *)malloc(1); if (e) e[0] = 0; return e; }
     size_t clen = strlen(cypher);
     size_t max = base64_decoded_max_len(clen);
     uint8_t *bin = (uint8_t *)malloc(max + 1);

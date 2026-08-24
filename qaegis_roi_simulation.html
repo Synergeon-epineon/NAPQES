@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QAegis 5-Year ROI Simulator</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
+<style>
+:root {
+  color-scheme: dark;
+  --canvas-bg: #09101F;
+  --surface: #111827;
+  --surface2: #1A2535;
+  --surface3: #0D1626;
+  --gold: #C9A84C;
+  --gold-dim: #8C6E2A;
+  --green: #3DB87A;
+  --green-dim: #1E6B45;
+  --red: #E04848;
+  --red-dim: #7A1E1E;
+  --blue: #4A90D9;
+  --blue-dim: #1E3F6B;
+  --teal: #2EC4B6;
+  --purple: #7B61D9;
+  --border: #1E2A3A;
+  --border2: #2A3A50;
+  --text: #E8EAF0;
+  --muted: #8B92A5;
+  --faint: #4A5568;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--canvas-bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+.container { max-width: 1280px; margin: 0 auto; padding: 0 24px; }
+
+/* HEADER */
+header {
+  background: linear-gradient(135deg, #09101F 0%, #0D1A2E 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 20px 0 16px;
+  position: sticky; top: 0; z-index: 100;
+}
+.header-inner { display: flex; align-items: center; gap: 20px; }
+.logo-mark {
+  font-size: 22px; font-weight: 800; letter-spacing: -0.5px;
+  color: var(--gold);
+  background: linear-gradient(135deg, var(--gold), #E8C870);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.header-text h1 { font-size: 17px; font-weight: 700; color: var(--text); }
+.header-text p { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.header-badge {
+  margin-left: auto;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex; align-items: center; gap: 6px;
+}
+.badge-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+
+/* MAIN LAYOUT */
+main { padding: 24px 0 48px; }
+
+/* PANELS */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  margin-bottom: 20px;
+}
+.panel-title {
+  font-size: 13px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+  margin-bottom: 18px; display: flex; align-items: center; gap: 8px;
+}
+.panel-title::before {
+  content: ""; display: block;
+  width: 3px; height: 14px; border-radius: 2px;
+  background: var(--gold);
+}
+
+/* ORG PROFILE */
+.preset-row { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+.preset-btn {
+  padding: 6px 14px; border-radius: 20px;
+  border: 1px solid var(--border2);
+  background: var(--surface2); color: var(--muted);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all 0.15s;
+}
+.preset-btn:hover { border-color: var(--gold); color: var(--gold); }
+.preset-btn.active { border-color: var(--gold); color: var(--gold); background: rgba(201,168,76,0.1); }
+
+.inputs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media(max-width:768px) { .inputs-grid { grid-template-columns: 1fr; } }
+.input-col { display: flex; flex-direction: column; gap: 14px; }
+.slider-group label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.slider-row { display: flex; align-items: center; gap: 12px; }
+.slider-row input[type=range] {
+  flex: 1; height: 4px; -webkit-appearance: none;
+  background: var(--border2); border-radius: 2px; outline: none; cursor: pointer;
+}
+.slider-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--gold); cursor: pointer;
+  border: 2px solid var(--surface);
+}
+.slider-val {
+  min-width: 72px; text-align: right;
+  font-size: 13px; font-weight: 700; color: var(--text);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 8px;
+}
+.select-group label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+select {
+  width: 100%; padding: 8px 12px; border-radius: var(--radius);
+  background: var(--surface2); border: 1px solid var(--border2);
+  color: var(--text); font-size: 13px; outline: none; cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238B92A5' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 32px;
+}
+select:focus { border-color: var(--gold); }
+
+/* RISK PANEL */
+.risk-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+@media(max-width:900px) { .risk-grid { grid-template-columns: repeat(2,1fr); } }
+@media(max-width:560px) { .risk-grid { grid-template-columns: 1fr; } }
+.risk-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px;
+}
+.risk-card-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.risk-card-value { font-size: 20px; font-weight: 800; color: var(--red); }
+.risk-card-sub { font-size: 11px; color: var(--faint); margin-top: 3px; }
+.risk-total-card {
+  background: rgba(224,72,72,0.08);
+  border: 1px solid rgba(224,72,72,0.3);
+  border-radius: var(--radius); padding: 14px;
+  grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center;
+}
+.risk-total-label { font-size: 13px; font-weight: 700; color: var(--text); }
+.risk-total-value { font-size: 28px; font-weight: 900; color: var(--red); }
+
+/* PRODUCTS */
+.products-section { margin-bottom: 20px; }
+.products-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; align-items: start; }
+@media(max-width:1000px) { .products-grid { grid-template-columns: 1fr; } }
+
+.product-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.product-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.product-header h3 { font-size: 14px; font-weight: 800; margin-bottom: 3px; }
+.product-header p { font-size: 11px; opacity: 0.7; }
+.ph-napqes { background: linear-gradient(135deg, #0A1F1C, #0D2A28); border-bottom-color: #1A4A45; }
+.ph-napqes h3 { color: var(--teal); }
+.ph-ai { background: linear-gradient(135deg, #0A1528, #0D1F3D); border-bottom-color: #1A3060; }
+.ph-ai h3 { color: var(--blue); }
+.ph-mw { background: linear-gradient(135deg, #1A1228, #22183A); border-bottom-color: #3D2870; }
+.ph-mw h3 { color: var(--purple); }
+
+.product-body { padding: 16px 20px; }
+.metrics-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+.metric-badge {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.metric-badge.full { grid-column: 1 / -1; }
+.metric-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+.metric-value { font-size: 16px; font-weight: 800; color: var(--text); }
+.metric-value.green { color: var(--green); }
+.metric-value.gold { color: var(--gold); }
+.metric-value.red { color: var(--red); }
+.metric-value.blue { color: var(--blue); }
+.metric-value.teal { color: var(--teal); }
+.metric-value.purple { color: var(--purple); }
+
+.breakdown-table { margin-bottom: 16px; }
+.breakdown-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.breakdown-table th { color: var(--muted); font-weight: 600; text-align: left; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.breakdown-table td { padding: 5px 0; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: middle; }
+.breakdown-table td:nth-child(2), .breakdown-table td:nth-child(3) { text-align: right; font-weight: 600; font-size: 12px; }
+.breakdown-table td:nth-child(2) { color: var(--red); }
+.breakdown-table td:nth-child(3) { color: var(--green); }
+.breakdown-table .row-total td { font-weight: 800; border-top: 1px solid var(--border2); border-bottom: none; padding-top: 7px; }
+
+.chart-wrapper { position: relative; height: 180px; margin-top: 8px; }
+.chart-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
+.breakeven-badge {
+  display: inline-block; margin-top: 8px;
+  padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; font-weight: 700;
+  background: rgba(201,168,76,0.12); border: 1px solid rgba(201,168,76,0.3);
+  color: var(--gold);
+}
+
+/* SUMMARY */
+.summary-metrics { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 24px; }
+@media(max-width:768px) { .summary-metrics { grid-template-columns: repeat(2,1fr); } }
+.sum-metric {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px;
+  text-align: center;
+}
+.sum-metric-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+.sum-metric-value { font-size: 26px; font-weight: 900; }
+.sum-chart-wrapper { position: relative; height: 260px; margin-bottom: 24px; }
+
+/* GAUGES */
+.gauges-title { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px; }
+.gauges-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 12px; }
+@media(max-width:768px) { .gauges-grid { grid-template-columns: 1fr; } }
+.gauge-item { display: flex; flex-direction: column; gap: 6px; }
+.gauge-row { display: flex; justify-content: space-between; align-items: center; }
+.gauge-name { font-size: 12px; color: var(--text); font-weight: 600; }
+.gauge-pct { font-size: 12px; font-weight: 800; color: var(--green); }
+.gauge-product { font-size: 10px; color: var(--muted); }
+.gauge-bar-bg { height: 6px; background: var(--border2); border-radius: 3px; overflow: hidden; }
+.gauge-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--green-dim), var(--green)); transition: width 0.5s ease; }
+
+/* FOOTNOTES */
+.footnotes {
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px 20px;
+  margin-top: 4px;
+}
+.footnotes-title { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+.footnotes ol { padding-left: 16px; }
+.footnotes li { font-size: 11px; color: var(--faint); margin-bottom: 4px; line-height: 1.4; }
+
+/* SECTION DIVIDER */
+.section-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--faint);
+  margin-bottom: 12px; margin-top: 8px;
+  display: flex; align-items: center; gap: 10px;
+}
+.section-label::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <div class="header-inner">
+      <div class="logo-mark">QAegis</div>
+      <div class="header-text">
+        <h1>5-Year Economic Impact ROI Simulator</h1>
+        <p>Post-quantum cybersecurity investment analysis &mdash; NAPQES Legacy Shield &bull; QAegis AI &bull; MeshWeave</p>
+      </div>
+      <div class="header-badge">
+        <div class="badge-dot"></div>
+        Live model
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+<!-- ORG PROFILE -->
+<div class="panel">
+  <div class="panel-title">Organisation Profile</div>
+  <div class="preset-row">
+    <button class="preset-btn" onclick="applyPreset('smb')">SMB (100 emp.)</button>
+    <button class="preset-btn" onclick="applyPreset('midmarket')">Mid-Market (500)</button>
+    <button class="preset-btn" onclick="applyPreset('enterprise')">Large Enterprise (2000)</button>
+    <button class="preset-btn" onclick="applyPreset('defense')">Defense / Gov (1000)</button>
+  </div>
+  <div class="inputs-grid">
+    <div class="input-col">
+      <div class="slider-group">
+        <label>Number of Employees</label>
+        <div class="slider-row">
+          <input type="range" id="employees" min="50" max="5000" step="50" value="500" oninput="syncSlider(this,'emp-val','')">
+          <span class="slider-val" id="emp-val">500</span>
+        </div>
+      </div>
+      <div class="slider-group">
+        <label>Annual Revenue (M&euro;)</label>
+        <div class="slider-row">
+          <input type="range" id="revenue" min="5" max="2000" step="5" value="100" oninput="syncSlider(this,'rev-val','M€')">
+          <span class="slider-val" id="rev-val">100 M&euro;</span>
+        </div>
+      </div>
+      <div class="slider-group">
+        <label>OT / ICS Nodes <span style="color:var(--teal);font-size:10px">&mdash; NAPQES Legacy Shield</span></label>
+        <div class="slider-row">
+          <input type="range" id="otNodes" min="2" max="200" step="2" value="50" oninput="syncSlider(this,'ot-val','')">
+          <span class="slider-val" id="ot-val">50</span>
+        </div>
+      </div>
+      <div class="slider-group">
+        <label>Network Endpoints <span style="color:var(--purple);font-size:10px">&mdash; MeshWeave</span></label>
+        <div class="slider-row">
+          <input type="range" id="endpoints" min="10" max="2000" step="10" value="500" oninput="syncSlider(this,'ep-val','')">
+          <span class="slider-val" id="ep-val">500</span>
+        </div>
+      </div>
+      <div class="slider-group">
+        <label>AI Platform Users <span style="color:var(--blue);font-size:10px">&mdash; QAegis AI</span></label>
+        <div class="slider-row">
+          <input type="range" id="aiUsers" min="5" max="1000" step="5" value="100" oninput="syncSlider(this,'ai-val','')">
+          <span class="slider-val" id="ai-val">100</span>
+        </div>
+      </div>
+    </div>
+    <div class="input-col">
+      <div class="select-group">
+        <label>Industry Vertical</label>
+        <select id="vertical" onchange="recalc()">
+          <option value="energy">Energy / Critical Infrastructure</option>
+          <option value="financial">Financial Services</option>
+          <option value="healthcare">Healthcare</option>
+          <option value="defense">Defense / Government</option>
+          <option value="manufacturing">Manufacturing</option>
+          <option value="tech">Technology</option>
+        </select>
+      </div>
+      <div class="select-group">
+        <label>Region / Regulatory Framework</label>
+        <select id="region" onchange="recalc()">
+          <option value="EU">EU &mdash; NIS2 + DORA</option>
+          <option value="US">US &mdash; CNSA 2.0 + SEC</option>
+          <option value="UK">UK &mdash; FCA + NCSC</option>
+          <option value="APAC">Asia-Pacific</option>
+        </select>
+      </div>
+      <div class="select-group">
+        <label>Current VPN Vendor</label>
+        <select id="vpn" onchange="recalc()">
+          <option value="tailscale">Tailscale Premium ($18/user/mo)</option>
+          <option value="netbird">NetBird</option>
+          <option value="zerotier">ZeroTier</option>
+          <option value="mpls">Legacy MPLS / IPSec</option>
+          <option value="none">None</option>
+        </select>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-top:4px;">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;">Model Parameters</div>
+        <div style="font-size:12px;color:var(--faint);line-height:1.7;">
+          Discount rate: <strong style="color:var(--text)">8%</strong> &nbsp;&bull;&nbsp;
+          OT breach avg: <strong style="color:var(--text)">$4.5M</strong><br>
+          NIS2 fine basis: <strong style="color:var(--text)">2% revenue</strong> &nbsp;&bull;&nbsp;
+          IBM Cost of Breach 2026
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- RISK EXPOSURE -->
+<div class="panel">
+  <div class="panel-title">Annual Risk Exposure Without QAegis</div>
+  <div class="risk-grid">
+    <div class="risk-card">
+      <div class="risk-card-label">OT/ICS Breach (Expected Annual)</div>
+      <div class="risk-card-value" id="risk-ot">&mdash;</div>
+      <div class="risk-card-sub">P(breach) &times; $4.5M avg &times; vertical mult.</div>
+    </div>
+    <div class="risk-card">
+      <div class="risk-card-label">NIS2 / Reg Fine Exposure</div>
+      <div class="risk-card-value" id="risk-nis2">&mdash;</div>
+      <div class="risk-card-sub">2% revenue &times; enforcement probability</div>
+    </div>
+    <div class="risk-card">
+      <div class="risk-card-label">AI Governance Gap Cost</div>
+      <div class="risk-card-value" id="risk-ai">&mdash;</div>
+      <div class="risk-card-sub">Shadow AI $670K &times; 15% prob. (IBM 2026)</div>
+    </div>
+    <div class="risk-card">
+      <div class="risk-card-label">Harvest-Now-Decrypt-Later</div>
+      <div class="risk-card-value" id="risk-hndl">&mdash;</div>
+      <div class="risk-card-sub">Revenue exposure &times; HNDL factor</div>
+    </div>
+    <div class="risk-card">
+      <div class="risk-card-label">CNSA 2.0 Non-Compliance</div>
+      <div class="risk-card-value" id="risk-cnsa">&mdash;</div>
+      <div class="risk-card-sub">Retrofit cost amortised over 4 years</div>
+    </div>
+    <div class="risk-card">
+      <div class="risk-card-label">Total Annual Risk Exposure</div>
+      <div class="risk-card-value" id="risk-annual">&mdash;</div>
+      <div class="risk-card-sub">Combined expected annual loss</div>
+    </div>
+  </div>
+  <div class="risk-total-card" style="margin-top:12px;">
+    <div>
+      <div class="risk-total-label">Total 5-Year Exposure Without QAegis</div>
+      <div style="font-size:12px;color:var(--muted);">Undiscounted cumulative risk</div>
+    </div>
+    <div class="risk-total-value" id="risk-5yr">&mdash;</div>
+  </div>
+</div>
+
+<!-- PRODUCTS -->
+<div class="section-label">Product ROI Analysis</div>
+<div class="products-grid" style="margin-bottom:20px;">
+
+  <!-- NAPQES LEGACY SHIELD -->
+  <div class="product-card">
+    <div class="product-header ph-napqes">
+      <h3>NAPQES Legacy Shield</h3>
+      <p>OT/ICS Bump-in-the-Wire Encryption Gateway</p>
+    </div>
+    <div class="product-body">
+      <div class="metrics-row">
+        <div class="metric-badge">
+          <div class="metric-label">Y0 Adoption Cost</div>
+          <div class="metric-value" id="ns-y0">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Annual Run Cost</div>
+          <div class="metric-value" id="ns-ann">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">5-Yr Net Savings</div>
+          <div class="metric-value green" id="ns-net5">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Break-even</div>
+          <div class="metric-value teal" id="ns-be">&mdash;</div>
+        </div>
+        <div class="metric-badge full">
+          <div class="metric-label">NPV @ 8% Discount Rate</div>
+          <div class="metric-value gold" id="ns-npv">&mdash;</div>
+        </div>
+      </div>
+      <div class="breakdown-table">
+        <table>
+          <thead><tr><th>Cost Line</th><th>Status Quo</th><th>With Shield</th></tr></thead>
+          <tbody>
+            <tr><td>Security FTE (1.5)</td><td id="ns-sq-fte">&mdash;</td><td>&mdash;</td></tr>
+            <tr><td>OT Breach Risk</td><td id="ns-sq-breach">&mdash;</td><td><span style="color:var(--teal)">&#8595;85%</span></td></tr>
+            <tr><td>NIS2 Fine Risk</td><td id="ns-sq-nis2">&mdash;</td><td><span style="color:var(--teal)">&#8595;70%</span></td></tr>
+            <tr><td>Legacy Workarounds</td><td>&euro;30K/yr</td><td>&euro;0</td></tr>
+            <tr><td>Hardware + Support</td><td>&mdash;</td><td id="ns-hw-ann">&mdash;</td></tr>
+            <tr><td>Platform Fee</td><td>&mdash;</td><td>&euro;5K/yr</td></tr>
+            <tr class="row-total"><td><strong>Annual Total</strong></td><td id="ns-sq-total">&mdash;</td><td id="ns-adopt-total">&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-label">Cumulative Cost: Status Quo vs. With NAPQES Shield (Y1&ndash;Y5)</div>
+      <div class="chart-wrapper"><canvas id="nsCanvas"></canvas></div>
+      <div id="ns-be-badge" class="breakeven-badge">&mdash;</div>
+    </div>
+  </div>
+
+  <!-- QAegis AI -->
+  <div class="product-card">
+    <div class="product-header ph-ai">
+      <h3>QAegis AI</h3>
+      <p>Sovereign Enterprise AI Orchestration Platform</p>
+    </div>
+    <div class="product-body">
+      <div class="metrics-row">
+        <div class="metric-badge">
+          <div class="metric-label">Y0 Adoption Cost</div>
+          <div class="metric-value" id="ai-y0">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Annual Subscription</div>
+          <div class="metric-value" id="ai-ann">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">5-Yr Net Savings</div>
+          <div class="metric-value green" id="ai-net5">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Break-even</div>
+          <div class="metric-value blue" id="ai-be">&mdash;</div>
+        </div>
+        <div class="metric-badge full">
+          <div class="metric-label">NPV @ 8% Discount Rate</div>
+          <div class="metric-value gold" id="ai-npv">&mdash;</div>
+        </div>
+      </div>
+      <div class="breakdown-table">
+        <table>
+          <thead><tr><th>Cost Line</th><th>Status Quo</th><th>With QAegis AI</th></tr></thead>
+          <tbody>
+            <tr><td>Microsoft Copilot equiv.</td><td id="ai-sq-copilot">&mdash;</td><td>&mdash;</td></tr>
+            <tr><td>Shadow AI risk</td><td>&euro;101K</td><td><span style="color:var(--blue)">&#8595;90%</span></td></tr>
+            <tr><td>Prompt injection risk</td><td>&euro;300K</td><td><span style="color:var(--blue)">&#8595;80%</span></td></tr>
+            <tr><td>AI Act / Gov fine risk</td><td>&euro;100K</td><td><span style="color:var(--blue)">&#8595;95%</span></td></tr>
+            <tr><td>Governance FTE (0.5)</td><td>&euro;40K</td><td>&mdash;</td></tr>
+            <tr><td>Subscription (SaaS)</td><td>&mdash;</td><td id="ai-sub-ann">&mdash;</td></tr>
+            <tr class="row-total"><td><strong>Annual Total</strong></td><td id="ai-sq-total">&mdash;</td><td id="ai-adopt-total">&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-label">Cumulative Cost: Status Quo vs. With QAegis AI (Y1&ndash;Y5)</div>
+      <div class="chart-wrapper"><canvas id="aiCanvas"></canvas></div>
+      <div id="ai-be-badge" class="breakeven-badge">&mdash;</div>
+    </div>
+  </div>
+
+  <!-- MeshWeave -->
+  <div class="product-card">
+    <div class="product-header ph-mw">
+      <h3>MeshWeave</h3>
+      <p>Serverless Post-Quantum Mesh VPN</p>
+    </div>
+    <div class="product-body">
+      <div class="metrics-row">
+        <div class="metric-badge">
+          <div class="metric-label">Y0 Adoption Cost</div>
+          <div class="metric-value" id="mw-y0">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Annual Subscription</div>
+          <div class="metric-value" id="mw-ann">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">5-Yr Net Savings</div>
+          <div class="metric-value green" id="mw-net5">&mdash;</div>
+        </div>
+        <div class="metric-badge">
+          <div class="metric-label">Break-even</div>
+          <div class="metric-value purple" id="mw-be">&mdash;</div>
+        </div>
+        <div class="metric-badge full">
+          <div class="metric-label">NPV @ 8% Discount Rate</div>
+          <div class="metric-value gold" id="mw-npv">&mdash;</div>
+        </div>
+      </div>
+      <div class="breakdown-table">
+        <table>
+          <thead><tr><th>Cost Line</th><th>Status Quo</th><th>With MeshWeave</th></tr></thead>
+          <tbody>
+            <tr><td>Incumbent VPN</td><td id="mw-sq-vpn">&mdash;</td><td>&mdash;</td></tr>
+            <tr><td>VPN breach risk (8%)</td><td>&euro;120K</td><td><span style="color:var(--purple)">&#8595;90%</span></td></tr>
+            <tr><td>HNDL exposure</td><td id="mw-sq-hndl">&mdash;</td><td><span style="color:var(--purple)">&#8595;95%</span></td></tr>
+            <tr><td>CNSA retrofit (amort.)</td><td>&euro;21K/yr</td><td>&euro;0</td></tr>
+            <tr><td>CNSA lump sum (Y4)</td><td>&euro;85K&nbsp;<span style="color:var(--red);font-size:10px">Y4 only</span></td><td>&euro;0</td></tr>
+            <tr><td>MeshWeave subscription</td><td>&mdash;</td><td id="mw-sub-ann">&mdash;</td></tr>
+            <tr class="row-total"><td><strong>Annual Total</strong></td><td id="mw-sq-total">&mdash;</td><td id="mw-adopt-total">&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-label">Cumulative Cost: Status Quo vs. With MeshWeave (Y1&ndash;Y5, incl. Y4 CNSA)</div>
+      <div class="chart-wrapper"><canvas id="mwCanvas"></canvas></div>
+      <div id="mw-be-badge" class="breakeven-badge">&mdash;</div>
+    </div>
+  </div>
+</div>
+
+<!-- SUMMARY -->
+<div class="section-label">Portfolio Summary</div>
+<div class="panel">
+  <div class="panel-title">Combined Investment &amp; Return</div>
+  <div class="summary-metrics">
+    <div class="sum-metric">
+      <div class="sum-metric-label">Total Adoption Cost</div>
+      <div class="sum-metric-value red" id="sum-y0">&mdash;</div>
+    </div>
+    <div class="sum-metric">
+      <div class="sum-metric-label">Status Quo 5-Year Cost</div>
+      <div class="sum-metric-value red" id="sum-sq5">&mdash;</div>
+    </div>
+    <div class="sum-metric">
+      <div class="sum-metric-label">Net 5-Year Savings</div>
+      <div class="sum-metric-value green" id="sum-net5">&mdash;</div>
+    </div>
+    <div class="sum-metric">
+      <div class="sum-metric-label">ROI Multiple</div>
+      <div class="sum-metric-value gold" id="sum-roi">&mdash;</div>
+    </div>
+  </div>
+  <div class="chart-label">Annual Cost Comparison: Status Quo vs. QAegis Stack, Net Savings (Y1&ndash;Y5)</div>
+  <div class="sum-chart-wrapper"><canvas id="summaryCanvas"></canvas></div>
+  <div style="margin-top:24px;">
+    <div class="gauges-title">Risk Mitigation Coverage</div>
+    <div class="gauges-grid">
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">OT/ICS Breach Risk</div>
+            <div class="gauge-product">NAPQES Legacy Shield</div>
+          </div>
+          <div class="gauge-pct">85%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:85%"></div></div>
+      </div>
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">Regulatory Fine Exposure</div>
+            <div class="gauge-product">NAPQES Shield + MeshWeave</div>
+          </div>
+          <div class="gauge-pct">70%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:70%"></div></div>
+      </div>
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">Shadow AI / Governance Risk</div>
+            <div class="gauge-product">QAegis AI</div>
+          </div>
+          <div class="gauge-pct">90%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:90%"></div></div>
+      </div>
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">Harvest-Now-Decrypt-Later</div>
+            <div class="gauge-product">MeshWeave PQC</div>
+          </div>
+          <div class="gauge-pct">95%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:95%"></div></div>
+      </div>
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">CNSA 2.0 Compliance Gap</div>
+            <div class="gauge-product">MeshWeave PQC</div>
+          </div>
+          <div class="gauge-pct">100%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:100%"></div></div>
+      </div>
+      <div class="gauge-item">
+        <div class="gauge-row">
+          <div>
+            <div class="gauge-name">Prompt Injection / AI Safety</div>
+            <div class="gauge-product">QAegis AI Sovereign Orchestration</div>
+          </div>
+          <div class="gauge-pct">80%</div>
+        </div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width:80%"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTNOTES -->
+<div class="footnotes">
+  <div class="footnotes-title">Data Sources &amp; Methodology</div>
+  <ol>
+    <li>IBM Cost of a Data Breach Report 2026 &mdash; OT/ICS average breach cost $4.5M; shadow AI governance gap $670K; sector multipliers.</li>
+    <li>European Commission NIS2 Directive (EU 2022/2555) &mdash; maximum fine 2% annual global revenue or &euro;10M whichever higher.</li>
+    <li>DORA Regulation (EU 2022/2554) &mdash; operational resilience requirements for financial entities from Jan 2025.</li>
+    <li>NSA CNSA 2.0 (Commercial National Security Algorithm Suite) &mdash; mandatory PQC transition timeline to 2030.</li>
+    <li>AI Act (EU 2024/1689) &mdash; General Purpose AI compliance obligations; fines up to 3% turnover for non-systemic violations.</li>
+    <li>Verizon DBIR 2026 &mdash; VPN infrastructure breach probability 8% annual; average cost $1.5M.</li>
+    <li>MITRE ATT&amp;CK for ICS &mdash; lateral movement probability post-initial access used for breach multiplier estimates.</li>
+    <li>NPV computed at 8% annual discount rate; break-even in months = ceil(Y0 cost / monthly net saving).</li>
+    <li>This simulator provides indicative analysis only. Actual ROI depends on implementation quality, threat environment, and organisational readiness.</li>
+  </ol>
+</div>
+
+</div><!-- /container -->
+</main>
+
+<script>
+"use strict";
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const VERTICALS = {
+  energy:        { breachProb: 0.18, breachMult: 1.05, nis2Prob: 0.14, hndlMult: 1.2, fteMulti: 1.3 },
+  financial:     { breachProb: 0.14, breachMult: 1.25, nis2Prob: 0.18, hndlMult: 1.4, fteMulti: 1.2 },
+  healthcare:    { breachProb: 0.20, breachMult: 1.67, nis2Prob: 0.12, hndlMult: 0.9, fteMulti: 1.0 },
+  defense:       { breachProb: 0.10, breachMult: 2.30, nis2Prob: 0.22, hndlMult: 2.5, fteMulti: 2.0 },
+  manufacturing: { breachProb: 0.15, breachMult: 1.00, nis2Prob: 0.10, hndlMult: 0.8, fteMulti: 0.9 },
+  tech:          { breachProb: 0.12, breachMult: 0.90, nis2Prob: 0.08, hndlMult: 1.0, fteMulti: 1.1 }
+};
+const REGION_MULT = { EU: 1.0, US: 0.7, UK: 0.85, APAC: 0.5 };
+const YEARS = [1, 2, 3, 4, 5];
+const YEAR_LABELS = ["Y1", "Y2", "Y3", "Y4", "Y5"];
+
+// Chart instances
+let nsChart = null, aiChart = null, mwChart = null, sumChart = null;
+
+// ============================================================
+// HELPERS
+// ============================================================
+function fmtEur(val, decimals) {
+  var d = (decimals === undefined) ? 0 : decimals;
+  var abs = Math.abs(val);
+  var sign = val < 0 ? "-" : "";
+  if (abs >= 1e6) return sign + "€" + (abs / 1e6).toFixed(d > 0 ? d : 2) + "M";
+  if (abs >= 1e3) return sign + "€" + (abs / 1e3).toFixed(d > 0 ? d : 0) + "K";
+  return sign + "€" + abs.toFixed(0);
+}
+
+function fmtMonths(m) {
+  if (!isFinite(m) || m < 0) return "No payback";
+  if (m < 1) return "< 1 month";
+  if (m <= 24) return m + " months";
+  var yrs = Math.floor(m / 12);
+  var mo = m % 12;
+  return yrs + "yr " + (mo > 0 ? mo + "mo" : "");
+}
+
+function setText(id, txt) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = txt;
+}
+
+function npv5(annualSaving, y0Cost) {
+  var total = -y0Cost;
+  for (var y = 1; y <= 5; y++) {
+    total += annualSaving / Math.pow(1.08, y);
+  }
+  return total;
+}
+
+function aiSubscriptionAnnual(users) {
+  if (users <= 2)   return 29 * 12;
+  if (users <= 10)  return 99 * 12;
+  if (users <= 50)  return 349 * 12;
+  if (users <= 200) return 999 * 12;
+  return 2500 * 12;
+}
+
+function meshwaveNodeMonthly(nodes) {
+  if (nodes <= 50)  return 7;
+  if (nodes <= 500) return 5;
+  return 4;
+}
+
+function incumbentVPNAnnual(vpn, employees, nodes) {
+  switch (vpn) {
+    case "tailscale": return employees * 18 * 12;
+    case "netbird":   return Math.ceil(employees / 50) * 2000;
+    case "zerotier":
+      if (nodes <= 25) return 0;
+      return (599 + Math.max(0, nodes - 200) * 3) * 12;
+    case "mpls":      return nodes * 400;
+    case "none":      return 0;
+    default:          return 0;
+  }
+}
+
+function makeOrUpdateLineChart(canvasId, ref, withoutData, withData, withoutLabel, withLabel, borderColor) {
+  var ctx = document.getElementById(canvasId).getContext("2d");
+  if (ref) {
+    ref.data.datasets[0].data = withoutData;
+    ref.data.datasets[1].data = withData;
+    ref.update("none");
+    return ref;
+  }
+  return new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: YEAR_LABELS,
+      datasets: [
+        {
+          label: withoutLabel,
+          data: withoutData,
+          borderColor: "#E04848",
+          backgroundColor: "rgba(224,72,72,0.08)",
+          borderWidth: 2,
+          pointRadius: 4,
+          pointBackgroundColor: "#E04848",
+          fill: true,
+          tension: 0.3
+        },
+        {
+          label: withLabel,
+          data: withData,
+          borderColor: borderColor,
+          backgroundColor: "rgba(61,184,122,0.08)",
+          borderWidth: 2,
+          pointRadius: 4,
+          pointBackgroundColor: borderColor,
+          fill: true,
+          tension: 0.3
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: {
+          labels: { color: "#8B92A5", font: { size: 11 }, boxWidth: 12, padding: 10 }
+        },
+        tooltip: {
+          backgroundColor: "#111827",
+          borderColor: "#1E2A3A",
+          borderWidth: 1,
+          titleColor: "#E8EAF0",
+          bodyColor: "#8B92A5",
+          callbacks: {
+            label: function(ctx) {
+              return " " + ctx.dataset.label + ": " + fmtEur(ctx.parsed.y);
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: "#8B92A5", font: { size: 11 } }, grid: { color: "#1E2A3A" } },
+        y: {
+          ticks: {
+            color: "#8B92A5", font: { size: 11 },
+            callback: function(v) { return fmtEur(v); }
+          },
+          grid: { color: "#1E2A3A" }
+        }
+      }
+    }
+  });
+}
+
+// ============================================================
+// PRESET PROFILES
+// ============================================================
+function applyPreset(name) {
+  var presets = {
+    smb:        { employees: 100,  revenue: 20,  otNodes: 10,  endpoints: 100,  aiUsers: 20,  vertical: "manufacturing", region: "EU", vpn: "none" },
+    midmarket:  { employees: 500,  revenue: 100, otNodes: 50,  endpoints: 500,  aiUsers: 100, vertical: "financial",     region: "EU", vpn: "tailscale" },
+    enterprise: { employees: 2000, revenue: 500, otNodes: 100, endpoints: 1500, aiUsers: 400, vertical: "energy",         region: "EU", vpn: "mpls" },
+    defense:    { employees: 1000, revenue: 200, otNodes: 80,  endpoints: 800,  aiUsers: 200, vertical: "defense",        region: "US", vpn: "mpls" }
+  };
+  var p = presets[name];
+  if (!p) return;
+  setSlider("employees", p.employees, "emp-val", "");
+  setSlider("revenue",   p.revenue,   "rev-val", " M€");
+  setSlider("otNodes",   p.otNodes,   "ot-val",  "");
+  setSlider("endpoints", p.endpoints, "ep-val",  "");
+  setSlider("aiUsers",   p.aiUsers,   "ai-val",  "");
+  document.getElementById("vertical").value = p.vertical;
+  document.getElementById("region").value   = p.region;
+  document.getElementById("vpn").value      = p.vpn;
+  document.querySelectorAll(".preset-btn").forEach(function(b) { b.classList.remove("active"); });
+  var btn = document.querySelector(".preset-btn[onclick*='" + name + "']");
+  if (btn) btn.classList.add("active");
+  recalc();
+}
+
+function setSlider(id, val, valId, suffix) {
+  var el = document.getElementById(id);
+  if (el) { el.value = val; }
+  var vEl = document.getElementById(valId);
+  if (vEl) vEl.textContent = val + suffix;
+}
+
+function syncSlider(input, valId, suffix) {
+  var vEl = document.getElementById(valId);
+  if (vEl) vEl.textContent = input.value + suffix;
+  document.querySelectorAll(".preset-btn").forEach(function(b) { b.classList.remove("active"); });
+  recalc();
+}
+
+// ============================================================
+// MAIN RECALC
+// ============================================================
+function recalc() {
+  var employees = parseInt(document.getElementById("employees").value, 10) || 500;
+  var revenue   = parseFloat(document.getElementById("revenue").value) || 100;
+  var otNodes   = parseInt(document.getElementById("otNodes").value, 10) || 50;
+  var endpoints = parseInt(document.getElementById("endpoints").value, 10) || 500;
+  var aiUsers   = parseInt(document.getElementById("aiUsers").value, 10) || 100;
+  var vertical  = document.getElementById("vertical").value || "energy";
+  var region    = document.getElementById("region").value || "EU";
+  var vpn       = document.getElementById("vpn").value || "tailscale";
+
+  var v  = VERTICALS[vertical] || VERTICALS.energy;
+  var fm = REGION_MULT[region] || 1.0;
+  var revenueEur = revenue * 1e6;
+
+  // ---- RISK EXPOSURE -------------------------------------------
+  var risk_ot    = v.breachProb * 4500000 * v.breachMult;
+  var risk_nis2  = revenueEur * 0.02 * v.nis2Prob * fm;
+  var risk_ai    = 670000 * 0.15;
+  var risk_hndl  = revenueEur * 0.001 * v.hndlMult;
+  var risk_cnsa  = 85000 / 4;
+  var risk_annual = risk_ot + risk_nis2 + risk_ai + risk_hndl + risk_cnsa;
+  var risk_5yr   = risk_annual * 5;
+
+  setText("risk-ot",     fmtEur(risk_ot));
+  setText("risk-nis2",   fmtEur(risk_nis2));
+  setText("risk-ai",     fmtEur(risk_ai));
+  setText("risk-hndl",   fmtEur(risk_hndl));
+  setText("risk-cnsa",   fmtEur(risk_cnsa));
+  setText("risk-annual", fmtEur(risk_annual));
+  setText("risk-5yr",    fmtEur(risk_5yr));
+
+  // ============================================================
+  // NAPQES LEGACY SHIELD
+  // ============================================================
+  var ns_y0      = otNodes * 6000 + 25000;
+  var ns_hwSupp  = otNodes * 6000 * 0.20;
+  var ns_ann     = ns_hwSupp + 5000;
+
+  var ns_sqFTE    = 1.5 * 80000 * v.fteMulti;
+  var ns_sqBreach = v.breachProb * 4500000 * v.breachMult;
+  var ns_sqNIS2   = revenueEur * 0.02 * v.nis2Prob * fm;
+  var ns_sqWA     = 30000;
+  var ns_sqAnn    = ns_sqFTE + ns_sqBreach + ns_sqNIS2 + ns_sqWA;
+
+  var ns_netAnn   = ns_sqAnn - ns_ann;
+  var ns_net5     = ns_netAnn * 5 - ns_y0;
+  var ns_be       = ns_netAnn > 0 ? Math.ceil(ns_y0 / (ns_netAnn / 12)) : Infinity;
+  var ns_npvVal   = npv5(ns_netAnn, ns_y0);
+
+  var ns_withoutCum = YEARS.map(function(y) { return y * ns_sqAnn; });
+  var ns_withCum    = YEARS.map(function(y) { return ns_y0 + y * ns_ann; });
+
+  setText("ns-y0",        fmtEur(ns_y0));
+  setText("ns-ann",       fmtEur(ns_ann) + "/yr");
+  setText("ns-net5",      fmtEur(ns_net5));
+  setText("ns-be",        fmtMonths(ns_be));
+  setText("ns-npv",       fmtEur(ns_npvVal));
+  setText("ns-sq-fte",    fmtEur(ns_sqFTE));
+  setText("ns-sq-breach", fmtEur(ns_sqBreach));
+  setText("ns-sq-nis2",   fmtEur(ns_sqNIS2));
+  setText("ns-hw-ann",    fmtEur(ns_hwSupp + 5000) + "/yr");
+  setText("ns-sq-total",  fmtEur(ns_sqAnn));
+  setText("ns-adopt-total", fmtEur(ns_ann));
+  setText("ns-be-badge",  "Break-even: " + fmtMonths(ns_be));
+
+  nsChart = makeOrUpdateLineChart("nsCanvas", nsChart,
+    ns_withoutCum, ns_withCum,
+    "Status Quo", "With NAPQES Shield", "#2EC4B6"
+  );
+
+  // ============================================================
+  // QAegis AI
+  // ============================================================
+  var ai_subAnn   = aiSubscriptionAnnual(aiUsers);
+  var ai_y0       = ai_subAnn / 12;
+
+  var ai_sqCopilot  = aiUsers * 30 * 12;
+  var ai_sqShadow   = 670000 * 0.15;
+  var ai_sqPrompt   = 6000000 * 0.05;
+  var ai_sqAIAct    = 1000000 * 0.10;
+  var ai_sqFTE      = 0.5 * 80000;
+  var ai_sqAnn      = ai_sqCopilot + ai_sqShadow + ai_sqPrompt + ai_sqAIAct + ai_sqFTE;
+
+  var ai_netAnn   = ai_sqAnn - ai_subAnn;
+  var ai_net5     = ai_netAnn * 5 - ai_y0;
+  var ai_be       = ai_netAnn > 0 ? Math.ceil(ai_y0 / (ai_netAnn / 12)) : Infinity;
+  var ai_npvVal   = npv5(ai_netAnn, ai_y0);
+
+  var ai_withoutCum = YEARS.map(function(y) { return y * ai_sqAnn; });
+  var ai_withCum    = YEARS.map(function(y) { return ai_y0 + y * ai_subAnn; });
+
+  setText("ai-y0",        fmtEur(ai_y0));
+  setText("ai-ann",       fmtEur(ai_subAnn) + "/yr");
+  setText("ai-net5",      fmtEur(ai_net5));
+  setText("ai-be",        fmtMonths(ai_be));
+  setText("ai-npv",       fmtEur(ai_npvVal));
+  setText("ai-sq-copilot", fmtEur(ai_sqCopilot));
+  setText("ai-sub-ann",   fmtEur(ai_subAnn) + "/yr");
+  setText("ai-sq-total",  fmtEur(ai_sqAnn));
+  setText("ai-adopt-total", fmtEur(ai_subAnn));
+  setText("ai-be-badge",  "Break-even: " + fmtMonths(ai_be));
+
+  aiChart = makeOrUpdateLineChart("aiCanvas", aiChart,
+    ai_withoutCum, ai_withCum,
+    "Status Quo", "With QAegis AI", "#4A90D9"
+  );
+
+  // ============================================================
+  // MeshWeave
+  // ============================================================
+  var mw_pricePerNode = meshwaveNodeMonthly(endpoints);
+  var mw_subAnn       = mw_pricePerNode * endpoints * 12;
+  var mw_y0           = 10000 + mw_subAnn;
+
+  var mw_sqVPN    = incumbentVPNAnnual(vpn, employees, endpoints);
+  var mw_sqBreach = 0.08 * 1500000;
+  var mw_sqHNDL   = revenueEur * 0.0001 * v.hndlMult;
+  var mw_sqCNSA   = 85000 / 4;
+  var mw_sqAnn    = mw_sqVPN + mw_sqBreach + mw_sqHNDL + mw_sqCNSA;
+
+  var mw_netAnn   = mw_sqAnn - mw_subAnn;
+  var mw_net5     = mw_netAnn * 5 - mw_y0 + 85000;
+  var mw_be       = mw_netAnn > 0 ? Math.ceil(mw_y0 / (mw_netAnn / 12)) : Infinity;
+
+  var mw_npvFlows = YEARS.map(function(y) {
+    var sq = (y === 4) ? (mw_sqAnn + 85000) : mw_sqAnn;
+    return sq - mw_subAnn;
+  });
+  var mw_npvVal = -mw_y0 + mw_npvFlows.reduce(function(sum, cf, i) {
+    return sum + cf / Math.pow(1.08, i + 1);
+  }, 0);
+
+  var mw_withoutCum = YEARS.reduce(function(acc, y, i) {
+    var prev = i > 0 ? acc[i-1] : 0;
+    var add = (y === 4) ? (mw_sqAnn + 85000) : mw_sqAnn;
+    acc.push(prev + add);
+    return acc;
+  }, []);
+  var mw_withCum = YEARS.map(function(y) { return mw_y0 + y * mw_subAnn; });
+
+  setText("mw-y0",        fmtEur(mw_y0));
+  setText("mw-ann",       fmtEur(mw_subAnn) + "/yr");
+  setText("mw-net5",      fmtEur(mw_net5));
+  setText("mw-be",        fmtMonths(mw_be));
+  setText("mw-npv",       fmtEur(mw_npvVal));
+  setText("mw-sq-vpn",    fmtEur(mw_sqVPN));
+  setText("mw-sq-hndl",   fmtEur(mw_sqHNDL));
+  setText("mw-sub-ann",   fmtEur(mw_subAnn) + "/yr");
+  setText("mw-sq-total",  fmtEur(mw_sqAnn));
+  setText("mw-adopt-total", fmtEur(mw_subAnn));
+  setText("mw-be-badge",  "Break-even: " + fmtMonths(mw_be));
+
+  mwChart = makeOrUpdateLineChart("mwCanvas", mwChart,
+    mw_withoutCum, mw_withCum,
+    "Status Quo", "With MeshWeave", "#7B61D9"
+  );
+
+  // ============================================================
+  // SUMMARY
+  // ============================================================
+  var totalY0   = ns_y0 + ai_y0 + mw_y0;
+  var totalSq5  = (ns_sqAnn * 5) + (ai_sqAnn * 5) + (mw_sqAnn * 5 + 85000);
+  var totalAdopt5 = (ns_y0 + ns_ann * 5) + (ai_y0 + ai_subAnn * 5) + mw_y0 + mw_subAnn * 5;
+  var totalNet5   = ns_net5 + ai_net5 + mw_net5;
+  var roiMult     = totalY0 > 0 ? totalNet5 / totalY0 : 0;
+
+  setText("sum-y0",   fmtEur(totalY0));
+  setText("sum-sq5",  fmtEur(totalSq5));
+  setText("sum-net5", fmtEur(totalNet5));
+  setText("sum-roi",  roiMult.toFixed(1) + "x");
+
+  // Summary grouped bar: per-year breakdown
+  var sq_byYear = YEARS.map(function(y) {
+    return ns_sqAnn + ai_sqAnn + ((y === 4) ? (mw_sqAnn + 85000) : mw_sqAnn);
+  });
+  var adopt_byYear = YEARS.map(function(y) {
+    var nsC = (y === 1) ? (ns_y0 + ns_ann) : ns_ann;
+    var aiC = (y === 1) ? (ai_y0 + ai_subAnn) : ai_subAnn;
+    var mwC = (y === 1) ? mw_y0 + mw_subAnn : mw_subAnn;
+    return nsC + aiC + mwC;
+  });
+  var net_byYear = sq_byYear.map(function(sq, i) { return sq - adopt_byYear[i]; });
+
+  var sumCtx = document.getElementById("summaryCanvas").getContext("2d");
+  if (sumChart) {
+    sumChart.data.datasets[0].data = sq_byYear;
+    sumChart.data.datasets[1].data = adopt_byYear;
+    sumChart.data.datasets[2].data = net_byYear;
+    sumChart.update("none");
+  } else {
+    sumChart = new Chart(sumCtx, {
+      type: "bar",
+      data: {
+        labels: YEAR_LABELS,
+        datasets: [
+          {
+            label: "Status Quo Annual Cost",
+            data: sq_byYear,
+            backgroundColor: "rgba(224,72,72,0.7)",
+            borderColor: "#E04848",
+            borderWidth: 1,
+            borderRadius: 4
+          },
+          {
+            label: "QAegis Stack Annual Cost",
+            data: adopt_byYear,
+            backgroundColor: "rgba(74,144,217,0.7)",
+            borderColor: "#4A90D9",
+            borderWidth: 1,
+            borderRadius: 4
+          },
+          {
+            label: "Net Annual Saving",
+            data: net_byYear,
+            backgroundColor: "rgba(61,184,122,0.7)",
+            borderColor: "#3DB87A",
+            borderWidth: 1,
+            borderRadius: 4
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            labels: { color: "#8B92A5", font: { size: 11 }, boxWidth: 14, padding: 14 }
+          },
+          tooltip: {
+            backgroundColor: "#111827",
+            borderColor: "#1E2A3A",
+            borderWidth: 1,
+            titleColor: "#E8EAF0",
+            bodyColor: "#8B92A5",
+            callbacks: {
+              label: function(ctx) {
+                return " " + ctx.dataset.label + ": " + fmtEur(ctx.parsed.y);
+              }
+            }
+          }
+        },
+        scales: {
+          x: { ticks: { color: "#8B92A5", font: { size: 12 } }, grid: { color: "#1E2A3A" } },
+          y: {
+            ticks: { color: "#8B92A5", font: { size: 11 }, callback: function(v) { return fmtEur(v); } },
+            grid: { color: "#1E2A3A" }
+          }
+        }
+      }
+    });
+  }
+}
+
+// ============================================================
+// INIT
+// ============================================================
+document.addEventListener("DOMContentLoaded", function() {
+  recalc();
+});
+</script>
+</body>
+</html>

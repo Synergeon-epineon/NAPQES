@@ -52,7 +52,10 @@ and is never exposed through the public API.
 
 ### 2.1 Key generation
 
-Keys are generated using `generate_prime_numbers(count, min_val, max_val)`:
+Keys are generated using `generate_prime_numbers(count, min_val, max_val)`,
+whose defaults are the normative interval
+`P = [MIN_KEY_PRIME, MAX_KEY_PRIME] = [1 000 000, 9 900 000]` specified in
+`docs/napseq-eprint-v3.tex` §Notation (`|P| = 579 947`, verified by sieve):
 
 1. Initialise `rand::thread_rng()` (OS DRBG — see `DRBG_ATTESTATION.md`).
 2. Draw a uniform random candidate from `[min_val, max_val]`.
@@ -63,6 +66,10 @@ Keys are generated using `generate_prime_numbers(count, min_val, max_val)`:
 **CO responsibility:** The Crypto Officer is responsible for verifying that
 key generation completes (does not panic), which requires a sufficiently wide
 range to contain at least `count` distinct primes.
+
+The `MAX_KEY_PRIME` bound constrains key *generation* only. Validation and
+decryption accept any key element `>= MIN_KEY_PRIME`, so prime tuples
+generated under the previous, wider bound remain usable without rekeying.
 
 Callers may also supply externally generated prime tuples. The module does
 not validate that supplied integers are prime; this is the caller's
