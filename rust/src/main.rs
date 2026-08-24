@@ -1,7 +1,9 @@
-use napqes::{decrypt_str, encrypt_str, generate_prime_numbers};
+use napqes::{
+    decrypt_str, encrypt_str, generate_prime_numbers, MAX_KEY_PRIME, MIN_KEY_PRIME,
+};
 
 fn main() {
-    let key = generate_prime_numbers(10, 1_000_000, 9_999_999);
+    let key = generate_prime_numbers(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
     println!("key: {:?}", key);
 
     let msg = "Hello from the Rust port of napqes!";

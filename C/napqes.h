@@ -118,6 +118,49 @@ uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
 #define NAPQES_FORMAT_BLOCK_V8      0x01
 #define NAPQES_FORMAT_STREAM_AE_V8  0x02
 
+/* ── Padding profiles (audit finding V3-CVF2) ─────────────────────────────
+ * A padding profile is the map from plaintext codepoint count to padded
+ * block size B (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+ * This map is the *only* source of NAPQES's length-hiding property
+ * (Theorem "lh-ind-cpa"); the token expansion factor contributes none,
+ * since |C| = 48 + 160*(B+2) is a public injective function of B
+ * (Proposition "expansion-neutral").
+ *
+ * Every profile takes values in the same 13-element set {2^4, ..., 2^16},
+ * so the set of legal token counts is profile-independent: the profile is
+ * a sender-side deployment parameter, is never transmitted, and
+ * napqes_decrypt_bytes_v8() needs no matching argument. */
+
+#define NAPQES_PAD_MIN_EXP 4
+#define NAPQES_PAD_MAX_EXP 16
+
+typedef enum {
+    /* Default: smallest power of two strictly above n, floored at 16.
+     * 13 reachable sizes, leaking at most log2(13) ~= 3.70 bits. */
+    NAPQES_PAD_BUCKET = 0,
+    /* NAPQES_PAD_BUCKET thinned by a stride g dividing 12 (param = g),
+     * leaving 12/g + 1 reachable sizes. */
+    NAPQES_PAD_COARSE = 1,
+    /* Every message padded to the single size F (param = F), leaking
+     * exactly zero bits. Requires n < F. */
+    NAPQES_PAD_FRAME  = 2
+} napqes_pad_kind_t;
+
+typedef struct {
+    napqes_pad_kind_t kind;
+    uint32_t          param;  /* stride g / frame size F; unused for BUCKET */
+} napqes_pad_profile_t;
+
+/* Normative prime interval P = [NAPQES_MIN_KEY_PRIME, NAPQES_MAX_KEY_PRIME]
+ * of docs/napseq-eprint-v3.tex §Notation. P contains exactly 579947 primes
+ * (verified by sieve), giving P(579947, 10) = 2^191.46 ordered 10-tuples
+ * (2^95.73 post-Grover). These bounds constrain key *generation* only;
+ * validation and decryption accept any prime >= NAPQES_MIN_KEY_PRIME, so
+ * keys generated before this bound was tightened remain usable. Matches
+ * napqes.py::MIN_KEY_PRIME/MAX_KEY_PRIME and rust/src/lib.rs. */
+#define NAPQES_MIN_KEY_PRIME 1000000ULL
+#define NAPQES_MAX_KEY_PRIME 9900000ULL
+
 /* Generate v8 key material: `count` distinct primes in `primes_out` (used
  * only by the public, un-keyed arithmetic token map c*k+a) plus an
  * **independently**-sampled 256-bit HMAC subkey in `sk_out`. No function
@@ -137,12 +180,23 @@ int napqes_generate_v8_key(uint64_t *primes_out, size_t count,
  * AES-GCM-SIV); distinct messages get distinct nonces with overwhelming
  * probability. Returns malloc'd buffer (caller frees) or NULL on
  * failure/oversized message. v8 ciphertexts are NOT interoperable with v7
- * ciphertexts. */
+ * ciphertexts. Uses the default NAPQES_PAD_BUCKET profile. */
 uint8_t *napqes_encrypt_bytes_v8(const char *message,
                                  const uint64_t *primes, size_t klen,
                                  const uint8_t sk[NAPQES_SK_SIZE],
                                  const uint8_t *aad, size_t aad_len,
                                  size_t *out_len);
+
+/* napqes_encrypt_bytes_v8() with an explicit padding profile. Pass NULL for
+ * `pad_profile` to get NAPQES_PAD_BUCKET. Returns NULL on an invalid profile
+ * (stride not dividing 12, frame not a power of two in [16, 65536]) or a
+ * message that does not fit the requested frame. */
+uint8_t *napqes_encrypt_bytes_v8_profiled(const char *message,
+                                          const uint64_t *primes, size_t klen,
+                                          const uint8_t sk[NAPQES_SK_SIZE],
+                                          const uint8_t *aad, size_t aad_len,
+                                          const napqes_pad_profile_t *pad_profile,
+                                          size_t *out_len);
 
 /* Decrypt a v8 ciphertext produced by napqes_encrypt_bytes_v8(). Returns
  * malloc'd NUL-terminated string (caller frees) or NULL on authentication
@@ -157,6 +211,11 @@ char *napqes_encrypt_str_v8(const char *message,
                             const uint64_t *primes, size_t klen,
                             const uint8_t sk[NAPQES_SK_SIZE],
                             const uint8_t *aad, size_t aad_len);
+char *napqes_encrypt_str_v8_profiled(const char *message,
+                                     const uint64_t *primes, size_t klen,
+                                     const uint8_t sk[NAPQES_SK_SIZE],
+                                     const uint8_t *aad, size_t aad_len,
+                                     const napqes_pad_profile_t *pad_profile);
 char *napqes_decrypt_str_v8(const char *cypher,
                             const uint64_t *primes, size_t klen,
                             const uint8_t sk[NAPQES_SK_SIZE],

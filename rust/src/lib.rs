@@ -36,6 +36,12 @@ type HmacSha256 = Hmac<Sha256>;
 pub const NONCE_SIZE: usize = 16;
 pub const TAG_SIZE: usize = 32;
 
+/// Width of the AAD length prefix in the v8 block-mode domains `0x03`
+/// (auth tag) and `0x0A` (synthetic nonce).
+const AAD_LEN_WIDTH_V8: usize = 8;
+/// Legacy v7 AAD length-prefix width, kept for byte compatibility.
+const AAD_LEN_WIDTH_V7: usize = 4;
+
 // ─── CRNG conditional self-test ──────────────────────────────────────────────
 
 static PREV_NONCE: Mutex<Option<[u8; NONCE_SIZE]>> = Mutex::new(None);
@@ -56,6 +62,21 @@ fn generate_nonce_with_crng_check() -> Result<[u8; NONCE_SIZE], String> {
 }
 
 // ─── Primes ──────────────────────────────────────────────────────────────────
+
+/// Lower bound of the normative prime interval
+/// `P = [MIN_KEY_PRIME, MAX_KEY_PRIME]`.
+pub const MIN_KEY_PRIME: u64 = 1_000_000;
+
+/// Upper bound of the normative prime interval, per
+/// `docs/napseq-eprint-v3.tex` §Notation. `P` contains exactly 579_947
+/// primes (verified by sieve), giving `P(579_947, 10) = 2^191.46` ordered
+/// 10-tuples (`2^95.73` post-Grover).
+///
+/// This bound constrains key *generation* only. Validation and decryption
+/// accept any prime `>= MIN_KEY_PRIME`, so keys generated before this bound
+/// was tightened remain usable. Matches `napqes.py::MAX_KEY_PRIME` and
+/// `C/napqes.h::NAPQES_MAX_KEY_PRIME`.
+pub const MAX_KEY_PRIME: u64 = 9_900_000;
 
 pub fn is_prime(n: u64) -> bool {
     if n < 2 {
@@ -134,6 +155,11 @@ fn u64_from_be8(b: &[u8]) -> u64 {
     u64::from_be_bytes(a)
 }
 
+/// Big-endian length prefix of `width` bytes (`width <= 8`).
+fn be_len_prefix(n: usize, width: usize) -> Vec<u8> {
+    (n as u64).to_be_bytes()[8 - width..].to_vec()
+}
+
 fn u32_from_be4(b: &[u8]) -> u32 {
     let mut a = [0u8; 4];
     a.copy_from_slice(&b[..4]);
@@ -188,16 +214,90 @@ fn derive_noise_p(kb: &[u8], nonce: &[u8]) -> f64 {
     0.75 + t * (0.99 - 0.75)
 }
 
+/// Endpoints of the v8 noise-threshold interval, as fixed-width 64-bit
+/// integers (docs/napseq-eprint-v3.tex, Section "Noise Probability").
+const THETA_MIN: u64 = ((75u128 << 64) / 100) as u64;
+const THETA_MAX: u64 = ((99u128 << 64) / 100) as u64;
+
+/// Reject a prime tuple that is empty, composite, undersized or repeating.
+///
+/// The correctness argument recovers `c` from `c * k + a` by exact division,
+/// which needs `gcd(a, k) = 1` for every addend `a` in `[1, k - 1]` -- true
+/// only when `k` is prime. Called from both v8 entry points so that a caller
+/// supplying a malformed key gets an error here rather than a silently
+/// undecryptable ciphertext, matching `_validate_key` in the Python port.
+fn validate_key(key: &[u64]) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("Key must be a non-empty list of primes.".into());
+    }
+    for (i, &k) in key.iter().enumerate() {
+        if !is_prime(k) {
+            return Err(format!("Key element at index {} ({}) is not prime.", i, k));
+        }
+        if k < MIN_KEY_PRIME {
+            return Err(format!(
+                "Key element at index {} ({}) is below the minimum of {}.",
+                i, k, MIN_KEY_PRIME
+            ));
+        }
+        if key[..i].contains(&k) {
+            return Err(format!(
+                "Key element {} at index {} is a duplicate; all elements must be distinct.",
+                k, i
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return the v8 noise threshold `theta(N)`.
+///
+/// The integer counterpart of [`derive_noise_p`], and the normative form for
+/// the v8 block format:
+///
+/// ```text
+/// theta(N) = theta_min + floor(tau * (theta_max - theta_min) / 2^64)
+/// ```
+///
+/// Division by `2^64` is exactly the high half of the 128-bit product, so the
+/// derivation carries no rounding mode, no excess precision and no compiler
+/// licence to contract the expression -- the three defects that made the
+/// IEEE-754 form only conditionally reproducible across languages and
+/// platforms. The legacy v7 path keeps [`derive_noise_p`] and stays
+/// byte-compatible.
+fn derive_noise_threshold_v8(kb: &[u8], nonce: &[u8]) -> u64 {
+    let mut buf = Vec::with_capacity(1 + nonce.len());
+    buf.push(0x02);
+    buf.extend_from_slice(nonce);
+    let d = hmac_digest(kb, &buf);
+    let tau = u64_from_be8(&d[..8]) as u128;
+    THETA_MIN + ((tau * (THETA_MAX - THETA_MIN) as u128) >> 64) as u64
+}
+
+/// Integer-arithmetic counterpart of [`is_noise_pos`] for v8.
+fn is_noise_pos_v8(kb: &[u8], nonce: &[u8], ct_pos: u64, theta: u64) -> bool {
+    let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
+    buf.push(0x00);
+    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(&be5(ct_pos));
+    let d = hmac_digest(kb, &buf);
+    u64_from_be8(&d[..8]) < theta
+}
+
 // CVF2 fix: unified domain-first layout `d || N || ctx` shared by every
-// domain in the schedule, with `ctx = be4(len(aad)) || aad || masked_blob`.
+// domain in the schedule, with `ctx = be(len(aad)) || aad || masked_blob`.
 // `payload` is `nonce || masked_blob`; it is split here so the nonce
 // occupies the fixed byte 1..=16 offset used by every other domain.
-fn compute_auth_tag(kb: &[u8], aad: &[u8], payload: &[u8]) -> [u8; 32] {
+//
+// `aad_len_width` is 8 for v8 block mode (third-round audit finding CVF1)
+// and 4 for the legacy v7 format, which stays byte-compatible.
+fn compute_auth_tag(kb: &[u8], aad: &[u8], payload: &[u8], aad_len_width: usize) -> [u8; 32] {
     let (nonce, masked_blob) = payload.split_at(NONCE_SIZE);
-    let mut buf = Vec::with_capacity(1 + nonce.len() + 4 + aad.len() + masked_blob.len());
+    let mut buf =
+        Vec::with_capacity(1 + nonce.len() + aad_len_width + aad.len() + masked_blob.len());
     buf.push(0x03);
     buf.extend_from_slice(nonce);
-    buf.extend_from_slice(&(aad.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&be_len_prefix(aad.len(), aad_len_width));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(masked_blob);
     hmac_digest(kb, &buf)
@@ -205,18 +305,104 @@ fn compute_auth_tag(kb: &[u8], aad: &[u8], payload: &[u8]) -> [u8; 32] {
 
 // ─── Padding ─────────────────────────────────────────────────────────────────
 
+/// Exponent range of the reachable block sizes `{2^4, ..., 2^16}`.
+///
+/// Every padding profile takes values in this same 13-element set, so the set
+/// of legal token counts is profile-independent and a decryptor never needs to
+/// know which profile the sender used.
+pub const PAD_MIN_EXP: u32 = 4;
+pub const PAD_MAX_EXP: u32 = 16;
+
+/// The map from plaintext codepoint count to padded block size `B`
+/// (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+///
+/// This map is the *only* source of NAPQES's length-hiding property
+/// (Theorem `lh-ind-cpa`); the token expansion factor contributes none, since
+/// `|C| = 48 + 160(B+2)` is a public injective function of `B`
+/// (Proposition `expansion-neutral`).
+///
+/// The profile is a sender-side deployment parameter agreed out of band. It is
+/// never transmitted and [`decrypt_bytes_v8`] is profile-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadProfile {
+    /// Default: smallest power of two strictly above `n`, floored at 16.
+    /// 13 reachable sizes, leaking at most `log2(13) ~= 3.70` bits of length.
+    Bucket,
+    /// [`PadProfile::Bucket`] thinned by a stride `g` dividing 12, leaving
+    /// `12 / g + 1` reachable sizes.
+    Coarse(u32),
+    /// Every message padded to the single size `F`, leaking exactly zero bits.
+    /// Requires `n < F`.
+    Frame(u32),
+}
+
+fn bit_length(n: usize) -> u32 {
+    usize::BITS - n.leading_zeros()
+}
+
+/// Padded block size under the default profile. Total for every `n`, which is
+/// why the v7 padding path needs no error branch.
+fn bucket_block_size(n: usize) -> usize {
+    1usize << bit_length(n).max(PAD_MIN_EXP)
+}
+
+impl PadProfile {
+    /// Padded block size `B` for an `n`-codepoint message under this profile.
+    pub fn block_size(self, n: usize) -> Result<usize, String> {
+        let e = bit_length(n).max(PAD_MIN_EXP);
+        match self {
+            PadProfile::Bucket => Ok(bucket_block_size(n)),
+            PadProfile::Coarse(g) => {
+                let span = PAD_MAX_EXP - PAD_MIN_EXP;
+                if g == 0 || span % g != 0 {
+                    return Err(format!(
+                        "coarse stride g={} must divide {}.",
+                        g, span
+                    ));
+                }
+                let steps = (e - PAD_MIN_EXP + g - 1) / g; // ceil division
+                Ok(1usize << (PAD_MIN_EXP + g * steps))
+            }
+            PadProfile::Frame(f) => {
+                if !f.is_power_of_two()
+                    || f.trailing_zeros() < PAD_MIN_EXP
+                    || f.trailing_zeros() > PAD_MAX_EXP
+                {
+                    return Err(format!(
+                        "frame size F={} must be a power of two in [{}, {}].",
+                        f,
+                        1u32 << PAD_MIN_EXP,
+                        1u32 << PAD_MAX_EXP
+                    ));
+                }
+                if n >= f as usize {
+                    return Err(format!(
+                        "frame({}) profile admits messages of at most {} \
+                         codepoints; got {}. Use a larger frame.",
+                        f,
+                        f - 1,
+                        n
+                    ));
+                }
+                Ok(f as usize)
+            }
+        }
+    }
+}
+
 /// HMAC-derived padding — domain byte 0x06 (matches Python `_pad_message`).
 /// Each padding codepoint is in [32, 126], matching the reference exactly.
 fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
     let n = msg.len();
     assert!(n <= 0xFFFF, "Message too long for 2-byte length prefix");
-    let block_size = if n == 0 {
-        16usize
-    } else {
-        let bl = 64 - (n as u64).leading_zeros() as usize;
-        let p = 1usize << bl;
-        p.max(16)
-    };
+    pad_to_block(msg, kb, nonce, bucket_block_size(n))
+}
+
+/// Padding body shared by every profile; `block_size` must exceed `msg.len()`,
+/// which [`PadProfile::block_size`] guarantees for the profiles it accepts.
+fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<u32> {
+    let n = msg.len();
+    debug_assert!(block_size > n, "padding block must exceed the message");
     let pad_len = block_size - n;
     let mut out = Vec::with_capacity(2 + block_size);
     out.push(((n >> 8) & 0xFF) as u32);
@@ -235,7 +421,7 @@ fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
 
 /// HMAC-CTR keystream for masking the varint blob — domain byte 0x07.
 ///
-/// Each 32-byte block is `HMAC(key_bytes, nonce || 0x07 || uint32_be(block))`.  
+/// Each 32-byte block is `HMAC(key_bytes, 0x07 || nonce || uint32_be(block))`.  
 /// XOR-masking the raw LEB128 blob eliminates the 3:1 MSB continuation-bit
 /// bias that otherwise causes systematic NIST SP 800-22 failures.
 fn varint_keystream(kb: &[u8], nonce: &[u8], length: usize) -> Vec<u8> {
@@ -253,10 +439,27 @@ fn varint_keystream(kb: &[u8], nonce: &[u8], length: usize) -> Vec<u8> {
     out
 }
 
-fn unpad_message(padded: &[u32]) -> Vec<u32> {
-    assert!(padded.len() >= 2);
+/// Recover the original message from a padded codepoint buffer.
+///
+/// V3-CVF8: the 2-codepoint big-endian length prefix `n` is attacker-chosen
+/// in the sense that it is recovered from the decrypted blob, so it must be
+/// validated against the buffer actually present: a well-formed padded buffer
+/// always satisfies `2 + n <= padded.len()`. Slicing without this check
+/// panics on an out-of-range index. Matches `napqes.py::_unpad_message` and
+/// the `2 + orig_n > padded_n` guard in `C/napqes.c`.
+fn unpad_message(padded: &[u32]) -> Result<Vec<u32>, String> {
+    if padded.len() < 2 {
+        return Err("Padded message too short to contain length prefix.".into());
+    }
     let n = ((padded[0] as usize) << 8) | (padded[1] as usize);
-    padded[2..2 + n].to_vec()
+    if 2 + n > padded.len() {
+        return Err(format!(
+            "Length prefix ({}) exceeds available data ({} codepoints).",
+            n,
+            padded.len() - 2
+        ));
+    }
+    Ok(padded[2..2 + n].to_vec())
 }
 
 // ─── Core encrypt / decrypt ──────────────────────────────────────────────────
@@ -311,7 +514,10 @@ fn decrypt_core(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Vec<u32
             real_idx += 1;
         }
     }
-    unpad_message(&padded)
+    // v7 low-level API: signature is `-> Vec<u32>`, so a malformed padded
+    // buffer panics here exactly as it did before V3-CVF8. The v8 path
+    // (`decrypt_core_v8`) returns the error instead.
+    unpad_message(&padded).expect("v7 decrypt: malformed padded buffer")
 }
 
 pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Vec<u32> {
@@ -338,7 +544,31 @@ fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Resu
         );
     }
     let real_count = n_tokens / ceiling_unit;
-    let noise_p = derive_noise_p(kb, nonce);
+
+    // V3-CVF8: `real_count` must be `B + 2` for one of the 13 reachable
+    // padded block sizes `B` in `{2^PAD_MIN_EXP, ..., 2^PAD_MAX_EXP}`.
+    // Divisibility by `ceiling_unit` alone does not imply this. Reached only
+    // after the tag has verified (see `decrypt_bytes_v8`), so this rejects a
+    // malformed ciphertext, never an unauthenticated attacker input.
+    let legal_real_count = real_count
+        .checked_sub(2)
+        .map(|b| {
+            b.is_power_of_two()
+                && b.trailing_zeros() >= PAD_MIN_EXP
+                && b.trailing_zeros() <= PAD_MAX_EXP
+        })
+        .unwrap_or(false);
+    if !legal_real_count {
+        return Err(format!(
+            "Malformed v8 ciphertext: real-token count {} is not B + 2 for any \
+             reachable padded block size B in [{}, {}].",
+            real_count,
+            1u64 << PAD_MIN_EXP,
+            1u64 << PAD_MAX_EXP
+        ));
+    }
+
+    let noise_theta = derive_noise_threshold_v8(kb, nonce);
     let kk = key.len() as u64;
     let mut padded: Vec<u32> = Vec::new();
     let mut real_idx: u64 = 0;
@@ -347,7 +577,7 @@ fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Resu
         let mut noise_run: u64 = 0;
         while noise_run < MAX_NOISE_RUN
             && ct_pos < n_tokens
-            && is_noise_pos(kb, nonce, ct_pos, noise_p)
+            && is_noise_pos_v8(kb, nonce, ct_pos, noise_theta)
         {
             ct_pos += 1;
             noise_run += 1;
@@ -360,11 +590,31 @@ fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Resu
         }
         let k = key[(real_idx % kk) as usize];
         let addend = derive_addend(kb, nonce, real_idx, k);
-        padded.push(((cypher[ct_pos as usize] - addend) / k) as u32);
+        let token = cypher[ct_pos as usize];
+        // A genuine real token is exactly c * k + addend with addend in
+        // [1, k - 1]. Checking that explicitly, rather than subtracting and
+        // dividing, keeps the three ports in lock-step: the bare subtraction
+        // panics here in debug builds and wraps in release builds and in C.
+        if token < addend || (token - addend) % k != 0 {
+            return Err(format!(
+                "Malformed v8 ciphertext: token at position {} is not of the form \
+                 codepoint * k + addend for key element {}.",
+                ct_pos, k
+            ));
+        }
+        let cp = (token - addend) / k;
+        if cp > 0x10FFFF || char::from_u32(cp as u32).is_none() {
+            return Err(format!(
+                "Malformed v8 ciphertext: recovered value {} at position {} is not a \
+                 Unicode scalar value.",
+                cp, ct_pos
+            ));
+        }
+        padded.push(cp as u32);
         ct_pos += 1;
         real_idx += 1;
     }
-    Ok(unpad_message(&padded))
+    unpad_message(&padded)
 }
 
 // ─── Constant-time tag comparison ────────────────────────────────────────────
@@ -514,7 +764,7 @@ pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, 
     let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
     payload.extend_from_slice(&nonce);
     payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(&kb, aad, &payload);
+    let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
     payload.extend_from_slice(&tag);
     Ok(payload)
 }
@@ -573,7 +823,7 @@ pub(crate) fn encrypt_bytes_with_nonce(
     let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
     payload.extend_from_slice(&nonce);
     payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(&kb, aad, &payload);
+    let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
     payload.extend_from_slice(&tag);
     payload
 }
@@ -593,7 +843,7 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     let split = ciphertext.len() - TAG_SIZE;
     let payload = &ciphertext[..split];
     let recv_tag = &ciphertext[split..];
-    let calc_tag = compute_auth_tag(&kb, aad, payload);
+    let calc_tag = compute_auth_tag(&kb, aad, payload, AAD_LEN_WIDTH_V7);
     if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
@@ -670,7 +920,7 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
     let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
     payload.extend_from_slice(&nonce);
     payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(&kb, aad, &payload);
+    let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
     payload.extend_from_slice(&tag);
     Ok(payload)
 }
@@ -695,7 +945,7 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
     let split = ciphertext.len() - TAG_SIZE;
     let payload = &ciphertext[..split];
     let recv_tag = &ciphertext[split..];
-    let calc_tag = compute_auth_tag(&kb, aad, payload);
+    let calc_tag = compute_auth_tag(&kb, aad, payload, AAD_LEN_WIDTH_V7);
     if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
@@ -760,7 +1010,12 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
 // (à la RFC 5297 SIV / AES-GCM-SIV), computed as a keyed digest of the AAD
 // and message under domain `0x0A`:
 //
-//   N = Derive_synth(sk, aad, message) = HMAC(sk, 0x0A || be4(|aad|) || aad || message)[0:16]
+//   N = Derive_synth(sk_fmt, aad, message) = HMAC(sk_fmt, 0x0A || be8(|aad|) || aad || message)[0:16]
+//
+// where `sk_fmt = HMAC(sk, 0x0B || format_id)` is the format subkey of
+// domain `0x0B`, which binds every v8 derivation to one specific wire
+// format so a ciphertext or tag produced under one format can never verify
+// under another that shares the same `(primes, sk)`.
 //
 // Because the nonce is now a PRF of `(sk, aad, message)`, two *different*
 // `(aad, message)` pairs share a nonce only if they collide under
@@ -807,6 +1062,22 @@ pub const SK_SIZE: usize = 32;
 /// expansion instead of the ~13.4x average case.
 pub const MAX_NOISE_RUN: u64 = 19;
 
+/// Domain `0x0B` format-subkey identifier for v8 block mode.
+pub const FORMAT_BLOCK_V8: u8 = 0x01;
+/// Domain `0x0B` format-subkey identifier for the v8 streaming-AE format.
+pub const FORMAT_STREAM_AE_V8: u8 = 0x02;
+
+/// Domain `0x0B`: derive a format-specific HMAC subkey from `sk`.
+///
+/// Every v8 derivation is keyed by this subkey rather than by `sk` itself,
+/// so a ciphertext or tag produced under one v8 wire format can never
+/// verify under another format's effective key even though both share the
+/// same `(primes, sk)` material. Matches `napqes.py::_derive_format_subkey`
+/// and `C/napqes.c::derive_format_subkey`.
+fn derive_format_subkey(sk: &[u8], format_id: u8) -> [u8; 32] {
+    hmac_digest(sk, &[0x0B, format_id])
+}
+
 /// Generate a v8 key pair: an arithmetic-layer prime tuple and an
 /// independently-sampled, uniformly random 256-bit HMAC subkey.
 ///
@@ -822,18 +1093,18 @@ pub fn generate_v8_key(count: usize, min_val: u64, max_val: u64) -> (Vec<u64>, [
 
 /// Synthetic IV (SIV-style) nonce derivation — domain byte `0x0A`.
 ///
-/// Deterministic in `(sk, aad, message)`: encrypting the same message under
-/// the same key and AAD always reproduces the same nonce (and hence the
-/// same ciphertext), which is the standard MRAE trade-off. Encrypting any
-/// *different* `(aad, message)` pair produces a nonce that collides with a
-/// previous one only with HMAC-SHA256-collision probability.
-fn synthetic_nonce(sk: &[u8], aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE] {
-    let mut buf = Vec::with_capacity(1 + 4 + aad.len() + message.len());
+/// Deterministic in `(sk_fmt, aad, message)`: encrypting the same message
+/// under the same key and AAD always reproduces the same nonce (and hence
+/// the same ciphertext), which is the standard MRAE trade-off. Encrypting
+/// any *different* `(aad, message)` pair produces a nonce that collides
+/// with a previous one only with HMAC-SHA256-collision probability.
+fn synthetic_nonce(sk_fmt: &[u8], aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE] {
+    let mut buf = Vec::with_capacity(1 + AAD_LEN_WIDTH_V8 + aad.len() + message.len());
     buf.push(0x0A);
-    buf.extend_from_slice(&(aad.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(message);
-    let d = hmac_digest(sk, &buf);
+    let d = hmac_digest(sk_fmt, &buf);
     let mut n = [0u8; NONCE_SIZE];
     n.copy_from_slice(&d[..NONCE_SIZE]);
     n
@@ -843,19 +1114,42 @@ fn synthetic_nonce(sk: &[u8], aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE] {
 /// domain-derivation key (`sk`) independent of the arithmetic-layer primes
 /// (CVF8/CVF13 fix). See the module-level "V8 key schedule" documentation
 /// above for the full security argument.
+///
+/// Uses the default [`PadProfile::Bucket`] padding profile; see
+/// [`encrypt_bytes_v8_with_profile`] to select another.
 pub fn encrypt_bytes_v8(
     message: &str,
     primes: &[u64],
     sk: &[u8; SK_SIZE],
     aad: &[u8],
 ) -> Result<Vec<u8>, String> {
-    if message.is_empty() {
-        return Ok(Vec::new());
-    }
-    let nonce = synthetic_nonce(sk, aad, message.as_bytes());
+    encrypt_bytes_v8_with_profile(message, primes, sk, aad, PadProfile::Bucket)
+}
+
+/// [`encrypt_bytes_v8`] with an explicit padding profile
+/// (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+///
+/// The profile governs how much plaintext length the ciphertext size reveals:
+/// [`PadProfile::Bucket`] leaks at most ~3.70 bits, [`PadProfile::Frame`]
+/// exactly zero. It is a sender-side parameter, never transmitted;
+/// [`decrypt_bytes_v8`] needs no matching argument.
+pub fn encrypt_bytes_v8_with_profile(
+    message: &str,
+    primes: &[u64],
+    sk: &[u8; SK_SIZE],
+    aad: &[u8],
+    pad_profile: PadProfile,
+) -> Result<Vec<u8>, String> {
+    let sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
+    let nonce = synthetic_nonce(&sk_fmt, aad, message.as_bytes());
     let codepoints: Vec<u32> = message.chars().map(|c| c as u32).collect();
-    let noise_p = derive_noise_p(sk, &nonce);
-    let padded = pad_message(&codepoints, sk, &nonce);
+    if codepoints.len() > 0xFFFF {
+        return Err("Message too long for 2-byte length prefix.".into());
+    }
+    validate_key(primes)?;
+    let noise_theta = derive_noise_threshold_v8(&sk_fmt, &nonce);
+    let block_size = pad_profile.block_size(codepoints.len())?;
+    let padded = pad_to_block(&codepoints, &sk_fmt, &nonce, block_size);
     let kk = primes.len() as u64;
     let mut cypher: Vec<u64> = Vec::new();
     let mut real_idx: u64 = 0;
@@ -863,16 +1157,16 @@ pub fn encrypt_bytes_v8(
     for &c in &padded {
         let mut noise_run: u64 = 0;
         loop {
-            if noise_run < MAX_NOISE_RUN && is_noise_pos(sk, &nonce, ct_pos, noise_p) {
+            if noise_run < MAX_NOISE_RUN && is_noise_pos_v8(&sk_fmt, &nonce, ct_pos, noise_theta) {
                 let k = primes[(real_idx % kk) as usize];
-                let nc = derive_noise_char(sk, &nonce, ct_pos);
-                let na = derive_noise_token_addend(sk, &nonce, ct_pos, k);
+                let nc = derive_noise_char(&sk_fmt, &nonce, ct_pos);
+                let na = derive_noise_token_addend(&sk_fmt, &nonce, ct_pos, k);
                 cypher.push(nc * k + na);
                 ct_pos += 1;
                 noise_run += 1;
             } else {
                 let k = primes[(real_idx % kk) as usize];
-                let addend = derive_addend(sk, &nonce, real_idx, k);
+                let addend = derive_addend(&sk_fmt, &nonce, real_idx, k);
                 cypher.push(c as u64 * k + addend);
                 ct_pos += 1;
                 real_idx += 1;
@@ -885,18 +1179,18 @@ pub fn encrypt_bytes_v8(
     let ceiling = (padded.len() as u64) * (MAX_NOISE_RUN + 1);
     while (cypher.len() as u64) < ceiling {
         let k = primes[(real_idx % kk) as usize];
-        let nc = derive_noise_char(sk, &nonce, ct_pos);
-        let na = derive_noise_token_addend(sk, &nonce, ct_pos, k);
+        let nc = derive_noise_char(&sk_fmt, &nonce, ct_pos);
+        let na = derive_noise_token_addend(&sk_fmt, &nonce, ct_pos, k);
         cypher.push(nc * k + na);
         ct_pos += 1;
     }
     let blob = fixed_encode_tokens(&cypher);
-    let ks = varint_keystream(sk, &nonce, blob.len());
+    let ks = varint_keystream(&sk_fmt, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
     payload.extend_from_slice(&nonce);
     payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(sk, aad, &payload);
+    let tag = compute_auth_tag(&sk_fmt, aad, &payload, AAD_LEN_WIDTH_V8);
     payload.extend_from_slice(&tag);
     Ok(payload)
 }
@@ -908,9 +1202,6 @@ pub fn decrypt_bytes_v8(
     sk: &[u8; SK_SIZE],
     aad: &[u8],
 ) -> Result<String, String> {
-    if ciphertext.is_empty() {
-        return Ok(String::new());
-    }
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
         return Err(format!(
             "Ciphertext too short: {} bytes; header+tag require at least {}.",
@@ -918,20 +1209,30 @@ pub fn decrypt_bytes_v8(
             NONCE_SIZE + TAG_SIZE
         ));
     }
+    validate_key(primes)?;
+    let sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
     let split = ciphertext.len() - TAG_SIZE;
     let payload = &ciphertext[..split];
     let recv_tag = &ciphertext[split..];
-    let calc_tag = compute_auth_tag(sk, aad, payload);
+    let calc_tag = compute_auth_tag(&sk_fmt, aad, payload, AAD_LEN_WIDTH_V8);
     if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
     let nonce = &payload[..NONCE_SIZE];
     let masked = &payload[NONCE_SIZE..];
-    let ks = varint_keystream(sk, nonce, masked.len());
+    let ks = varint_keystream(&sk_fmt, nonce, masked.len());
     let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let tokens = fixed_decode_tokens(&blob).map_err(|e| format!("varint decode error: {}", e))?;
-    let codepoints = decrypt_core_v8(nonce, &tokens, primes, sk)?;
-    let s: String = codepoints.into_iter().filter_map(char::from_u32).collect();
+    let codepoints = decrypt_core_v8(nonce, &tokens, primes, &sk_fmt)?;
+    // `decrypt_core_v8` has already rejected any non-scalar value, so this
+    // maps every recovered codepoint rather than silently dropping some.
+    let s: String = codepoints
+        .into_iter()
+        .map(|c| {
+            char::from_u32(c)
+                .ok_or_else(|| format!("Malformed v8 plaintext: {} is not a Unicode scalar value.", c))
+        })
+        .collect::<Result<String, String>>()?;
     Ok(s)
 }
 
@@ -1021,7 +1322,7 @@ mod tests {
 
     #[test]
     fn primes_are_prime() {
-        let ps = generate_prime_numbers(10, 1_000_000, 9_999_999);
+        let ps = generate_prime_numbers(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
         assert_eq!(ps.len(), 10);
         for p in &ps {
             assert!(is_prime(*p));
@@ -1096,7 +1397,7 @@ mod tests {
     fn v8_ciphertext_length_is_deterministic_across_varied_aad() {
         let mut lengths = std::collections::HashSet::new();
         for i in 0..50u32 {
-            let (primes, sk) = generate_v8_key(10, 1_000_000, 9_999_999);
+            let (primes, sk) = generate_v8_key(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
             let aad = format!("aad-{}", i);
             let ct = encrypt_bytes_v8("fixed target message", &primes, &sk, aad.as_bytes())
                 .unwrap();
@@ -1114,10 +1415,116 @@ mod tests {
 
     #[test]
     fn v8_key_generation_is_independent() {
-        let (primes, sk) = generate_v8_key(10, 1_000_000, 9_999_999);
+        let (primes, sk) = generate_v8_key(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
         assert_eq!(primes.len(), 10);
         // sk must not be derivable from key_bytes(primes) via the v7 KDF —
         // spot-check it does not equal the v7 HMAC key material shape.
         assert_ne!(sk.to_vec(), key_bytes(&primes));
+    }
+
+    /// The `Bucket` profile must reproduce the pre-V3-CVF2 hard-wired ladder
+    /// exactly, or every existing KAT breaks.
+    #[test]
+    fn pad_profile_bucket_matches_legacy_ladder() {
+        for n in 0..2048usize {
+            let legacy = if n == 0 {
+                16usize
+            } else {
+                let bl = 64 - (n as u64).leading_zeros() as usize;
+                (1usize << bl).max(16)
+            };
+            assert_eq!(PadProfile::Bucket.block_size(n).unwrap(), legacy, "n={}", n);
+        }
+    }
+
+    /// Every profile must land in the same 13-element set `{2^4, ..., 2^16}`,
+    /// which is what lets a decryptor stay profile-agnostic.
+    #[test]
+    fn pad_profiles_share_one_reachable_set() {
+        let legal: std::collections::HashSet<usize> =
+            (PAD_MIN_EXP..=PAD_MAX_EXP).map(|e| 1usize << e).collect();
+        assert_eq!(legal.len(), 13);
+        for n in (0..0xFFFFusize).step_by(97) {
+            for p in [
+                PadProfile::Bucket,
+                PadProfile::Coarse(2),
+                PadProfile::Coarse(3),
+                PadProfile::Coarse(12),
+            ] {
+                let b = p.block_size(n).unwrap();
+                assert!(legal.contains(&b), "profile {:?} produced B={} for n={}", p, b, n);
+                assert!(b > n, "profile {:?} produced B={} <= n={}", p, b, n);
+            }
+        }
+    }
+
+    #[test]
+    fn pad_profile_coarse_stride_must_divide_twelve() {
+        assert!(PadProfile::Coarse(5).block_size(3).is_err());
+        assert!(PadProfile::Coarse(0).block_size(3).is_err());
+        for g in [1u32, 2, 3, 4, 6, 12] {
+            assert!(PadProfile::Coarse(g).block_size(3).is_ok());
+        }
+        // Stride 3 thins {2^4..2^16} to {2^4, 2^7, 2^10, 2^13, 2^16}.
+        assert_eq!(PadProfile::Coarse(3).block_size(200).unwrap(), 1 << 10);
+    }
+
+    #[test]
+    fn pad_profile_frame_is_constant_and_range_checked() {
+        for n in [0usize, 1, 100, 511] {
+            assert_eq!(PadProfile::Frame(512).block_size(n).unwrap(), 512);
+        }
+        assert!(PadProfile::Frame(512).block_size(512).is_err()); // n must be < F
+        assert!(PadProfile::Frame(1000).block_size(1).is_err()); // not a power of two
+        assert!(PadProfile::Frame(8).block_size(1).is_err()); // below 2^4
+        assert!(PadProfile::Frame(1 << 17).block_size(1).is_err()); // above 2^16
+    }
+
+    /// The default profile must be byte-identical to the un-profiled entry
+    /// point, and `Frame` must make ciphertext length independent of the
+    /// plaintext length -- the V3-CVF2 property, measured rather than argued.
+    #[test]
+    fn v8_frame_profile_hides_length_and_round_trips() {
+        let (primes, sk) = generate_v8_key(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
+
+        let plain = "short";
+        let default_ct = encrypt_bytes_v8(plain, &primes, &sk, b"").unwrap();
+        let bucket_ct =
+            encrypt_bytes_v8_with_profile(plain, &primes, &sk, b"", PadProfile::Bucket).unwrap();
+        assert_eq!(default_ct, bucket_ct, "Bucket must be the default");
+
+        let mut framed_lengths = std::collections::HashSet::new();
+        for n in [1usize, 5, 40, 200, 511] {
+            let msg = "a".repeat(n);
+            let ct =
+                encrypt_bytes_v8_with_profile(&msg, &primes, &sk, b"", PadProfile::Frame(512))
+                    .unwrap();
+            framed_lengths.insert(ct.len());
+            // Decryption is profile-agnostic: no matching argument is passed.
+            assert_eq!(decrypt_bytes_v8(&ct, &primes, &sk, b"").unwrap(), msg);
+        }
+        assert_eq!(
+            framed_lengths.len(),
+            1,
+            "frame(512) must collapse every length to one, got {:?}",
+            framed_lengths
+        );
+
+        // The same messages under the default profile do NOT collapse.
+        let mut bucket_lengths = std::collections::HashSet::new();
+        for n in [1usize, 5, 40, 200, 511] {
+            let msg = "a".repeat(n);
+            bucket_lengths.insert(encrypt_bytes_v8(&msg, &primes, &sk, b"").unwrap().len());
+        }
+        assert!(bucket_lengths.len() > 1);
+    }
+
+    #[test]
+    fn v8_frame_profile_rejects_oversized_message() {
+        let (primes, sk) = generate_v8_key(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        let msg = "a".repeat(600);
+        assert!(
+            encrypt_bytes_v8_with_profile(&msg, &primes, &sk, b"", PadProfile::Frame(512)).is_err()
+        );
     }
 }

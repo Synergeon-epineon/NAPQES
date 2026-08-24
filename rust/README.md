@@ -14,7 +14,7 @@ cargo test
 ```rust
 use napqes::{encrypt_str, decrypt_str, generate_prime_numbers};
 
-let key = generate_prime_numbers(10, 1_000_000, 9_999_999);
+let key = generate_prime_numbers(10, MIN_KEY_PRIME, MAX_KEY_PRIME);
 let ct  = encrypt_str("hello", &key, b"");
 let pt  = decrypt_str(&ct, &key, b"").unwrap();
 ```

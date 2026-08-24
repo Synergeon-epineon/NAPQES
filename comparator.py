@@ -101,14 +101,17 @@ _PROPERTIES = [
     },
     {
         "property":    "Ciphertext expansion",
-        "napseq":      "High — noise tokens inflate ciphertext 4–20×",
+        "napseq":      "High — 160 B per plaintext codepoint; 2 928 B minimum",
         "aes_gcm":     "Minimal — plaintext length + 16-byte tag",
         "chacha20":    "Minimal — plaintext length + 16-byte tag",
         "napseq_wins": False,
         "why": (
-            "NAPSEQ inserts HMAC-derived noise tokens at a per-message rate in [0.75, 0.99], "
-            "which inflates ciphertext size significantly. This is the cost of probabilistic "
-            "noise obfuscation — which provides length hiding and pattern resistance."
+            "NAPSEQ pads every message to a power-of-two bucket of tokens and emits each "
+            "token as 8 fixed-width bytes, so |C| = 48 + 160·(B+2) bytes. This is the cost "
+            "of the arithmetic/noise layer and it buys no theorem: length hiding comes from "
+            "the coarseness of the padding bucket alone, and a public constant multiplier "
+            "leaks exactly as much as no multiplier (docs/napseq-eprint-v3.tex, "
+            "Proposition 'Expansion is length-neutral')."
         ),
     },
     {

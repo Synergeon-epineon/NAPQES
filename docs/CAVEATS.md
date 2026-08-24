@@ -176,7 +176,7 @@ reference implementations.
 **Fully closed (2026-07-07) via the v8 key schedule.** `rust/src/lib.rs`
 now ships `generate_v8_key`/`encrypt_bytes_v8`/`decrypt_bytes_v8`, which
 replace the CSPRNG nonce with a synthetic IV (RFC 5297/AES-GCM-SIV style):
-`N = HMAC(sk, 0x0A‖be4(|aad|)‖aad‖message)[0:16]`, keyed by the
+`N = HMAC(sk, 0x0A‖be8(|aad|)‖aad‖message)[0:16]`, keyed by the
 independently-sampled `sk` introduced by the same fix (see CVF8/CVF13
 below). Because the nonce is now a deterministic PRF of `(sk, aad,
 message)`, two *different* `(aad, message)` pairs can only share a nonce
@@ -522,11 +522,15 @@ customers are blocked by the current cap.
 **Description.** `_pad_message` pads plaintext to the next power-of-two
 block size (minimum 16). A passive observer seeing ciphertext length can
 therefore infer which power-of-two bucket `{16, 32, 64, …, 65536}` the
-plaintext length falls into, disclosing up to `⌈log₂(n)⌉` bits of length
-information. This is a distinct, deliberate leak from **CVF1** (fixed): CVF1
-was about ciphertext length leaking codepoint *values* even *within* the
-same bucket; CAV-003 is about the bucket boundary itself, which is an
-accepted design trade-off for v7.
+plaintext length falls into. That is **at most `log₂13 ≈ 3.70` bits** per
+message — the set has 13 members — and at most `m · 3.70` bits over `m`
+messages, with no independence assumption (Corollary `cor:length-leak`,
+`docs/napseq-eprint-v3.tex`). An earlier revision of this entry quantified
+the leak as `⌈log₂(n)⌉` bits; that was backwards — it is the *bucket index*
+that leaks, not the length, and the bound is independent of `n`. This is a
+distinct, deliberate leak from **CVF1** (fixed): CVF1 was about ciphertext
+length leaking codepoint *values* even *within* the same bucket; CAV-003 is
+about the bucket boundary itself, which is an accepted design trade-off.
 
 **v8 escalation, since fixed (V2-CVF2, second-round audit, 2026-07-19).**
 Under v8, the synthetic nonce is derived from the message itself
@@ -539,15 +543,26 @@ probabilistically. This is now fixed by padding the v8 token count up to a
 fixed per-bucket ceiling (see "V2-CVF2" below).
 
 **Current mitigation.** Leakage is disclosed in BRD.md §6 item 5,
-module docstring (napqes.py L11–14), and SPEC.md §6. Customers requiring
-full length-hiding must layer a fixed-frame transport (this residual
-applies equally to v7 and the now-fixed v8: both still disclose the
-padding bucket itself, exactly as documented here — only the *additional*
-v8 oracle amplification is what V2-CVF2 closes).
+module docstring (napqes.py L11–14), and SPEC.md §6. It is also *bounded*:
+the scheme meets LH-IND-CPA-det (Theorem `thm:lh-ind-cpa`), so nothing
+beyond the bucket leaks. Callers requiring **exactly zero** length leakage
+no longer need an external fixed-frame transport: they pass
+`pad_profile=("frame", F)` to `encrypt_bytes_v8` / `encrypt_str_v8`, which
+reduces the reachable set to one size and therefore `I(n;|C|)` to 0. The
+profile is a sender-side parameter only — it changes no wire format and
+decryption needs no matching argument. (This residual applied equally to v7
+and the now-fixed v8: both disclose the padding bucket itself, exactly as
+documented here — only the *additional* v8 oracle amplification is what
+V2-CVF2 closes. `frame` is available on the v8 API only.)
 
-**Future option.** A future wire format could include a documented
-fixed-frame padding option that hides the padding bucket itself entirely.
-Ship only if customers request it.
+**Important — the bound is average-case.** A small `I(n;|C|)` does not mean
+a *specific* distinguisher fails. Under the default `bucket` profile, an
+adversary separating short commands (12–20 codepoints) from long ones
+(300–500) succeeds with probability **1.0**, because those classes land in
+different buckets. See `traffic_analysis_bench.py` and V3-CVF2 below.
+
+**Future option.** `frame(F)` is available in all three implementations
+(`napqes.py`, `rust/src/lib.rs`, `C/napqes.c`); see V3-CVF2 below.
 
 ---
 
@@ -650,17 +665,24 @@ roughly `[32 × 10⁶, 127 × 10⁷]` — typically 3–4 varint bytes per token
 Noise tokens (HMAC-derived probability ∈ [0.75, 0.99]) inflate ciphertext
 further. Plus 16-byte nonce + 32-byte tag overhead.
 
-Compared to AES-GCM the expansion is substantial (typically 8–20×). This is
-by design — noise tokens are a **traffic-analysis-resistance / ciphertext
-length-decorrelation feature, not a content-confidentiality feature**, and
-not compression. Per-message content confidentiality (IND-CPA) rests
-entirely on the domain-`0x07` keystream and the domain-`0x03` HMAC tag; the
-noise/prime-token layer's genuine, distinct contribution is that ciphertext
-byte length is a function of `(key, nonce, padded length)` only — via the
-noise-position oracle (`0x00`) and noise probability (`0x02`) — and does
-not correlate with plaintext content. See `docs/audit_mitigation_responses.md`
-(CVF4) for the full analysis; this line previously overstated the layer's
-role as a confidentiality primitive, which the audit correctly flagged.
+Compared to AES-GCM the expansion is substantial (typically 8–20× for v7;
+a flat 160 bytes per codepoint for v8's fixed-width encoding). Per-message
+content confidentiality (IND-CPA) rests entirely on the domain-`0x07`
+keystream and the domain-`0x03` HMAC tag.
+
+**Attribution correction (V3-CVF2, third-round audit, 2026-08-08).** This
+entry previously credited the noise/prime-token layer with ciphertext
+length-decorrelation, i.e. with a traffic-analysis benefit. That is wrong,
+and it is the same error the third-round audit found in the paper. Ciphertext
+length is a deterministic function of the **padding bucket alone**
+(`lem:length-det`) — not of the noise-position oracle, not of the noise
+probability, not of `k`, not of `K`. What the noise layer actually
+contributes is length-*neutrality*: the `MAX_NOISE_RUN` cap and the
+per-bucket ceiling remove a leak the layer would otherwise create. All
+length confidentiality that exists comes from the coarseness of the padding
+map, which survives deletion of the arithmetic layer intact
+(Proposition `prop:expansion-neutral`). The expansion buys no theorem. See
+V3-CVF2 below and `docs/audit_mitigation_responses.md` (V3-CVF2).
 The v6 binary format is ~53% smaller than the legacy v3 hex encoding.
 
 **No fix planned.** Expansion is a core property of the design. Document
@@ -813,3 +835,368 @@ still deferred, not part of this fix.
 **Requested action:** confirm V2-CVF12 can be marked **Fixed**, and
 V2-CVF13 can be marked **Acknowledged, with the decision to retain v7
 recorded**.
+
+## V3-CVF1 — v8 AAD length prefix widened to 8 bytes; v7/streaming remain at 4
+
+**Status:** fixed in the v8 block-mode construction; residuals below are
+accepted and documented.
+
+The third-round audit (`docs/audit_mitigation_responses.md`, V3-CVF1) found
+that `docs/napseq-eprint-v3.tex` tagged over `be8(|A|)` on encryption but
+`be4(|A|)` on decryption. The document has been corrected to `be8`
+everywhere (the tag input is now stated once, as `TagIn(A, B~)`), and the
+v8 block-mode code in `napqes.py`, `rust/src/lib.rs` and `C/napqes.c` has
+been widened to match, in both domain `0x03` (auth tag) and domain `0x0A`
+(synthetic nonce). No shipped implementation was ever vulnerable to the
+forgery the finding describes: all three used 4 bytes on *both* sides.
+
+**Residual 1 — dual width across formats.** Only v8 block mode uses the
+8-byte prefix. Legacy v7 block mode and the streaming-AE domains
+`0x08`/`0x09` still use a 4-byte prefix, deliberately, so that existing v7
+and streaming ciphertexts stay verifiable. There is no in-band indicator of
+which width a given ciphertext used; per the CVF7 format-selection
+philosophy, callers must agree out-of-band on the format, exactly as they
+already must for the key schedule. A caller who supplies AAD longer than
+`2^32 - 1` bytes to the v7 or streaming APIs would silently truncate the
+length field; the v8 APIs are unaffected up to the declared `|A| < 2^64`.
+
+**Residual 2 — v8 ciphertexts are not backward compatible.** Both the tag
+and the synthetic nonce change, so every byte of a v8 ciphertext changes.
+v8 ciphertexts produced before this fix will fail authentication under the
+current code, and there is no version discriminator inside a v8 ciphertext
+to distinguish "old format" from "tampered".
+
+**Residual 3 — RESOLVED (2026-08-14). The C implementation is now
+compile-verified.** MSVC 14.44 (Visual Studio 2022) was located in the
+maintainer environment, and `C/napqes.c` compiles clean at `/W3 /O2` and at
+`/W4 /Od /RTC1`. Its output was compared byte-for-byte against the Python
+reference: v7 vector V002 (via `napqes_encrypt_bytes_with_nonce`) and v8
+vectors W001/W003/W012 from `tests/kat/v8_vectors.json` all match exactly,
+and all four round-trip. See the follow-up note on `C/test_kats.c` below.
+
+**Residual 4 — RESOLVED (2026-08-14). Rust v8 is now byte-compatible with
+Python/C v8.** See "V3-CVF1 follow-up" immediately below.
+
+## V3-CVF1 follow-up — Rust/C v8 brought to byte parity with the Python reference
+
+Two v8 divergences were found while verifying the V3-CVF1 fix. Neither was
+caused by that fix; both predate it, and both were invisible to the test
+suite because the KAT corpus (`tests/kat/v6_vectors.json`) covered only v7
+and streaming-AE. Both are now fixed, and the gap that hid them is closed.
+
+**Divergence 1 — Rust never derived the domain-`0x0B` format subkey.**
+`rust/src/lib.rs` keyed every v8 derivation (synthetic nonce, noise
+probability, padding, noise positions, noise characters, both addend
+domains, the `0x07` keystream and the `0x03` tag) with `sk` directly, while
+`napqes.py` and `C/napqes.c` first derive
+`sk_fmt = HMAC(sk, 0x0B ‖ FORMAT_BLOCK_V8)` and key everything with that.
+Rust v8 ciphertexts were therefore the correct *length* but the wrong
+*bytes*, and could not be decrypted by any other implementation. Fixed by
+adding `derive_format_subkey` plus the `FORMAT_BLOCK_V8` /
+`FORMAT_STREAM_AE_V8` identifiers, and threading `sk_fmt` through
+`encrypt_bytes_v8` and `decrypt_bytes_v8`.
+
+Security note: the missing subkey did not weaken v8 in isolation — `sk` is
+itself a uniformly random 256-bit HMAC key — but it removed the
+cross-format binding that domain `0x0B` exists to provide, so a v8
+block-mode tag and a streaming-AE tag computed under the same `(primes,
+sk)` shared one effective key.
+
+**Divergence 2 — Rust and C short-circuited the empty message.**
+`encrypt_bytes_v8("")` returned empty bytes in Rust, and
+`napqes_encrypt_bytes_v8`/`napqes_encrypt_str_v8` returned an empty buffer
+in C, while `napqes.py` pads the empty string through the normal path and
+emits a full 2928-byte authenticated ciphertext (the documented v8
+minimum). The short-circuit produced an unauthenticated, trivially forgeable
+"ciphertext" for the empty plaintext and made the empty message the one
+input whose length leaked exactly. The matching `decrypt` shortcuts
+(`ciphertext.is_empty() -> Ok("")`, `ct_len == 0 -> ""`) accepted a
+zero-byte ciphertext as a valid encryption of the empty string — a trivial
+forgery. All four shortcuts were removed; a zero-length or undersized
+ciphertext is now a parse error in every implementation.
+
+**Coverage added.** `tests/gen_kats_v8.py` generates
+`tests/kat/v8_vectors.json` (12 positive + 5 negative vectors) directly
+from the public `encrypt_bytes_v8` API — v8 is deterministic in
+`(primes, sk, aad, message)`, so no KAT-only nonce-injection entry point is
+needed. `W001` pins the padded empty-message behaviour and `W011` pins the
+8-byte AAD length prefix. The corpus is checked by
+`tests/test_kats.py` (Python) and `rust/src/kat_cross_check.rs` (Rust,
+byte-exact encrypt + decrypt + negative), and regenerated under
+`--check` in CI.
+
+**Residual — `C/test_kats.c` does not run correctly on Windows/MSVC.** The
+C *library* is byte-exact (verified directly, see Residual 3 above), but
+the C KAT *harness* reports 41 spurious failures when built with MSVC: the
+`ciphertext_hex` / `nonce_hex` values it recovers from the JSON belong to
+the previous vector and are truncated, so every positive vector fails on
+both the decrypt and re-encrypt checks while all eight negative vectors
+pass. The harness's hand-rolled JSON reader is the suspect; the defect is
+not in `C/napqes.c`, is not triggered by the `/RTC1` runtime checks, and
+predates this work (a build from the pre-fix `HEAD` fails identically).
+`tests/test_cross_lang.py::test_c_kat_harness_passes` skips when no
+compiler is on `PATH`, which is why this was never observed. The harness
+should be replaced with a real JSON parser, or the C corpus checked the way
+`tests/kat/v8_vectors.json` is checked, before any Windows-hosted audit
+relies on it.
+
+---
+
+## V3-CVF2 — The 160x expansion buys no theorem; length hiding comes from the padding bucket alone
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF2 (third-round ABDK Consulting audit, 2026-08-08, "NAPQES v3 — AEAD Scheme Audit," Report 0.2) |
+| **Category** | Documentation / Algorithm |
+| **Severity** | Medium |
+| **Affects** | `rem:key-roles`, `tab:comparison` and the caveats section of `docs/napseq-eprint-v3.tex`; `CAV-003` and `CAV-004` above; `docs/SECURITY_TARGET.md` 2.2; `comparator.py`; all commercial collateral asserting traffic-analysis resistance |
+| **Owner** | TBD |
+| **Status** | **Fixed** (2026-08-13) — property restated and proved; residual disclosed below |
+| **Risk retired** | Partially — the *claim* is now correct; the *cost* remains |
+
+**Description.** The paper justified `K = 10` on traffic-analysis grounds
+while citing a lemma (`lem:length-det`) that proves ciphertext length depends
+on the message *only* through the padding bucket — i.e. the citation pointed
+at evidence against the claim. The auditor asked us either to delete the
+justification or to state and prove whatever property the multi-prime layer
+actually provides, against a defined adversary, and to compare the
+construction with the same construction minus the arithmetic layer.
+
+**Resolution.** We did both. `Theorem "LH-IND-CPA-det"` now states and proves
+a real length-hiding property (challenge plaintexts need only share a bucket,
+not a length) at the same bound as IND-CPA-det, and
+`Corollary "Quantified length leakage"` bounds the leak at `log2(13) ~= 3.70`
+bits per message. But the property belongs to the **padding map**, not to the
+arithmetic layer: `|C| = 48 + 160(B+2)` is a *public injective* function of
+the bucket, so multiplying by 160 leaks exactly as much as multiplying by 1
+(`Proposition "Expansion is length-neutral"`). `Section "The Construction
+Without the Arithmetic Layer"` specifies NAPQES-L and proves all four
+theorems hold verbatim with the layer deleted, at `48 + 3(B+2)` bytes —
+102 bytes minimum against 2,928.
+
+**Residual (accepted, not fixed).** The 160x expansion is retained for
+patent- and interoperability reasons and is **not justified by any theorem**.
+Deployments choosing NAPQES over AES-GCM on traffic-analysis grounds should
+understand that the relevant knob is the padding profile, not the expansion:
+`pad_profile=("frame", F)` takes the leak to exactly zero at no wire-format
+cost, while the default `bucket` profile leaves a specific short-vs-long
+distinguisher succeeding with probability 1.0 (measured;
+`traffic_analysis_bench.py`).
+
+**Implementation status.** All three profiles are implemented in all three
+languages: Python (`pad_profile=` on `encrypt_bytes_v8`/`encrypt_str_v8`),
+Rust (`encrypt_bytes_v8_with_profile`, `PadProfile`), and C
+(`napqes_encrypt_bytes_v8_profiled` / `napqes_encrypt_str_v8_profiled`,
+`napqes_pad_profile_t`; a NULL profile selects `bucket`). The profile is a
+sender-side parameter, is never transmitted, and the decoder is
+profile-agnostic — every profile draws B from the same 13-element set
+`{2^4, ..., 2^16}`. No KAT or cross-language parity test is affected, since
+`bucket` is byte-identical to the previous behaviour in all three
+(verified: 276 Python tests, 93 Rust tests, 33 C KATs).
+
+**Residual (beyond-model).** The nonce-collision degradation argument in
+`Section "What the Arithmetic Layer Does and Does Not Buy"` is explicitly
+labelled as *not* a security property. It admits no bound we can state and
+must not be relied on.
+
+## V3-CVF6 — The C port is byte-oriented; Python and Rust are codepoint-oriented
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF6 (third-round ABDK Consulting audit, 2026-08-08, Report 0.2) |
+| **Category** | Cross-implementation divergence |
+| **Severity** | Medium |
+| **Affects** | `C/napqes.c` v8 encode path vs `napqes.py` and `rust/src/lib.rs`; any deployment mixing the C port with the Python or Rust implementations on non-ASCII plaintext |
+| **Owner** | TBD |
+| **Status** | **Documented, not fixed** (2026-08-15) — deliberate |
+| **Risk retired** | No |
+
+**Description.** The message space is now normatively defined as Unicode
+**scalar values** — codepoints excluding the surrogate range U+D800-U+DFFF,
+which is excluded because a surrogate has no UTF-8 encoding and the
+synthetic nonce is therefore undefined on it. `napqes.py` iterates `ord(c)`
+and `rust/src/lib.rs` iterates `chars()`, so both implement that domain.
+`C/napqes.c` does `cp[i] = (uint8_t)message[i]`, i.e. it maps each **byte**
+of the input to a token.
+
+The three implementations therefore produce byte-identical ciphertext only
+for **ASCII** plaintext. On any input containing a codepoint above U+007F,
+the C port emits a different token sequence (one token per UTF-8 byte
+rather than one per codepoint), a different ciphertext length, and a
+different tag. A C-encrypted non-ASCII message will not decrypt under the
+Python or Rust implementations, and vice versa.
+
+**Why it is not fixed.** Aligning the C port would change the wire format
+for all non-ASCII plaintext and invalidate every deployed ciphertext
+produced by it. That is a breaking change and must be scheduled
+deliberately, not folded into an audit-remediation pass.
+
+**Mitigation.** Deployments that mix the C port with the Python or Rust
+implementations must restrict plaintext to ASCII, or must use a single
+implementation on both ends. The divergence is recorded in the paper as
+`Remark "Implementation domains"` (`rem:impl-domain`) and in the
+`Known Caveats` section as `Message domain and the C port`.
+
+**Also shipped under this finding.** `napqes.py` now rejects surrogate
+codepoints explicitly (`_validate_message_domain`, called from
+`encrypt_bytes_v8`) rather than failing later with an opaque UTF-8 encoding
+error. The token-fit obligation is discharged in the paper
+(`rem:token-fit`): the largest possible token is `11,029,707,685,887`
+(about `2^43.33`), leaving over `1.6 x 10^6` of headroom in the 64-bit
+field.
+
+## V3-CVF12 — Keys generated before 2026-08-15 may hold primes outside the normative interval
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF12 (third-round ABDK Consulting audit, 2026-08-08, Report 0.2) |
+| **Category** | Key compatibility |
+| **Severity** | Low |
+| **Affects** | Any `k` produced by `napqes.generate_prime_numbers` / `generate_v8_key` or their Rust and C equivalents before this change |
+| **Owner** | TBD |
+| **Status** | **Fixed with a compatibility guard** (2026-08-15) |
+| **Risk retired** | Yes (no security impact) |
+
+**Description.** The normative prime interval is `P = [10^6, 9.9 x 10^6]`,
+with `|P| = 579,947` (sieve-verified; both endpoints are composite). Before
+this change, `napqes.py` defaulted to `[10^6, 1.5 x 10^7]` and the Rust and
+C call sites used `[10^6, 9,999,999]`. All generators are now unified at
+`[1,000,000, 9,900,000]` via `MIN_KEY_PRIME` / `MAX_KEY_PRIME` (Python),
+`MIN_KEY_PRIME` / `MAX_KEY_PRIME` (Rust), and `NAPQES_MIN_KEY_PRIME` /
+`NAPQES_MAX_KEY_PRIME` (C).
+
+**Compatibility guard.** Only **generation** was narrowed. `_validate_key`
+and every decryption path still accept any prime `>= MIN_KEY_PRIME`, so
+existing keys containing primes in `(9.9 x 10^6, 1.5 x 10^7]` continue to
+work unchanged. The wire format is unaffected and no KAT vector changed.
+
+**Residual.** Such keys are **not conformant** to the normative interval
+and will not be reproduced by the current generator. There is no security
+impact — their entropy is higher, not lower — but a conformance checker
+will flag them. Regenerate at the next scheduled key rotation.
+
+**Out of scope.** `napqes_kem.py` and `rust/src/kem.rs` deliberately retain
+`[10^6, 1.5 x 10^7]` with `K = 13`. That is a separate v6 FrodoKEM
+component, internally consistent, and not the scheme this audit round
+covers. Do not "unify" it without a separate decision.
+
+**Derived figures, recomputed.** `log_2 P(579947, 10) = 191.4555`;
+post-Grover `95.7278`; key space `4.304 x 10^57`. The paper's previous
+`~586,000 / 2^191.6 / 2^95.8 / 4.8 x 10^57` were the figures for an upper
+bound of `10^7`, not `9.9 x 10^6`.
+
+## V3-CVF14 / V3-CVF24 — Only the tag comparison is constant-time
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF14, V3-CVF24 (third-round ABDK Consulting audit, 2026-08-08, Report 0.2) |
+| **Category** | Side channels |
+| **Severity** | Medium |
+| **Affects** | All three reference implementations; any deployment where an adversary can measure encryption or decryption time on inputs it influences |
+| **Owner** | TBD |
+| **Status** | **Documented, not fixed** (2026-08-15) |
+| **Risk retired** | No |
+
+**Description.** Every claim in the paper's security section is a black-box
+statement. Side channels — wall-clock time, cache state, branch predictor
+state, power, EM — are explicitly outside that model and no theorem says
+anything about them.
+
+**Constant-time.** Tag comparison only: `hmac.compare_digest` (Python),
+`constant_time_eq` from `subtle` (Rust), and an OR-accumulator loop (C).
+This is the property that matters for forgery attempts, since it prevents
+byte-at-a-time tag search. The C accumulator is **not** declared
+`volatile`, so nothing in the C standard prevents an aggressive compiler
+from reintroducing an early exit.
+
+**Not constant-time.**
+
+- The token-emission and token-inversion loops iterate a noise-dependent
+  number of times.
+- Both directions perform integer division by a key element; division
+  latency is data-dependent on many microarchitectures.
+- The padding loop performs `B - n` derivations, so encryption time depends
+  on the **exact** codepoint count `n`, not merely on its padding bucket
+  `B`. A timing channel can therefore in principle reveal more about the
+  message length than the `log_2 13 ~ 3.70` bits that ciphertext length
+  leaks (see `CAV-003` / V3-CVF2).
+- The Python reference implementation offers no timing guarantees of any
+  kind.
+- The structural checks added under V3-CVF8 reject at different points and
+  in different time. They are reachable only after the tag verifies, i.e.
+  only by a party already holding `sk`, so this is not an oracle for an
+  outside adversary.
+
+**What an attacker gets.** A precise timing channel against a decrypting
+party may reveal something about the noise realisation, hence about
+`theta(N)` and indirectly about `N`. `N` is transmitted in the clear in any
+case, so this particular leak is not by itself a break — but **no bound is
+offered** on what else such a channel exposes.
+
+**Mitigation.** `docs/DUDECT_ATTESTATION.md` covers the tag comparison
+only. A TVLA or dudect study of the full encode/decode path is future work.
+Until then, do not deploy NAPQES where an adversary can measure
+encryption or decryption timing on attacker-influenced inputs.
+
+## V3-CVF21 — The per-key data limit is not enforced in code
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF21 (third-round ABDK Consulting audit, 2026-08-08, Report 0.2) |
+| **Category** | Operational limit |
+| **Severity** | Low |
+| **Affects** | All three reference implementations; the wire format |
+| **Owner** | TBD |
+| **Status** | **Documented, not enforced** (2026-08-15) |
+| **Risk retired** | No |
+
+**Description.** The `q^2 / 2^128` term in the IND-CPA and IND-CCA theorems
+is an ordinary **birthday bound** over the 128-bit synthetic nonce. NAPQES
+therefore has a data-complexity limit of roughly `2^64` encryptions per
+key, the same order as any 128-bit-nonce AEAD. Synthetic nonce derivation
+removes the *caller-error* and *DRBG-failure* routes to nonce reuse; it
+does **not** remove the birthday bound, and earlier text that described the
+event as "a negligible HMAC-SHA256 collision rather than a birthday-bound
+event" has been corrected.
+
+**Recommended cap.** `q <= 2^48` encryptions per `(k, sk)` pair, at which
+the term is `2^-32`, followed by rekeying.
+
+**Residual.** Neither the reference implementations nor the wire format
+count encryptions or refuse to continue past a threshold. Enforcement is a
+**deployment obligation**. Key-management guidance is in
+`docs/fips/KEY_MANAGEMENT.md`.
+
+## V3-CVF9 — NAPQES is not tidy: valid ciphertexts are not unique per (A, M)
+
+| Field | Value |
+|---|---|
+| **ID** | V3-CVF9 (third-round ABDK Consulting audit, 2026-08-08, Report 0.2) |
+| **Category** | Protocol composition |
+| **Severity** | Low |
+| **Affects** | Any protocol built on NAPQES that treats ciphertext equality as a proxy for plaintext equality |
+| **Owner** | TBD |
+| **Status** | **Documented, deliberate** (2026-08-15) |
+| **Risk retired** | No |
+
+**Description.** `Dec` reads `N` from the ciphertext rather than
+re-deriving it from `(A, M)`. A holder of `sk` can therefore pick an
+arbitrary `N' != N`, rebuild the masked blob and the tag under it, and
+obtain a second, equally valid ciphertext for the same plaintext. `Enc` is
+a function, but `Dec` is **not injective** on valid ciphertexts, so NAPQES
+is not *tidy* in the sense of Namprempre-Rogaway-Shrimpton.
+
+**Why it is deliberate.** Adding the re-derivation check would give
+ciphertext uniqueness and make the RFC 5297 analogy exact, but it would
+make `Dec` depend on the plaintext it is recovering, cost an extra HMAC
+over the recovered plaintext, and require a decoder change in three
+languages. No theorem in the paper needs the property: INT-CTXT measures
+freshness over the submitted pair `(c, A)`, not over the underlying
+plaintext, so an alternative encoding of an already-queried message is a
+legitimate forgery attempt and is counted as one.
+
+**Mitigation.** Do **not** build deduplication, replay detection by
+ciphertext hash, or equality-preserving storage on NAPQES ciphertexts
+without an external mechanism. Documented in the paper as
+`Remark "Valid ciphertexts are not unique per (A, M)"` (`rem:not-unique`).
+

@@ -35,7 +35,7 @@ is frozen and cross-implementation compatible.
 | **AEAD (auth + encryption)** | Yes | Yes | Yes |
 | **Post-Grover security** | ~128 bits (AES-256) | ~128 bits | ~128.5 bits (K=13 elements) |
 | **Algebraic structure** | Yes (GF(2⁸) operations) | Partial (modular add) | **None** |
-| **Noise / traffic-analysis layer** | No | No | **Yes** (structured noise tokens) |
+| **Bounded ciphertext-length leakage** | No (leaks length exactly) | No (leaks length exactly) | **Yes** (≤3.70 bits; 0 with fixed-frame profile) |
 | **Key format** | 32 opaque bytes | 32 opaque bytes | **Ordered list of prime integers** |
 | **Ciphertext overhead vs plaintext** | ~1× (minimal) | ~1× (minimal) | 8–20× (noise tokens by design) |
 | **NIST standardised** | Yes (FIPS 197) | RFC 8439 / NIST SP 800-38A | **Not yet** (but uses FIPS primitives) |
@@ -142,7 +142,7 @@ The operations centre rejects any frame that fails authentication — a falsifie
 
 ---
 
-## Advantage 3 — Structured Noise Token Layer
+## Advantage 3 — Bounded Ciphertext-Length Leakage
 
 ### Why it matters for executives
 
@@ -152,9 +152,11 @@ Even a perfectly secure cipher leaks **metadata** through ciphertext patterns:
 - Repeated identical messages may produce recognisable patterns.
 - Traffic volume and timing reveal communication rhythms.
 
-AES-GCM and ChaCha20-Poly1305 provide no noise layer — ciphertext length equals plaintext length plus a small fixed overhead. An observer watching an encrypted channel can infer message sizes, frequency, and timing.
+AES-GCM and ChaCha20-Poly1305 address none of this: ciphertext length equals plaintext length plus a small fixed overhead, so the plaintext length is disclosed in full.
 
-NAPQES injects **HMAC-derived noise tokens** into every ciphertext. The noise probability is 75–99% (key-derived per message), and all tokens — real and noise — are statistically indistinguishable without the key.
+NAPQES pads every message into a size bucket before encryption. Ciphertext length is then a deterministic function of that bucket alone — provably independent of the message content and of the key (Theorem "LH-IND-CPA-det", `docs/napseq-eprint-v3.tex`). The result is a *bound*: at most 3.70 bits of length information per message under the default profile, and exactly zero under the fixed-frame profile.
+
+**What this is not.** The HMAC-derived noise tokens are not the source of this property, and neither is the ciphertext expansion. Length confidentiality comes from the coarseness of the padding ladder; the noise layer is padded to a fixed per-bucket ceiling precisely so that it *does not* leak. Timing and volume-over-time remain transport-layer concerns and are out of scope.
 
 ### Concrete example — Sovereign wealth fund LNG terminal acquisition (Finance / Energy)
 
@@ -179,35 +181,40 @@ On the morning of March 14th, the SIGINT service observes a burst of 19-byte mes
 No encryption was broken. The attack was entirely on **ciphertext length patterns**.
 
 **The NAPQES deployment.**
-The fund's security architect proposes replacing the inner layer with NAPQES. Under NAPQES, every message — regardless of plaintext length — is padded into a power-of-two token bucket and filled with HMAC-derived noise tokens that are statistically indistinguishable from real tokens without the key.
+The fund's security architect proposes replacing the inner layer with NAPQES. Under NAPQES, every message — regardless of plaintext length — is padded into a size bucket before encryption, and the ciphertext length is a deterministic function of that bucket and of nothing else: not the content, not the key. Which bucket ladder applies is a sender-side deployment parameter, the *padding profile*. Because the fund's threat model is length fingerprinting, the architect selects the **fixed-frame** profile, which collapses the ladder to a single size.
 
 ```python
-fund_key = [1031033, 5100019, 7829341, 9876547, 2345681,
-            3456791, 4567891, 6789013, 8901237, 1234567]
+primes, sk = load_fund_key()          # ordered prime tuple + 32-byte derivation secret
+FRAME = ("frame", 512)                 # one reachable size, chosen once, out of band
 
-# Three messages with radically different plaintext lengths
-c1 = encrypt("BID",                                         fund_key)
-c2 = encrypt("PROCEED WITH EUR 2.1B OFFER ON GATE TERM3",   fund_key)
-c3 = encrypt("BOARD RESOLUTION REF 2026-LNG-047: APPROVED", fund_key)
+c1 = encrypt_str_v8("BID",                                       primes, sk, pad_profile=FRAME)
+c2 = encrypt_str_v8("PROCEED WITH EUR 2.1B OFFER ON GATE TERM3", primes, sk, pad_profile=FRAME)
+c3 = encrypt_str_v8("BOARD RESOLUTION REF 2026-LNG-047: APPROVED", primes, sk, pad_profile=FRAME)
 
-# All three land in the same 16-token noise bucket
-# Observed ciphertext lengths: ~320 B, ~320 B, ~320 B
-# Traffic pattern reveals: nothing
-print(len(c1), len(c2), len(c3))  # identical bucket sizes
+# Measured ciphertext lengths: 82 288 B, 82 288 B, 82 288 B
+# Under the DEFAULT bucket profile these would have been
+# 2 928 B, 10 608 B, 10 608 B — still distinguishable.
 ```
 
-The SIGINT analyst's length-fingerprint database becomes useless. Every message on the channel looks identical from the outside — a uniform stream of noise-padded 320-byte blobs, indistinguishable in length, content, or traffic pattern.
+Under the fixed-frame profile the SIGINT analyst's length-fingerprint database becomes useless: every message on the channel is exactly the same size, and the mutual information between plaintext length and ciphertext length is **exactly zero**, not merely small. The receiver needs no change — decryption does not take a profile argument.
 
-> **Honest limitation:** The power-of-two bucket boundary is observable.
-> A 1-character message and a 255-character message may land in the same
-> bucket, but a 257-character message lands in the next bucket (32 tokens
-> ≈ 640 B). Full length-hiding requires the fixed-frame transport option
-> planned for Phase 5 (CAV-003). The fund's security team accepts the
-> current bucket-level leakage as acceptable given that all acquisition
-> commands are short and land in the same 16-token bucket.
+> **Honest limitation — corrected 2026-08-13 (V3-CVF2).** An earlier revision
+> of this brief claimed the *default* profile made all three messages
+> indistinguishable. That was false, and we found it by measurement rather
+> than by argument (`traffic_analysis_bench.py`). Under the default `bucket`
+> profile a 3-character message and a 41-character message land in different
+> buckets and therefore in ciphertexts of 2,928 and 10,608 bytes; a
+> short-command-versus-full-parameters distinguisher succeeds with
+> probability **1.0**. What the default profile does guarantee is a *bound*:
+> at most `log₂13 ≈ 3.70` bits of length information per message, against
+> `H(n)` bits — all of it — for AES-GCM. Reducing that to zero requires
+> selecting `frame(F)` explicitly, as above.
 >
-> **Bandwidth note (CAV-004):** NAPQES ciphertexts are 8–20× larger than
-> AES-GCM. On the fund's 100 Mbit/s leased line, this is operationally
+> **Bandwidth note (CAV-004):** NAPQES ciphertexts are far larger than
+> AES-GCM — 160 bytes per plaintext codepoint, so 82 KB per message at
+> `frame(512)`. This expansion is a cost of the token construction and buys
+> no security property on its own; the length guarantee comes from the
+> padding profile. On the fund's 100 Mbit/s leased line it is operationally
 > irrelevant — the fund sends dozens of messages per day, not gigabytes.
 
 ---
@@ -417,7 +424,7 @@ NAPQES's post-quantum positioning is **concrete and meets the 128-bit target**:
 | Scenario | Recommendation |
 |---|---|
 | IoT / embedded without AES-NI | NAPQES — no hardware dependency |
-| Traffic-analysis-sensitive messaging (financial signals, command & control) | NAPQES — noise token layer |
+| Traffic-analysis-sensitive messaging (financial signals, command & control) | NAPQES — fixed-frame padding profile |
 | Regulated environment requiring FIPS 140-3 validation today | Use validated AES-256-GCM module; while waiting for NAPQES review and validation |
 | High-throughput bulk data encryption | AES-256-GCM (NAPQES 8–20× expansion is a constraint) |
 | Post-quantum key exchange | Neither — use ML-KEM (FIPS 203) for key establishment |
@@ -433,12 +440,14 @@ ChaCha20-Poly1305:
 1. **No algebraic structure** — removes the attack surface that Shor-family
    quantum algorithms and algebraic cryptanalysis target in block and stream ciphers.
 
-2. **Noise-token traffic-analysis-resistance layer** — actively resists traffic
-   analysis and length-correlation attacks that AES/ChaCha20 ciphertexts are
-   transparent to. (Per audit finding CVF4, this is a length-decorrelation
-   property, not a second content-confidentiality mechanism — confidentiality
-   is carried entirely by the domain-`0x07` keystream and the `0x03` HMAC tag;
-   see `docs/CAVEATS.md` CVF4/CAV-004.)
+2. **Bounded ciphertext-length leakage** — length-correlation attacks that
+   AES/ChaCha20 ciphertexts are transparent to are bounded at ≤3.70 bits per
+   message, and eliminated entirely under the fixed-frame padding profile.
+   (Per audit findings CVF4 and V3-CVF2, this is a length property, not a
+   second content-confidentiality mechanism — confidentiality is carried
+   entirely by the domain-`0x07` keystream and the `0x03` HMAC tag — and it
+   comes from the *padding ladder*, not from the noise tokens or the
+   ciphertext expansion; see `docs/CAVEATS.md` CVF4/CAV-004/V3-CVF2.)
 
 3. **Pure HMAC-SHA256 foundation** — reduces the trusted primitive surface to
    a single, universally deployed, 25-year-hardened construction.

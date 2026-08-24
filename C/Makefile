@@ -2,7 +2,12 @@
 # Targets: napqes_demo (default), clean.
 
 CC      ?= cc
-CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
+# -ffp-contract=off: the legacy v7 noise schedule still derives its threshold
+# in IEEE-754 double. Contracting `0.75 + t * (0.99 - 0.75)` into an FMA drops
+# a rounding step, which changes the threshold by 1 ULP on FMA-capable targets
+# and desynchronises this port from the Python and Rust ones. The v8 schedule
+# is integer-only and unaffected.
+CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -ffp-contract=off
 LDFLAGS ?=
 LDLIBS  ?=
 
