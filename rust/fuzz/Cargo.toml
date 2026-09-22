@@ -14,11 +14,31 @@ libfuzzer-sys = "0.4"
 path = ".."
 
 # Cargo-fuzz requires nightly.  Build with:
-#   cargo +nightly fuzz run decode_bytes -- -max_total_time=300
-# Corpus is stored in fuzz/corpus/decode_bytes/ (created on first run).
+#   cargo +nightly fuzz run decode_bytes  -- -max_total_time=300
+#   cargo +nightly fuzz run validate_key  -- -max_total_time=60
+#   cargo +nightly fuzz run unauth_decode -- -max_total_time=120
+# Corpus is stored in fuzz/corpus/<target>/ (created on first run).
 
 [[bin]]
 name = "decode_bytes"
 path = "fuzz_targets/decode_bytes.rs"
+test = false
+doc = false
+
+# CVF-22: validate_key surface — the CVF-15 fix wired validate_key into
+# every v7 entry point; this target proves the reject-path panics-free
+# for any adversarial &[u64] key.
+[[bin]]
+name = "validate_key"
+path = "fuzz_targets/validate_key.rs"
+test = false
+doc = false
+
+# CVF-22: unauthenticated surface — pub fn decrypt takes a raw token
+# slice with no tag verification, so the fuzzer needs to demonstrate
+# it cannot panic even on adversarial input.
+[[bin]]
+name = "unauth_decode"
+path = "fuzz_targets/unauth_decode.rs"
 test = false
 doc = false

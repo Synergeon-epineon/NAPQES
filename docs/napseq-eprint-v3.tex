@@ -63,15 +63,26 @@ algorithm; its post-quantum posture is governed by Grover search alone
 (Section~\ref{sec:pq}).  The construction keys two independently sampled
 secrets: an
 arithmetic-layer key $\mathbf{k}$, an ordered tuple of primes driving a
-prime-indexed token cipher, and a uniform 256-bit secret $\mathsf{sk}$ that
-keys every HMAC domain derivation used for noise injection, plaintext
-padding, keystream masking, and message authentication. The nonce is
+prime-indexed token cipher, and a uniform 256-bit secret $\mathsf{sk}$.
+From $\mathsf{sk}$, a per-wire-format subkey
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},
+\texttt{0x0B}\|\mathrm{format\_id})$ is derived once (domain
+$\texttt{0x0B}$; format $\texttt{0x01}$ for the block mode specified in
+this paper, Section~\ref{sec:domains}), and every subsequent HMAC domain
+derivation used for noise injection, plaintext padding, keystream
+masking, message authentication, and synthetic-nonce derivation is keyed
+by $\mathsf{sk}_{\mathrm{fmt}}$. This layer binds every derivation to
+one wire format so that a tag produced under one format cannot verify
+under another sharing the same $(\mathbf{k},\mathsf{sk})$. The nonce is
 derived synthetically as
-$N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)[0{:}16]$,
+$N=\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)[0{:}16]$,
 in
 the manner of AES-GCM-SIV, rather than sampled independently at random.
-Because $\mathbf{k}$ and $\mathsf{sk}$ are sampled independently and only
-$\mathsf{sk}$ ever keys an HMAC call, we prove IND-CPA-det (the
+Because $\mathbf{k}$ and $\mathsf{sk}$ are sampled independently and the
+only HMAC calls in the construction are keyed either by $\mathsf{sk}$
+(the single $\texttt{0x0B}$ format-subkey call) or by the
+$\mathsf{sk}$-derived $\mathsf{sk}_{\mathrm{fmt}}$ (every other domain),
+we prove IND-CPA-det (the
 restricted-query notion appropriate to a deterministic, misuse-resistant
 scheme's synthetic nonce), INT-CTXT, and IND-CCA-det security
 (Theorems~\ref{thm:ind-cpa}, \ref{thm:int-ctxt}, \ref{thm:ind-cca}) under
@@ -134,7 +145,7 @@ remaining far above all recommended thresholds.
         independent HMAC-domain-derivation secret $\mathsf{sk}$ and
         arithmetic-layer key $\mathbf{k}$, sampled independently, together
         with a synthetic, message-bound nonce
-        $N=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)$
+        $N=\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)$
         (Definition~\ref{def:synthnonce}) and a fixed-width, per-bucket-ceiling
         wire format (Section~\ref{sec:wire-format}) under which ciphertext
         length depends only on the padded-length bucket.
@@ -254,12 +265,16 @@ Throughout this paper:
   \item $[0{:}n]_{\mathrm{be}k}$ denotes the first $n$ bytes of a 32-byte
         HMAC-SHA256 digest, interpreted as an unsigned big-endian integer
         in $[0,2^{k})$ where $k=8n$.
-  \item $\mathcal{P}$ denotes the set of prime integers in $[10^6, 9.9 \times 10^6]$,
-        a fixed public system parameter with $|\mathcal{P}| = 579{,}947$
-        (verified by sieve; the interval is inclusive at both ends, and both
-        endpoints are composite). Implementations MUST use this interval:
+  \item $\mathcal{P}$ denotes the set of prime integers in $[10^6, 1.5 \times 10^7)$,
+        a fixed public system parameter with $|\mathcal{P}| = 892{,}206$
+        (verified by sieve; the interval is half-open, equivalently the
+        inclusive interval $[10^6, 14{,}999{,}999]$, and both endpoints are
+        composite). Implementations MUST use this interval:
         a different upper bound yields a different $\mathcal{P}$, a
         different canonical enumeration, and hence different keys.
+        This is the same prime set from which the key-establishment layer
+        (Section~\ref{sec:keygen}) draws, so the AEAD and the KEM share one
+        parameter set.
 \end{itemize}
 
 \subsection{Key Generation}
@@ -271,7 +286,7 @@ $\mathsf{KeyGen}(1^\lambda)$ as follows.
 \begin{definition}[Key generation]\label{def:keygen}
 Draw $\mathbf{k} = (k_1,\ldots,k_K)$, an ordered tuple of $K$ distinct
 primes sampled uniformly, without replacement, from $\mathcal{P}$ via a
-cryptographically secure DRBG (default $K=10$); \emph{independently}, draw
+cryptographically secure DRBG (default $K=13$); \emph{independently}, draw
 $\mathsf{sk}\xleftarrow{\$}\{0,1\}^{256}$ uniformly via a CSPRNG. No
 function relates $\mathsf{sk}$ to $\mathbf{k}$. The serialised arithmetic
 key is
@@ -300,12 +315,30 @@ $H_\infty(\mathbf{k})$ computation below.
 
 The min-entropy of $\mathbf{k}$ as sampled above is
 \[
-  H_\infty(\mathbf{k}) = \log_2\!\left(\frac{|\mathcal{P}|!}{(|\mathcal{P}|-K)!}\right) \approx K\log_2|\mathcal{P}| \approx 19.1456\,K \text{ bits},
+  H_\infty(\mathbf{k}) = \log_2\!\left(\frac{|\mathcal{P}|!}{(|\mathcal{P}|-K)!}\right) \approx K\log_2|\mathcal{P}| \approx 19.7670\,K \text{ bits},
 \]
-so $H_\infty(\mathbf{k}) = 191.46$ bits at the default $K=10$
-(key-space size $\approx 4.30\times10^{57}\approx 2^{191.46}$). All figures
-here are computed from the exact $|\mathcal{P}|=579{,}947$, not from an
+so $H_\infty(\mathbf{k}) = 256.9711$ bits at the default $K=13$
+(key-space size $\approx 2.27\times10^{77}\approx 2^{256.97}$), i.e.\
+$2^{128.4855}$ against a Grover search. All figures
+here are computed from the exact $|\mathcal{P}|=892{,}206$, not from an
 approximation to it.
+
+\begin{remark}[Choice of the ``PQ-128'' parameter set]\label{rem:pq128}
+The default $(\mathcal{P},K)$ is the smallest parameter set in this family
+reaching the $128$-bit post-quantum target. Raising $K$ alone is not
+sufficient: over the earlier interval $[10^6,9.9\times10^6]$
+($|\mathcal{P}|=579{,}947$, $19.1456$ bits per element) one has
+$H_\infty=248.89$ bits at $K=13$, i.e.\ only $124.45$ bits post-Grover.
+Widening the interval to $[10^6,1.5\times10^7)$ raises the per-element
+contribution to $19.7670$ bits and clears the target at the same $K=13$,
+while simultaneously unifying $\mathcal{P}$ with the interval already used
+by the key-establishment layer. Since $K$ affects neither the wire format
+nor the ciphertext length (Proposition~\ref{prop:expansion-neutral}), the
+only cost is stored key material, which grows from $5K+32=82$ to $97$
+bytes. Validation deliberately retains no upper bound on key elements
+beyond the $2^{40}$ serialisation limit, so keys provisioned under the
+earlier interval remain usable.
+\end{remark}
 
 \begin{remark}[The role of $\mathbf{k}$ and $\mathsf{sk}$ are not symmetric]
 \label{rem:key-roles}
@@ -326,13 +359,16 @@ the padding bucket alone; in particular $K$ makes no contribution to the
 length-hiding property of Section~\ref{sec:length-hiding}, and no claim of
 traffic-analysis resistance anywhere in this paper rests on $K$, on
 $H_\infty(\mathbf{k})$, or on the multi-prime structure
-(Remark~\ref{rem:coarsening-not-inflation}). $K=10$ is an interoperability
+(Remark~\ref{rem:coarsening-not-inflation}). $K=13$ is an interoperability
 default, not a security parameter: any $K\ge1$ is permitted by the
 construction, and both parties must agree on it out of band exactly as they
-agree on $\mathbf{k}$ itself. The reference implementations emit a warning
-below $K=7$; that threshold is inherited from the earlier single-secret
-schedule, in which $H_\infty(\mathbf{k})$ did enter the bound, and no
-theorem in this paper requires it. What the arithmetic layer is retained
+agree on $\mathbf{k}$ itself.\footnote{CVF-36: an earlier revision of this
+remark stated that ``the reference implementations emit a warning below
+$K=7$''. No delivered port implements such a warning, and the threshold was
+inherited from the earlier single-secret schedule (where
+$H_\infty(\mathbf{k})$ entered the bound); the sentence has been removed as
+Remark~\ref{rem:key-roles} already establishes that $K$ carries no
+security requirement in the v8 construction.} What the arithmetic layer is retained
 for instead is analysed in Section~\ref{sec:arith-layer-value}.
 Section~\ref{sec:caveats} discusses,
 conversely, what protecting $\mathbf{k}$ actually buys once $\mathsf{sk}$
@@ -342,16 +378,50 @@ is known.
 \subsection{Domain-Separated HMAC Derivation}
 \label{sec:domains}
 
-All internal values are computed as
+\paragraph{Per-wire-format subkey (domain $\texttt{0x0B}$).}
+Before any per-message derivation, a fixed \emph{format subkey}
+$\mathsf{sk}_{\mathrm{fmt}}$ is derived from $\mathsf{sk}$ under domain
+$\texttt{0x0B}$:
+\begin{definition}[Format subkey]\label{def:fmtkey}
 \[
-  \mathrm{Derive}_d(\mathsf{sk}, N, \mathsf{ctx}) = \mathrm{HMAC}(\mathsf{sk},\ d \| N \| \mathsf{ctx}),
+  \mathsf{sk}_{\mathrm{fmt}}
+    \;=\;
+  \mathrm{HMAC}\!\left(\mathsf{sk},\ \texttt{0x0B}\,\|\,\mathrm{format\_id}\right)
+    \;\in\;\{0,1\}^{256},
+\]
+where $\mathrm{format\_id}\in\{0,1\}^{8}$ is a 1-byte constant
+identifying the wire format. This paper specifies exactly one format,
+$\mathrm{format\_id}=\texttt{0x01}$ (block mode). The identifier
+$\mathrm{format\_id}=\texttt{0x02}$ is reserved for a streaming-AE
+format that is outside the scope of this paper
+(Section~\ref{sec:caveats}). Domain $\texttt{0x0B}$ takes no nonce and
+no context beyond the 1-byte identifier; the derivation is invoked once
+per key install, not per message.
+\end{definition}
+The purpose of this layer is \emph{cross-format tag separation}: because
+every subsequent HMAC call is keyed by $\mathsf{sk}_{\mathrm{fmt}}$
+rather than $\mathsf{sk}$, a tag or ciphertext produced under one
+$\mathrm{format\_id}$ cannot verify under another sharing the same
+$(\mathbf{k},\mathsf{sk})$. The ciphertext itself carries no
+$\mathrm{format\_id}$ byte on the wire — format selection is an
+out-of-band API contract — so a ciphertext produced under one format
+subkey simply fails the tag comparison at the receiver and is
+indistinguishable from a wrong-key ciphertext.
+
+\paragraph{Per-message derivations.}
+All \emph{other} internal values are computed as
+\[
+  \mathrm{Derive}_d(\mathsf{sk}_{\mathrm{fmt}}, N, \mathsf{ctx})
+    \;=\;
+  \mathrm{HMAC}\!\left(\mathsf{sk}_{\mathrm{fmt}},\ d\,\|\,N\,\|\,\mathsf{ctx}\right)
+  \qquad (d \neq \texttt{0x0B}),
 \]
 where $d$ is a 1-byte domain separator and every variable-width field
 inside $\mathsf{ctx}$ is length-prefixed (e.g.\ $\mathrm{be8}(|A|) \| A$
-for AAD $A$). Domain $\texttt{0x0A}$ is the single exception: it does not
-take a nonce as input, since it is the derivation that \emph{produces} the
-nonce (Definition~\ref{def:synthnonce}); its input shape is instead
-$\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$.
+for AAD $A$). Domain $\texttt{0x0A}$ is the single further exception: it
+does not take a nonce as input, since it is the derivation that
+\emph{produces} the nonce (Definition~\ref{def:synthnonce}); its input
+shape is instead $\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$.
 
 \begin{definition}[Tag input]\label{def:taginput}
 The authentication tag is always computed over the single quantity
@@ -382,37 +452,44 @@ Domain & Function & Context & Output \\
 \texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
 \texttt{0x07} & Keystream block & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
 \texttt{0x0A} & Synthetic nonce & $\mathrm{be8}(|A|) \| A \| M$ & 16 bytes \\
+\texttt{0x0B} & Format subkey & $\mathrm{format\_id}$ (1 byte, no nonce) & 32 bytes \\
 \bottomrule
 \end{tabular}
-\caption{Domain-separated HMAC derivation schedule. Every domain is keyed
-by $\mathsf{sk}$ only. The nonce $N$ is applied uniformly by
-$\mathrm{Derive}_d$ for $d\neq\texttt{0x0A}$ and is therefore omitted from
+\caption{Domain-separated HMAC derivation schedule. Domain
+$\texttt{0x0B}$ is keyed by $\mathsf{sk}$ and produces the format subkey
+$\mathsf{sk}_{\mathrm{fmt}}$ (Definition~\ref{def:fmtkey}); every other
+domain is keyed by $\mathsf{sk}_{\mathrm{fmt}}$, not by $\mathsf{sk}$
+directly. The nonce $N$ is applied uniformly by $\mathrm{Derive}_d$ for
+$d\notin\{\texttt{0x0A},\texttt{0x0B}\}$ and is therefore omitted from
 the Context column above.}
 \label{tab:domains}
 \end{table}
 
 \begin{lemma}[Domain separation]\label{lem:domsep}
-Write $\mathsf{enc}(d,N,\mathsf{ctx})$ for the HMAC-SHA256 input byte string
-that $\mathrm{Derive}_d(\mathsf{sk},N,\mathsf{ctx})$ keys $\mathsf{sk}$
-over, laid out as in Table~\ref{tab:domains}. Then $\mathsf{enc}$ is
-injective on its \emph{entire} argument domain: for any two argument
-tuples $(d_1,N_1,\mathsf{ctx}_1)\neq(d_2,N_2,\mathsf{ctx}_2)$ with each
-field drawn from its declared range, the two resulting HMAC-SHA256 inputs
-are distinct. The quantification is over all well-formed argument tuples,
+Write $\mathsf{enc}(d,N,\mathsf{ctx})$ for the HMAC-SHA256 input byte
+string that $\mathrm{Derive}_d(\cdot,N,\mathsf{ctx})$ keys HMAC over,
+laid out as in Table~\ref{tab:domains} (keyed by $\mathsf{sk}$ for
+$d=\texttt{0x0B}$ and by $\mathsf{sk}_{\mathrm{fmt}}$ for every other
+$d$; the key does not enter the encoding argument itself). Then
+$\mathsf{enc}$ is injective on its \emph{entire} argument domain: for any
+two argument tuples
+$(d_1,N_1,\mathsf{ctx}_1)\neq(d_2,N_2,\mathsf{ctx}_2)$ with each field
+drawn from its declared range, the two resulting HMAC-SHA256 inputs are
+distinct. The quantification is over all well-formed argument tuples,
 \emph{not} merely over those this construction would itself generate; in
 particular it covers tuples chosen adversarially, as
-Theorem~\ref{thm:int-ctxt} requires. The statement is unconditional — it is
-a property of the encoding alone, independent of $\mathsf{sk}$ and of any
-computational assumption.
+Theorem~\ref{thm:int-ctxt} requires. The statement is unconditional — it
+is a property of the encoding alone, independent of $\mathsf{sk}$,
+$\mathsf{sk}_{\mathrm{fmt}}$, and of any computational assumption.
 \end{lemma}
 
 \begin{proof}
 Two inputs with different domain bytes $d_1\neq d_2$ differ at byte
 position $0$, regardless of any other field, so cross-domain distinctness
-is unconditional. Fix a domain $d\neq\texttt{0x0A}$: bytes $1..16$ carry
-the nonce, so if $N_1\neq N_2$ the two inputs already differ there; assume
-therefore $N_1=N_2$, which reduces distinctness to injectivity of the
-context encoding. For domains
+is unconditional. Fix a domain $d\notin\{\texttt{0x0A},\texttt{0x0B}\}$:
+bytes $1..16$ carry the nonce, so if $N_1\neq N_2$ the two inputs already
+differ there; assume therefore $N_1=N_2$, which reduces distinctness to
+injectivity of the context encoding. For domains
 $\{\texttt{0x00},\texttt{0x01},\texttt{0x02},\texttt{0x04},\texttt{0x05},\texttt{0x06},\texttt{0x07}\}$
 the context is a fixed-width positional counter (or empty), trivially
 injective;
@@ -422,23 +499,88 @@ $\widetilde{B}$ is unambiguous, so distinct $(A,\widetilde{B})$ pairs never
 collide. Within domain $\texttt{0x0A}$, whose input is
 $\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$ with no nonce field at all, the
 same length-prefix argument shows $\mathrm{be8}(|A|)\|A\|M$ is injective in
-$(A,M)$. Every case is a statement about byte layout that holds for
-arbitrary field values, so $\mathsf{enc}$ is injective on the whole domain:
-any two distinct argument tuples, whatever their provenance, map to
-distinct $\mathrm{HMAC}(\mathsf{sk},\cdot)$ inputs.
+$(A,M)$. Domain $\texttt{0x0B}$ has the shortest input of any tabulated
+domain — the two bytes $\texttt{0x0B}\|\mathrm{format\_id}$ — and hence
+cannot collide with any other domain's input, which is at least nine
+bytes long ($\texttt{0x0A}\|\mathrm{be8}(|A|)$ even for $A=\varepsilon$)
+or seventeen bytes long (all nonce-carrying domains); within
+$\texttt{0x0B}$ itself, distinct 1-byte format identifiers give distinct
+inputs at byte position $1$. Every case is a statement about byte layout
+that holds for arbitrary field values, so $\mathsf{enc}$ is injective on
+the whole domain: any two distinct argument tuples, whatever their
+provenance, map to distinct HMAC-SHA256 inputs.
 \end{proof}
+
+\begin{remark}[Audit finding CV-11: undocumented $\texttt{0x0B}$
+format-subkey layer]\label{rem:cv11}
+Previous revisions of this section stated the schedule as
+$\mathrm{Derive}_d(\mathsf{sk},N,\mathsf{ctx})=\mathrm{HMAC}(\mathsf{sk},d\|N\|\mathsf{ctx})$
+without introducing the $\texttt{0x0B}$ format-subkey layer, and
+Table~\ref{tab:domains}'s caption asserted ``every domain is keyed by
+$\mathsf{sk}$ only''. The reference implementations
+(\texttt{napqes.py::\_derive\_format\_subkey},
+\texttt{C/napqes.c::derive\_format\_subkey},
+\texttt{rust/src/lib.rs::derive\_format\_subkey}), however, thread
+$\mathsf{sk}_{\mathrm{fmt}}$ through every per-message derivation rather
+than $\mathsf{sk}$, and the shipped KAT corpus
+(\texttt{tests/kat/v8\_vectors.json}) reproduces byte-for-byte only
+under $\mathsf{sk}\mapsto\mathsf{sk}_{\mathrm{fmt}}$: an independent
+implementation written from the earlier text produces \emph{none} of the
+twelve positive vectors. The defect was in the specification, not the
+port; the extra PRF layer is deliberate and buys cross-format tag
+separation, so this section, Table~\ref{tab:domains}, Lemma~\ref{lem:domsep},
+the four security theorems of Section~\ref{sec:security}, and the
+Section~\ref{sec:caveats} ``Scope of $\mathsf{sk}$ and $\mathbf{k}$
+compromise'' caveat have all been restated in terms of
+$\mathsf{sk}_{\mathrm{fmt}}$ as it is actually computed. Each theorem's
+bound gains one
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$
+term for the single-query $\texttt{0x0B}$ hop — a quantitatively
+negligible correction, since the extra HMAC call is against a uniform
+256-bit $\mathsf{sk}$, but a necessary bookkeeping change so that the
+object proved matches the object computed.
+\end{remark}
+
+\begin{remark}[Worked example: format subkey and synthetic nonce for
+KAT vector \texttt{W001}]\label{rem:fmtkey-example}
+So that an independent implementer can localise a divergence in the
+first sixteen output bytes rather than only as a whole-ciphertext
+disagreement, we give the two derivations that key everything else,
+computed from the paper's text alone against KAT vector \texttt{W001}
+of \texttt{tests/kat/v8\_vectors.json} (empty message, empty AAD,
+$\mathsf{sk}=$ \texttt{2f89bc687a7987f421d041bedb1c371f8ef741991f343e57b84f4b0c7875fa86},
+$\mathrm{format\_id}=\texttt{0x01}$):
+\begin{align*}
+  \mathsf{sk}_{\mathrm{fmt}}
+    &= \mathrm{HMAC}(\mathsf{sk},\ \texttt{0x0B}\|\texttt{0x01}) \\
+    &= \texttt{c54c0012905b06e2a36e3242d443267ddd39abf3ef7b16d5592ee6e6e319dc6d}, \\[0.5ex]
+  N
+    &= \mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\ \texttt{0x0A}\|\mathrm{be8}(0))[0{:}16] \\
+    &= \texttt{e5bb595068e24fd5630555256b5d3446}.
+\end{align*}
+The 16-byte $N$ matches the first sixteen bytes of \texttt{W001}'s
+$\mathrm{ciphertext\_hex}$ (Section~\ref{sec:wire-format}: $C=N\|B\|T$).
+An implementation that keyed the schedule by $\mathsf{sk}$ directly would
+produce a different sixteen-byte prefix, letting the mismatch be
+diagnosed without a byte-by-byte diff of the full ciphertext.
+\end{remark}
 
 \subsection{Noise Probability}
 \label{sec:noiseprob}
 
 The noise probability is realised entirely with fixed-width integer
-arithmetic; no floating-point representation is used anywhere in this
-construction. Fix the public integer constants
+arithmetic; no floating-point representation is used anywhere in the v8
+construction $\Pi$ specified by this paper.\footnote{CVF-30: the legacy v7
+wire format retained in the reference implementations for backward
+compatibility with archived ciphertexts uses an IEEE-754 f64 form of the
+noise threshold. v7 encryptors are \texttt{\#[deprecated]} per CVF-17; v7
+decryptors are kept so archived ciphertexts remain decodable. The v7 f64
+path is documented in \texttt{docs/CAVEATS.md} under CVF-30.} Fix the public integer constants
 \[
   \theta_{\min} = \lfloor 0.75 \times 2^{64} \rfloor, \qquad
   \theta_{\max} = \lfloor 0.99 \times 2^{64} \rfloor,
 \]
-and let $\tau = \mathrm{Derive}_{0x02}(\mathsf{sk}, N, \varepsilon)[0:8]_{\mathrm{be64}} \in [0, 2^{64})$
+and let $\tau = \mathrm{Derive}_{0x02}(\mathsf{sk}_{\mathrm{fmt}}, N, \varepsilon)[0:8]_{\mathrm{be64}} \in [0, 2^{64})$
 be the raw 64-bit unsigned integer HMAC output (no division involved).
 The per-message noise threshold is the 64-bit integer
 \[
@@ -461,7 +603,7 @@ Let $n = \lvert P \rvert$ (plaintext length in Unicode codepoints). Define
 where $\mathbf{pad} = (\mathbf{pad}_0, \ldots, \mathbf{pad}_{B-n-1})$ is a
 $(B-n)$-codepoint sequence with
 \[
-  \mathbf{pad}_{i} = \bigl(\mathrm{Derive}_{0x06}(\mathsf{sk}, N, \mathrm{be4}(i))[0{:}4]_{\mathrm{be32}} \bmod 95\bigr) + 32 \ \in [32,126].
+  \mathbf{pad}_{i} = \bigl(\mathrm{Derive}_{0x06}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be4}(i))[0{:}4]_{\mathrm{be32}} \bmod 95\bigr) + 32 \ \in [32,126].
 \]
 The total padded length is $R = n + 2 + (B-n) = B+2$ codepoints; we call
 $B$ the \emph{padding bucket} of the message and $R$ the \emph{real-token
@@ -525,10 +667,10 @@ range:
 \begin{definition}[Token-construction primitives]\label{def:token-prims}
 For a key element $k$, position counters $ct\_pos$, $real\_idx$:
 \begin{align*}
-  \texttt{is\_noise}(ct\_pos) &= \mathbf{1}\bigl[\,\mathrm{Derive}_{0x00}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}8]_{\mathrm{be64}} < \theta(N)\,\bigr], \\
-  \texttt{noise\_char}(ct\_pos) &= \bigl(\mathrm{Derive}_{0x04}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod 96\bigr) + 32, \\
-  \texttt{noise\_addend}(ct\_pos, k) &= \bigl(\mathrm{Derive}_{0x05}(\mathsf{sk}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1, \\
-  \texttt{real\_addend}(real\_idx, k) &= \bigl(\mathrm{Derive}_{0x01}(\mathsf{sk}, N, \mathrm{be5}(real\_idx))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1.
+  \texttt{is\_noise}(ct\_pos) &= \mathbf{1}\bigl[\,\mathrm{Derive}_{0x00}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be5}(ct\_pos))[0{:}8]_{\mathrm{be64}} < \theta(N)\,\bigr], \\
+  \texttt{noise\_char}(ct\_pos) &= \bigl(\mathrm{Derive}_{0x04}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod 96\bigr) + 32, \\
+  \texttt{noise\_addend}(ct\_pos, k) &= \bigl(\mathrm{Derive}_{0x05}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be5}(ct\_pos))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1, \\
+  \texttt{real\_addend}(real\_idx, k) &= \bigl(\mathrm{Derive}_{0x01}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be5}(real\_idx))[0{:}4]_{\mathrm{be32}} \bmod (k-1)\bigr) + 1.
 \end{align*}
 \end{definition}
 
@@ -628,10 +770,11 @@ alone — regardless of $\mathsf{sk}$, $N$, $A$, or the specific message
 \label{sec:synthnonce}
 
 \begin{definition}[Synthetic nonce]\label{def:synthnonce}
-For $\mathsf{sk}\in\{0,1\}^{256}$, $A\in\{0,1\}^{*}$, $M\in\mathcal{M}$
+For $\mathsf{sk}_{\mathrm{fmt}}\in\{0,1\}^{256}$ (the format subkey of
+Definition~\ref{def:fmtkey}), $A\in\{0,1\}^{*}$, $M\in\mathcal{M}$
 (encoded as UTF-8 bytes),
 \[
-  N(\mathsf{sk}, A, M) \;=\; \mathrm{HMAC}\bigl(\mathsf{sk},\;
+  N(\mathsf{sk}_{\mathrm{fmt}}, A, M) \;=\; \mathrm{HMAC}\bigl(\mathsf{sk}_{\mathrm{fmt}},\;
     \texttt{0x0A} \,\|\, \mathrm{be8}(|A|) \,\|\, A \,\|\, M\bigr)[0{:}16].
 \]
 \end{definition}
@@ -656,13 +799,13 @@ keystream derived from domain $\texttt{0x07}$:
 \[
   \widetilde{B} \;=\; B \,\oplus\, \mathrm{ks}(N)\bigl[0 : |B|\bigr],
   \qquad
-  \mathrm{ks}(N) \;=\; \mathrm{Derive}_{0x07}(\mathsf{sk}, N, \mathrm{be4}(0)) \,\|\,
-  \mathrm{Derive}_{0x07}(\mathsf{sk}, N, \mathrm{be4}(1)) \,\|\, \cdots,
+  \mathrm{ks}(N) \;=\; \mathrm{Derive}_{0x07}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be4}(0)) \,\|\,
+  \mathrm{Derive}_{0x07}(\mathsf{sk}_{\mathrm{fmt}}, N, \mathrm{be4}(1)) \,\|\, \cdots,
 \]
 generating only as many 32-byte blocks as needed to cover $|B|$ bytes
 (truncating the final block). The authentication tag is
 \[
-  T = \mathrm{Derive}_{0x03}\bigl(\mathsf{sk},\ N,\ \mathrm{TagIn}(A,\widetilde{B})\bigr),
+  T = \mathrm{Derive}_{0x03}\bigl(\mathsf{sk}_{\mathrm{fmt}},\ N,\ \mathrm{TagIn}(A,\widetilde{B})\bigr),
 \]
 a 32-byte HMAC-SHA256 value binding the (possibly empty) associated data
 $A$. The ciphertext is
@@ -775,13 +918,16 @@ it is recorded in Section~\ref{sec:caveats}.
 As in Definition~\ref{def:keygen}.
 
 \paragraph{$\mathsf{Enc}(\mathbf{k}, \mathsf{sk}, A, M) \to C$.}
-(1) compute $N=N(\mathsf{sk},A,M)$ (Definition~\ref{def:synthnonce}); (2)
-pad $M$ to $P_d$ (Section~\ref{sec:padding}); (3) run the token-emission
-loop of Section~\ref{sec:token-construction} over $P_d$ using
-$(\mathsf{sk},N)$ to obtain the token vector
+(0) derive $\mathsf{sk}_{\mathrm{fmt}}$
+(Definition~\ref{def:fmtkey}, once per key install rather than per
+message); (1) compute $N=N(\mathsf{sk}_{\mathrm{fmt}},A,M)$
+(Definition~\ref{def:synthnonce}); (2) pad $M$ to $P_d$
+(Section~\ref{sec:padding}); (3) run the token-emission loop of
+Section~\ref{sec:token-construction} over $P_d$ using
+$(\mathsf{sk}_{\mathrm{fmt}},N)$ to obtain the token vector
 $(\mathrm{token}[0],\ldots,\mathrm{token}[N_{\mathrm{tok}}-1])$; (4)
 serialise $B$; (5) mask $\widetilde{B}=B\oplus\mathrm{ks}(N)$; (6) compute
-$T=\mathrm{Derive}_{0x03}(\mathsf{sk},N,\mathrm{TagIn}(A,\widetilde{B}))$
+$T=\mathrm{Derive}_{0x03}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{TagIn}(A,\widetilde{B}))$
 (Definition~\ref{def:taginput});
 (7) output $C=N\|\widetilde{B}\|T$. The public encryption oracle is
 $\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},A,M)\triangleq\mathsf{Enc}(\mathbf{k},\mathsf{sk},A,M)$
@@ -794,7 +940,7 @@ the leading 16 bytes and $T'$ the trailing 32 bytes; (3) let
 $N_{\mathrm{tok}}=(|C|-48)/8$ and, if this is not a non-negative integer or
 not divisible by $\mathrm{MAX\_NOISE\_RUN}+1$, output $\bot$; otherwise set
 $R=N_{\mathrm{tok}}/(\mathrm{MAX\_NOISE\_RUN}+1)$; (4) compute
-$T=\mathrm{Derive}_{0x03}(\mathsf{sk},N,\mathrm{TagIn}(A,\widetilde{B}))$
+$T=\mathrm{Derive}_{0x03}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{TagIn}(A,\widetilde{B}))$
 — the same quantity, with the same $\mathrm{be8}$ length prefix, that
 $\mathsf{Enc}$ step (6) computes (Definition~\ref{def:taginput});
 (5) if $T\neq T'$ (compared in constant time), output $\bot$;
@@ -802,12 +948,17 @@ $\mathsf{Enc}$ step (6) computes (Definition~\ref{def:taginput});
 (Remark~\ref{rem:dec-structural});
 (7) else unmask $B=\widetilde{B}\oplus\mathrm{ks}(N)$, deserialise the
 $N_{\mathrm{tok}}$ fixed-width tokens, and invert the token-emission loop
-using the same $(\mathsf{sk},N)$-derived noise-position oracle: skip at most
+using the same $(\mathsf{sk}_{\mathrm{fmt}},N)$-derived noise-position oracle: skip at most
 $\mathrm{MAX\_NOISE\_RUN}$ consecutive noise positions, then read one real
-token $t$ and recover the padded codepoint as
-$(t-a)/k_{(\mathrm{real\_idx}\bmod K)+1}$, where $a$ is the
+token $t$; if $t<a$ or $(t-a)\not\equiv 0\pmod{k}$ output $\bot$
+(CVF-27: totality preconditions on the recovery); otherwise recover the
+padded codepoint as
+$(t-a)/k_{(\mathrm{real\_idx}\bmod K)+1}$; if the recovered value exceeds
+$\mathtt{0x10FFFF}$ or is a Unicode surrogate output $\bot$
+(also CVF-27, matching the codepoint-range check the reference
+implementations perform), where $a$ is the
 $\mathrm{real\_idx}$-th addend
-$\mathrm{Derive}_{0x01}(\mathsf{sk},N,\mathrm{real\_idx})$ and
+$\mathrm{Derive}_{0x01}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{real\_idx})$ and
 $\mathrm{real\_idx}$ counts real tokens from $0$ — exactly the prime and
 addend $\mathsf{Enc}$ used at that index; stop once $R$ real tokens have
 been extracted, discarding any trailing filler; (8) read the 2-codepoint
@@ -1068,12 +1219,12 @@ this is a direct consequence of $B$ depending only on codepoint count.
 For any two distinct queried pairs $(A_1,M_1)\neq(A_2,M_2)$ under the same
 $\mathsf{sk}$, there is a PRF adversary $\mathcal{B}$ with similar running
 time such that
-$\Pr[N(\mathsf{sk},A_1,M_1)=N(\mathsf{sk},A_2,M_2)] \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}) + 2^{-128}$.
+$\Pr[N(\mathsf{sk}_{\mathrm{fmt}},A_1,M_1)=N(\mathsf{sk}_{\mathrm{fmt}},A_2,M_2)] \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}) + 2^{-128}$.
 \end{lemma}
 
 \begin{proof}
 By Lemma~\ref{lem:domsep}, $(A_1,M_1)\neq(A_2,M_2)$ implies the two domain
-$\texttt{0x0A}$ inputs are distinct, so replacing $\mathrm{HMAC}(\mathsf{sk},\cdot)$
+$\texttt{0x0A}$ inputs are distinct, so replacing $\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\cdot)$
 by a truly random function $\rho$ (a PRF hop of advantage
 $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B})$)
 makes the two 128-bit truncated outputs independent and uniform, colliding
@@ -1083,45 +1234,72 @@ with probability exactly $2^{-128}$.
 \begin{theorem}[IND-CPA-det]\label{thm:ind-cpa}
 For any PPT adversary $\mathcal{A}$ respecting
 Definition~\ref{def:ind-cpa-det}'s restrictions and making at most $q$
-encryption queries, there exists a PRF adversary $\mathcal{B}_1$ with
-similar running time such that
+encryption queries, there exist PRF adversaries
+$\mathcal{B}_0,\mathcal{B}_1$ with similar running time such that
 \[
   \mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}_{\Pi}(\mathcal{A})
   \;\leq\;
-  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)
+  + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
   + \frac{q^2}{2^{128}},
 \]
 against the standard, uniform-key HMAC-SHA256 PRF assumption, with no
-key-guessing or key-entropy term.
+key-guessing or key-entropy term. The $\mathcal{B}_0$ term accounts for
+the one-query PRF hop that replaces
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+(Definition~\ref{def:fmtkey}) by a uniform 256-bit string; the
+$\mathcal{B}_1$ term is the subsequent PRF hop against
+$\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\cdot)$, as in the proof below.
 \end{theorem}
 
 \begin{proof}
-We proceed via a sequence of two hybrid games.
+We proceed via a sequence of three hybrid games.
 
-\paragraph{Game $G_0$ (real).} The challenger samples $(\mathbf{k},\mathsf{sk})$
-and answers queries via the real $\mathsf{Enc}$, which calls
-$F(\mathsf{sk},\cdot)$ for all internal derivations.
+\paragraph{Game $G_0$ (real).} The challenger samples $(\mathbf{k},\mathsf{sk})$,
+computes
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+once (Definition~\ref{def:fmtkey}), and answers queries via the real
+$\mathsf{Enc}$, which calls $F(\mathsf{sk}_{\mathrm{fmt}},\cdot)$ for all
+per-message derivations.
 
-\paragraph{Game $G_1$ (PRF replacement).} Identical, except
-$F(\mathsf{sk},\cdot)$ is replaced by a truly random function
-$\rho:\{0,1\}^*\to\{0,1\}^{256}$, sampled lazily.
+\paragraph{Game $G_0'$ (format-subkey PRF hop).} Identical to $G_0$,
+except $\mathsf{sk}_{\mathrm{fmt}}$ is sampled uniformly from
+$\{0,1\}^{256}$ rather than derived by
+$\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$. Because
+$\mathsf{sk}$ is uniform on $\{0,1\}^{256}$
+(Definition~\ref{def:keygen}) and $\texttt{0x0B}\|\mathrm{format\_id}$ is
+a single fixed input, replacing $\mathrm{HMAC}(\mathsf{sk},\cdot)$ by a
+truly random function on this one query is a PRF hop of advantage at
+most $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$
+for some PRF adversary $\mathcal{B}_0$ running in time
+$\mathcal{O}(T_\mathcal{A})$; the output of that single call is
+distributed identically to a uniformly sampled 256-bit string, so
+$|\Pr[\mathcal{A}\text{ wins }G_0] - \Pr[\mathcal{A}\text{ wins }G_0']| \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$.
+
+\paragraph{Game $G_1$ (per-message PRF replacement).} Identical to
+$G_0'$, except $F(\mathsf{sk}_{\mathrm{fmt}},\cdot)$ is replaced by a
+truly random function $\rho:\{0,1\}^*\to\{0,1\}^{256}$, sampled lazily.
 
 \begin{lemma}\label{lem:prf-hop}
 There is a PRF adversary $\mathcal{B}_1$, running in time
 $\mathcal{O}(T_\mathcal{A})$, such that
-$|\Pr[\mathcal{A}\text{ wins }G_0]-\Pr[\mathcal{A}\text{ wins }G_1]|\le\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$.
+$|\Pr[\mathcal{A}\text{ wins }G_0']-\Pr[\mathcal{A}\text{ wins }G_1]|\le\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)$.
 \end{lemma}
 \begin{proof}
 $\mathcal{B}_1$ is given an oracle $\mathcal{O}$ that is either
-$F(\mathsf{sk},\cdot)$ or $\rho(\cdot)$. Because $\mathsf{sk}$ is sampled
-independently of $\mathbf{k}$ (Definition~\ref{def:keygen}), $\mathcal{B}_1$
-samples its own $\mathbf{k}'$ via the prime-sampling step of
-$\mathsf{KeyGen}$ to run the arithmetic layer of $\mathsf{Enc}$ directly,
-and forwards every domain-derivation call (including domain
-$\texttt{0x0A}$) to $\mathcal{O}$. $\mathcal{B}_1$ never needs to know
-$\mathsf{sk}$ (or the challenger's hidden key) to run this simulation: when
-$\mathcal{O}=F(\mathsf{sk},\cdot)$ the simulation is distributed
-identically to $G_0$; when $\mathcal{O}=\rho$, identically to $G_1$.
+$F(\mathsf{sk}_{\mathrm{fmt}},\cdot)$ (for a uniform 256-bit
+$\mathsf{sk}_{\mathrm{fmt}}$) or $\rho(\cdot)$. Because
+$\mathsf{sk}_{\mathrm{fmt}}$ is uniform on $\{0,1\}^{256}$ in $G_0'$ and
+is sampled independently of $\mathbf{k}$ (Definition~\ref{def:keygen}
+plus the format-subkey hop above), $\mathcal{B}_1$ samples its own
+$\mathbf{k}'$ via the prime-sampling step of $\mathsf{KeyGen}$ to run
+the arithmetic layer of $\mathsf{Enc}$ directly, and forwards every
+per-message domain-derivation call (including domain $\texttt{0x0A}$) to
+$\mathcal{O}$. $\mathcal{B}_1$ never needs to know
+$\mathsf{sk}_{\mathrm{fmt}}$ (or the challenger's hidden key) to run
+this simulation: when $\mathcal{O}=F(\mathsf{sk}_{\mathrm{fmt}},\cdot)$
+the simulation is distributed identically to $G_0'$; when
+$\mathcal{O}=\rho$, identically to $G_1$.
 \end{proof}
 
 \paragraph{Nonce collision under $G_1$.} Let $\mathrm{Coll}$ be the event
@@ -1170,8 +1348,13 @@ so
 \[
   \mathrm{Adv}^{\mathrm{IND\text{-}CPA\text{-}det}}_{\Pi}(\mathcal{A})
   = \bigl|\Pr[\mathcal{A}\text{ wins }G_0]-\tfrac12\bigr|
-  \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1) + \frac{q^2}{2^{128}}. \qedhere
+  \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)
+    + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+    + \frac{q^2}{2^{128}}, \qedhere
 \]
+where the $\mathcal{B}_0$ term is the $G_0\to G_0'$ hop above and the
+$\mathcal{B}_1$ term is the $G_0'\to G_1$ hop of
+Lemma~\ref{lem:prf-hop}.
 \end{proof}
 
 \subsection{Length Hiding}
@@ -1209,16 +1392,19 @@ is defined as before.
 \begin{theorem}[LH-IND-CPA-det]\label{thm:lh-ind-cpa}
 For any PPT adversary $\mathcal{A}$ respecting
 Definition~\ref{def:lh-ind-cpa-det}'s restrictions and making at most $q$
-encryption queries, there exists a PRF adversary $\mathcal{B}_1$ with
-similar running time such that
+encryption queries, there exist PRF adversaries
+$\mathcal{B}_0,\mathcal{B}_1$ with similar running time such that
 \[
   \mathrm{Adv}^{\mathrm{LH\text{-}IND\text{-}CPA\text{-}det}}_{\Pi}(\mathcal{A})
   \;\leq\;
-  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)
+  + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
   + \frac{q^2}{2^{128}},
 \]
 i.e.\ exactly the bound of Theorem~\ref{thm:ind-cpa}, with no additional
-term for the relaxed length condition.
+term for the relaxed length condition. The $\mathcal{B}_0$ hop is the
+same single-query $\texttt{0x0B}$ format-subkey hop as in
+Theorem~\ref{thm:ind-cpa}.
 \end{theorem}
 
 \begin{proof}
@@ -1421,19 +1607,37 @@ counts as a forgery attempt, as it must for an AEAD scheme.
 \begin{theorem}[INT-CTXT]\label{thm:int-ctxt}
 Let $\mathcal{A}$ be any PPT adversary in the experiment of
 Definition~\ref{def:int-ctxt}, making at most $q$ encryption queries
-and at most $q_v\ge1$ adaptive verification queries. There
-exists a PRF adversary $\mathcal{B}_2$ with similar running time such that
+and at most $q_v\ge1$ adaptive verification queries. There exist PRF
+adversaries $\mathcal{B}_0,\mathcal{B}_2$ with similar running time such
+that
 \[
   \mathrm{Adv}^{\mathrm{INT\text{-}CTXT}}_{\Pi}(\mathcal{A})
   \leq
-  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)
+  + \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
   + \frac{q_v}{2^{256}}.
 \]
 There is no $q$-dependent (encryption-query-count) term, since Case~2
-below is resolved deterministically rather than probabilistically.
+below is resolved deterministically rather than probabilistically. The
+$\mathcal{B}_0$ term accounts for the one-query PRF hop that replaces
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+by a uniform 256-bit string (Definition~\ref{def:fmtkey}); the
+$\mathcal{B}_2$ term is the subsequent PRF hop against
+$\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\cdot)$ used in the proof
+below.
 \end{theorem}
 
 \begin{proof}
+As in Theorem~\ref{thm:ind-cpa}, we first apply the format-subkey PRF
+hop: replace
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+by an independent, uniform 256-bit string, at cost
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$
+for some PRF adversary $\mathcal{B}_0$. Under the modified game,
+$\mathsf{sk}_{\mathrm{fmt}}$ is now a uniform HMAC key independent of
+$\mathsf{sk}$ and $\mathbf{k}$, and every subsequent argument proceeds
+against this key.
+
 Write a forgery attempt as $c^*=(N^*,\widetilde{B}^*,T^*)$ with tag input
 $x^*=\texttt{0x03}\|N^*\|\mathrm{TagIn}(aad^*,\widetilde{B}^*)$
 (Definition~\ref{def:taginput}), the same quantity $\mathsf{Dec}$ step (4)
@@ -1446,7 +1650,7 @@ though $\mathcal{A}$, not the construction, chose the fields of $x^*$.
 By that lemma, $x^*$ is distinct from every query-phase domain
 $\texttt{0x03}$ input (different nonce at the fixed offset) and from every
 other domain's input, so $x^*$ was never submitted to
-$\mathrm{HMAC}(\mathsf{sk},\cdot)$. Construct $\mathcal{B}_2$, given an
+$\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\cdot)$. Construct $\mathcal{B}_2$, given an
 oracle $f$ (real or random), exactly as $\mathcal{B}_1$ in
 Lemma~\ref{lem:prf-hop}: sample $\mathbf{k}'$ independently, forward every
 HMAC call to $f$, and output ``real'' iff some forgery attempt's candidate
@@ -1470,7 +1674,8 @@ deterministically via Lemma~\ref{lem:domsep}'s injectivity — $N^*$ is
 chosen adaptively by $\mathcal{A}$ after observing $N_1,\ldots,N_q$, so no
 probabilistic collision term applies to Case~2.
 
-Combining both cases yields the stated bound.
+Combining both cases with the initial format-subkey PRF hop yields the
+stated bound.
 \end{proof}
 
 \subsection{IND-CCA-det Security}
@@ -1504,17 +1709,28 @@ $\mathrm{Adv}^{\mathrm{IND\text{-}CCA\text{-}det}}_{\Pi}(\mathcal{A}) =
 For any PPT adversary $\mathcal{A}$ in the experiment of
 Definition~\ref{def:ind-cca-det}, making at most $q$ encryption queries and
 $q_d$ decryption queries, there exist
-PRF adversaries $\mathcal{B}_1,\mathcal{B}_2$ with similar running time
-such that
+PRF adversaries $\mathcal{B}_0,\mathcal{B}_1,\mathcal{B}_2$ with similar
+running time such that
 \[
   \mathrm{Adv}^{\mathrm{IND\text{-}CCA\text{-}det}}_{\Pi}(\mathcal{A})
   \leq
+  \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)
+  +
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_1)
   +
   \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_2)
   + \frac{q^2}{2^{128}}
   + \frac{q_d}{2^{256}}.
 \]
+The $\mathcal{B}_0$ term is the single-query PRF hop replacing
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+(Definition~\ref{def:fmtkey}) by a uniform 256-bit string, and is
+inherited from Theorems~\ref{thm:ind-cpa} and~\ref{thm:int-ctxt}. Once
+$\mathsf{sk}_{\mathrm{fmt}}$ is uniform, $\mathcal{B}_1$ and
+$\mathcal{B}_2$ are the same downstream PRF hops as in those two
+theorems (a single $\mathcal{B}_0$ term suffices, since Theorems
+$\ref{thm:ind-cpa}$ and $\ref{thm:int-ctxt}$'s $\mathcal{B}_0$ hops
+target the identical $\mathsf{sk}$-keyed HMAC call).
 \end{theorem}
 
 \begin{proof}
@@ -1525,6 +1741,18 @@ the unrestricted IND-CPA notion, which no deterministic scheme satisfies
 we give the two game hops in full against
 Definitions~\ref{def:ind-cpa-det}, \ref{def:int-ctxt}
 and~\ref{def:ind-cca-det}. Nothing beyond the restricted notions is used.
+
+Before the game hops below, apply the format-subkey PRF hop of
+Theorem~\ref{thm:ind-cpa}'s proof once, replacing
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\mathrm{format\_id})$
+by an independent uniform 256-bit string at cost
+$\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$.
+Because both downstream reductions (to $\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_1)$
+via Theorem~\ref{thm:ind-cpa} and to
+$\mathrm{Adv}^{\mathrm{PRF}}(\mathcal{B}_2)$ via
+Theorem~\ref{thm:int-ctxt}) invoke exactly the same format-subkey hop
+against the same $\mathsf{sk}$-keyed HMAC call, one $\mathcal{B}_0$ term
+suffices for the composition rather than two.
 
 \paragraph{Game $H_0$ (real).} The IND-CCA-det experiment of
 Definition~\ref{def:ind-cca-det}, verbatim.
@@ -1634,8 +1862,8 @@ separately rather than as one conflated figure:
         $2^{256}$, post-Grover sequential depth $\approx2^{128}$ — this is
         the figure relevant to Assumption~\ref{assum:hmac-prf} and to every
         theorem of Section~\ref{sec:security}.
-  \item $\mathbf{k}$: $\approx2^{191.46}$ ordered-tuple key-space size at the
-        default $K=10$ (post-Grover $\approx2^{95.73}$). This figure is
+  \item $\mathbf{k}$: $\approx2^{256.97}$ ordered-tuple key-space size at the
+        default $K=13$ (post-Grover $\approx2^{128.49}$). This figure is
         reported for completeness only. It is \emph{not} relevant to any
         theorem in Section~\ref{sec:security}, none of which depend on
         $H_\infty(\mathbf{k})$ (Remark~\ref{rem:key-roles}), nor to the
@@ -1810,7 +2038,7 @@ Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No
 Nonce-reuse key recovery & \textbf{No} (Definition~\ref{def:synthnonce}, disclosed message-equality only) & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
 Ciphertext expansion & $160\times$ (fixed) & $1\times$ & $1\times$ & $1\times$ \\
 Length leakage per message & $\le3.70$ bits ($0$ with $\mathsf{frame}$) & $=H(n)$ & $=H(n)$ & $=H(n)$ \\
-Key size & $5K+32$ bytes ($\mathbf{k}$+$\mathsf{sk}$; $82$ at $K=10$) & 32 bytes & 32 bytes & 16 bytes \\
+Key size & $5K+32$ bytes ($\mathbf{k}$+$\mathsf{sk}$; $97$ at $K=13$) & 32 bytes & 32 bytes & 16 bytes \\
 \bottomrule
 \end{tabular}
 \caption{Comparison of NAPQES with established AEAD schemes. The two FIPS
@@ -2064,22 +2292,27 @@ across $10^6$ corpus entries in either harness.
         fixed-frame transport is required.
 
   \item[Scope of $\mathsf{sk}$ and $\mathbf{k}$ compromise.] $\mathsf{sk}$
-        is the sole cryptographic secret in this construction: every HMAC
-        domain derivation — the noise schedule, the padding, the
-        per-position addends, the keystream, and the tag — is keyed by
-        $\mathsf{sk}$ alone (Section~\ref{sec:domains}). Consequently, an
-        adversary who compromises $\mathsf{sk}$ but not $\mathbf{k}$ can
-        recover any real token's plaintext codepoint directly: the
-        per-position addend's raw HMAC output depends only on
-        $\mathsf{sk}$, so for a given token the adversary can, for each of
-        the $579{,}947$ candidate primes in $\mathcal{P}$, compute
-        the corresponding addend and check whether the resulting quotient
-        is an exact integer in a valid codepoint range — an
-        $\mathcal{O}(|\mathcal{P}|)$ trial-division search that succeeds in
-        microseconds. $\mathbf{k}$'s secrecy therefore adds \textbf{no}
-        independent confidentiality margin once $\mathsf{sk}$ is known:
-        compromise of $\mathsf{sk}$ alone is equivalent to a full break,
-        regardless of whether $\mathbf{k}$ also leaked. Operationally,
+        is the sole cryptographic secret in this construction: one HMAC
+        call keyed by $\mathsf{sk}$ (the domain-$\texttt{0x0B}$
+        format-subkey derivation of Definition~\ref{def:fmtkey}) fixes
+        $\mathsf{sk}_{\mathrm{fmt}}$, and every other HMAC domain
+        derivation — the noise schedule, the padding, the per-position
+        addends, the keystream, and the tag — is keyed by
+        $\mathsf{sk}_{\mathrm{fmt}}$ (Section~\ref{sec:domains}).
+        Consequently, an adversary who compromises $\mathsf{sk}$ but not
+        $\mathbf{k}$ derives $\mathsf{sk}_{\mathrm{fmt}}$ in one HMAC
+        evaluation and can then recover any real token's plaintext
+        codepoint directly: the per-position addend's raw HMAC output
+        depends only on $\mathsf{sk}_{\mathrm{fmt}}$, so for a given
+        token the adversary can, for each of the $892{,}206$ candidate
+        primes in $\mathcal{P}$, compute the corresponding addend and
+        check whether the resulting quotient is an exact integer in a
+        valid codepoint range — an $\mathcal{O}(|\mathcal{P}|)$
+        trial-division search that succeeds in microseconds.
+        $\mathbf{k}$'s secrecy therefore adds \textbf{no} independent
+        confidentiality margin once $\mathsf{sk}$ is known: compromise of
+        $\mathsf{sk}$ alone is equivalent to a full break, regardless of
+        whether $\mathbf{k}$ also leaked. Operationally,
         $\mathbf{k}$ and $\mathsf{sk}$ must therefore be protected with
         equal rigor, as a single unit — not because splitting them across
         separate storage or trust domains buys compartmentalized

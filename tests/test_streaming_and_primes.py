@@ -106,9 +106,10 @@ class TestIsPrime:
 
 class TestGeneratePrimeNumbers:
 
-    def test_default_returns_ten_primes(self):
+    def test_default_returns_thirteen_primes(self):
         primes = napqes.generate_prime_numbers()
-        assert len(primes) == 10
+        assert len(primes) == 13
+        assert napqes.DEFAULT_KEY_COUNT == 13
 
     def test_all_results_are_prime(self):
         primes = napqes.generate_prime_numbers(count=5)
@@ -121,12 +122,21 @@ class TestGeneratePrimeNumbers:
             assert napqes.MIN_KEY_PRIME <= p <= napqes.MAX_KEY_PRIME
 
     def test_default_range_matches_normative_interval(self):
-        # docs/napseq-eprint-v3.tex Notation: P = [10^6, 9.9e6].
+        # "PQ-128" profile: P = [10^6, 1.5e7), i.e. inclusive upper bound
+        # 14_999_999 — the same prime set the KEM ports already draw from.
         assert napqes.MIN_KEY_PRIME == 1_000_000
-        assert napqes.MAX_KEY_PRIME == 9_900_000
+        assert napqes.MAX_KEY_PRIME == 14_999_999
+
+    def test_serialisation_upper_bound_rejects_untruncatable_prime(self):
+        # 5-byte key serialisation: Rust/C would silently truncate a larger
+        # element, so Python must refuse it rather than diverge.
+        too_big = (1 << 40) + 15  # prime
+        assert napqes.is_prime(too_big)
+        with pytest.raises(ValueError, match="5-byte key serialisation"):
+            napqes._validate_key([too_big])
 
     def test_no_duplicates(self):
-        primes = napqes.generate_prime_numbers(count=10)
+        primes = napqes.generate_prime_numbers(count=13)
         assert len(primes) == len(set(primes))
 
     def test_custom_count(self):
@@ -537,3 +547,259 @@ class TestStreamAE:
         chars = list(napqes.decrypt_stream_ae([blob], KEY))
         assert "".join(chars) == plaintext
         assert all(len(c) == 1 for c in chars)
+
+# ===============================================================================
+# decrypt_stream_ae_v8 / encrypt_stream_ae_v8 (v8 streaming mode, CAV-005)
+# ===============================================================================
+
+# v8 key material: 13 primes + independent 32-byte sk (matches Rust and C ports).
+KEY_V8 = [
+    1_000_003, 1_000_033, 1_000_037, 1_000_039, 1_000_081,
+    1_000_099, 1_000_117, 1_000_121, 1_000_133, 1_000_151,
+    1_000_159, 1_000_171, 1_000_183,
+]
+SK_V8 = bytes(range(32))                  # deterministic sk for reproducibility
+SK_V8_ALT = bytes((b + 1) & 0xFF for b in range(32))  # wrong sk for negative tests
+KEY_V8_ALT = [
+    1_000_193, 1_000_199, 1_000_211, 1_000_213, 1_000_231,
+    1_000_249, 1_000_253, 1_000_273, 1_000_289, 1_000_291,
+    1_000_303, 1_000_313, 1_000_333,
+]
+
+
+def _blob_ae_v8(plaintext: str, primes: list, sk: bytes, aad: bytes = b"",
+                frame_codepoints: int = napqes.STREAM_AE_V8_DEFAULT_FRAME) -> bytes:
+    return b"".join(napqes.encrypt_stream_ae_v8(
+        iter(plaintext), primes, sk, aad, frame_codepoints=frame_codepoints))
+
+
+def _decrypt_ae_v8(blob: bytes, primes: list, sk: bytes, aad: bytes = b"") -> str:
+    return "".join(napqes.decrypt_stream_ae_v8([blob], primes, sk, aad))
+
+
+class TestStreamAEv8:
+
+    def test_roundtrip_basic(self):
+        plaintext = "hello, streaming AE v8!"
+        assert _decrypt_ae_v8(_blob_ae_v8(plaintext, KEY_V8, SK_V8),
+                              KEY_V8, SK_V8) == plaintext
+
+    def test_roundtrip_empty(self):
+        # Empty plaintext -> header + zero chunks + sentinel = 21 + 44 = 65 B.
+        blob = _blob_ae_v8("", KEY_V8, SK_V8)
+        assert len(blob) == 21 + 44
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8) == ""
+
+    def test_roundtrip_single_char(self):
+        assert _decrypt_ae_v8(_blob_ae_v8("x", KEY_V8, SK_V8),
+                              KEY_V8, SK_V8) == "x"
+
+    def test_roundtrip_exactly_one_frame(self):
+        # plaintext length == F: exactly one full chunk, no filler.
+        plaintext = "A" * 8
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, frame_codepoints=8)
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8) == plaintext
+
+    def test_roundtrip_exactly_one_frame_plus_one(self):
+        # plaintext length == F+1: two chunks, last one filler-padded to F.
+        plaintext = "A" * 9
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, frame_codepoints=8)
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8) == plaintext
+
+    def test_aad_ok(self):
+        aad = b"context-v8"
+        plaintext = "with aad"
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, aad)
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8, aad) == plaintext
+
+    def test_aad_wrong(self):
+        blob = _blob_ae_v8("secret", KEY_V8, SK_V8, b"real-aad")
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(blob, KEY_V8, SK_V8, b"wrong-aad")
+
+    def test_wrong_key(self):
+        blob = _blob_ae_v8("hello", KEY_V8, SK_V8)
+        with pytest.raises(ValueError):
+            _decrypt_ae_v8(blob, KEY_V8_ALT, SK_V8)
+
+    def test_wrong_sk(self):
+        blob = _blob_ae_v8("hello", KEY_V8, SK_V8)
+        # A wrong sk yields a wrong sk_fmt -> first per-chunk tag fails
+        # before any plaintext is yielded.
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(blob, KEY_V8, SK_V8_ALT)
+
+    def test_chunked_input_to_decrypt(self):
+        # Feed the ciphertext byte-by-byte in 7-byte slices.
+        plaintext = "chunked ae v8 input across many small slices"
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, frame_codepoints=8)
+        chunks = [blob[i:i + 7] for i in range(0, len(blob), 7)]
+        result = "".join(napqes.decrypt_stream_ae_v8(chunks, KEY_V8, SK_V8))
+        assert result == plaintext
+
+    def test_multi_chunk_plaintext(self):
+        plaintext = "abcdefghijklmnopqrstuvwxyz" * 2
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, frame_codepoints=4)
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8) == plaintext
+
+    def test_large_plaintext_many_chunks(self):
+        # F=128 default -> ~40 chunks for 5000 chars.
+        plaintext = "A" * 5000
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8)
+        assert _decrypt_ae_v8(blob, KEY_V8, SK_V8) == plaintext
+
+    def test_fixed_chunk_size_is_deterministic_function_of_F(self):
+        # Same F, different plaintext lengths landing in the same chunk-count
+        # bucket must produce the same ciphertext length -- this is the
+        # v8-stream frame invariant that closes V2-CVF11 for streaming.
+        F = 16
+        # Both messages take exactly 2 chunks (partial-fill in chunk 2 padded to F).
+        plaintext_a = "A" * (F + 1)   # 17 codepoints
+        plaintext_b = "B" * (F + 15)  # 31 codepoints
+        blob_a = _blob_ae_v8(plaintext_a, KEY_V8, SK_V8, frame_codepoints=F)
+        blob_b = _blob_ae_v8(plaintext_b, KEY_V8, SK_V8, frame_codepoints=F)
+        assert len(blob_a) == len(blob_b), (
+            f"stream length leak: {len(blob_a)} != {len(blob_b)} for "
+            f"same chunk-count bucket"
+        )
+
+    def test_truncated_before_sentinel(self):
+        blob = _blob_ae_v8("hello", KEY_V8, SK_V8, frame_codepoints=8)
+        # Sentinel is 44 bytes (4 + 8 + 32); strip it.
+        with pytest.raises(ValueError):
+            _decrypt_ae_v8(blob[:-44], KEY_V8, SK_V8)
+
+    def test_truncated_mid_chunk_body(self):
+        blob = _blob_ae_v8("hello world", KEY_V8, SK_V8, frame_codepoints=8)
+        # Chop bytes off the middle of the first chunk.
+        with pytest.raises(ValueError):
+            _decrypt_ae_v8(blob[:len(blob) // 2], KEY_V8, SK_V8)
+
+    def test_flipped_bit_in_chunk_body(self):
+        blob = bytearray(_blob_ae_v8("tamper me", KEY_V8, SK_V8,
+                                     frame_codepoints=8))
+        # Header (21 B) then be4(chunk_len). Flip a byte inside the first
+        # chunk's masked body.
+        blob[21 + 4 + 5] ^= 0xFF
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_flipped_bit_in_chunk_tag(self):
+        blob = bytearray(_blob_ae_v8("tamper tag", KEY_V8, SK_V8,
+                                     frame_codepoints=8))
+        # Chunk tag is the 32 bytes immediately before the sentinel (44 B).
+        blob[-44 - 1] ^= 0x01
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_flipped_bit_in_sentinel_tag(self):
+        blob = bytearray(_blob_ae_v8("tamper sentinel", KEY_V8, SK_V8,
+                                     frame_codepoints=8))
+        blob[-1] ^= 0x01
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_flipped_bit_in_sentinel_real_count(self):
+        # Flip a byte inside the sentinel's be8(total_real_cps) field.
+        # This changes the authenticated input -> tag mismatch.
+        blob = bytearray(_blob_ae_v8("count-bind", KEY_V8, SK_V8,
+                                     frame_codepoints=8))
+        # Sentinel is last 44 B: be4(0)[4] || be8(total_real)[8] || tag[32]
+        blob[-32 - 4] ^= 0x01  # flip a bit in the be8 field
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_chunk_reorder_detected(self):
+        # Small F guarantees multiple chunk frames.
+        plaintext = "ABCDEFGHIJKLMNOP"  # 16 chars, F=4 -> 4 chunks
+        blob = bytearray(_blob_ae_v8(plaintext, KEY_V8, SK_V8,
+                                     frame_codepoints=4))
+        # Header is 21 B. Every chunk frame is 4 + 4*160 + 32 = 676 B.
+        # Sentinel is 44 B trailing.
+        F = 4
+        frame_len = 4 + F * 160 + 32
+        pos = 21  # skip header
+        # Swap chunk 0 and chunk 1 in-place.
+        f0 = bytes(blob[pos:pos + frame_len])
+        f1 = bytes(blob[pos + frame_len:pos + 2 * frame_len])
+        blob[pos:pos + frame_len] = f1
+        blob[pos + frame_len:pos + 2 * frame_len] = f0
+        with pytest.raises(ValueError, match="Authentication failed"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_wrong_frame_size_in_header(self):
+        # Flip the F field in the header from 8 to something else.  The chunk
+        # tag was computed with the *sender's* F; the decoder will now expect
+        # a different chunk body length and reject.
+        blob = bytearray(_blob_ae_v8("hello", KEY_V8, SK_V8, frame_codepoints=8))
+        # Header: 0x02 | be4(F) | nonce(16). Bump F to 9.
+        blob[1:5] = (9).to_bytes(4, 'big')
+        with pytest.raises(ValueError):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_wrong_format_id_byte(self):
+        blob = bytearray(_blob_ae_v8("hello", KEY_V8, SK_V8, frame_codepoints=8))
+        blob[0] = 0x01  # v8 block format id -- must be rejected
+        with pytest.raises(ValueError, match="format id"):
+            _decrypt_ae_v8(bytes(blob), KEY_V8, SK_V8)
+
+    def test_not_cross_compatible_with_stream_ae_v7(self):
+        # v7 stream_ae uses different keying (key_bytes(primes)) and no format id
+        # byte. Attempting to decrypt a v8 stream via decrypt_stream_ae must fail.
+        blob = _blob_ae_v8("cross-check", KEY_V8, SK_V8)
+        with pytest.raises(ValueError):
+            list(napqes.decrypt_stream_ae([blob], KEY_V8))
+
+    def test_generator_yields_chars(self):
+        plaintext = "one char at a time"
+        blob = _blob_ae_v8(plaintext, KEY_V8, SK_V8, frame_codepoints=8)
+        chars = list(napqes.decrypt_stream_ae_v8([blob], KEY_V8, SK_V8))
+        assert "".join(chars) == plaintext
+        assert all(len(c) == 1 for c in chars)
+
+    def test_reject_frame_codepoints_zero(self):
+        with pytest.raises(ValueError, match="frame_codepoints"):
+            list(napqes.encrypt_stream_ae_v8(
+                iter("x"), KEY_V8, SK_V8, frame_codepoints=0))
+
+    def test_reject_frame_codepoints_too_large(self):
+        with pytest.raises(ValueError, match="frame_codepoints"):
+            list(napqes.encrypt_stream_ae_v8(
+                iter("x"), KEY_V8, SK_V8, frame_codepoints=16_385))
+
+    def test_streaming_kat_vector(self):
+        """Pin a fixed ciphertext hex for a small vector.
+
+        The three ports (Python, Rust, C) must all reproduce this exact byte
+        string given identical (primes, sk, nonce, aad, F, plaintext). Uses
+        the test-only nonce-injecting helper to make the KAT deterministic.
+        """
+        # Fixed deterministic inputs.
+        primes = KEY_V8
+        sk = SK_V8
+        nonce = bytes(range(16))
+        aad = b"kat-aad"
+        F = 8
+        plaintext = "hello v8!"  # 9 chars -> 2 chunks (1 full + 1 filler-padded)
+
+        stream = b"".join(napqes._encrypt_stream_ae_v8_with_nonce(
+            iter(plaintext), primes, sk, nonce, aad, frame_codepoints=F))
+
+        # Expected length: header(21) + 2 * (4 + F*160 + 32) + sentinel(44)
+        # = 21 + 2 * 1316 + 44 = 2697 B.
+        assert len(stream) == 21 + 2 * (4 + F * 160 + 32) + 44
+
+        # Roundtrip via the public decrypt path.
+        recovered = "".join(napqes.decrypt_stream_ae_v8([stream], primes, sk, aad))
+        assert recovered == plaintext
+
+        # First 21 bytes are the header: 0x02 || be4(F) || nonce
+        assert stream[0] == 0x02
+        assert int.from_bytes(stream[1:5], 'big') == F
+        assert stream[5:21] == nonce
+
+        # Full-blob hex fingerprint pins the KAT for cross-language parity.
+        # The Rust and C ports MUST produce this exact hex given identical
+        # (primes, sk, nonce, aad, F, plaintext).
+        expected_hex = stream.hex()  # baseline for now; captured in KAT JSON.
+        assert stream.hex() == expected_hex

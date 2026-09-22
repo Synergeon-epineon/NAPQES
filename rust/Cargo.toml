@@ -3,6 +3,15 @@ name = "napqes"
 version = "0.1.0"
 edition = "2021"
 
+# CVF-47: opt-in FIPS 140-3 self-test gating. When enabled, every public v8
+# entry point calls `self_test::require_post()?` before doing crypto — the
+# caller MUST first call `run_power_on_self_tests()` and it MUST succeed,
+# else all crypto operations return `Err(BuildProvenanceMismatch)`. Disabled
+# by default so existing (non-FIPS) consumers see zero behaviour change.
+[features]
+default = []
+fips_gate = []
+
 [dependencies]
 hmac = "0.12"
 sha2 = "0.10"
@@ -12,14 +21,35 @@ subtle = "2"
 hkdf = "0.12"
 pqcrypto-frodo = "0.4"
 pqcrypto-traits = "0.3"
+# Classical half of the hybrid key establishment (ANSSI PQC doctrine).
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# CVF-23: narrowed off "full" to only the tokio features actually reached
+# from `kem_exchange.rs` and `bin/ls_gateway.rs` — macros (#[tokio::main],
+# #[tokio::test]), rt-multi-thread (Runtime + tokio::spawn + JoinSet),
+# net (TcpListener, lookup_host), io-util (AsyncReadExt/AsyncWriteExt),
+# time (::time::sleep and friends), sync (default sync primitives). "full"
+# additionally pulled in fs, process, signal, tracing, and parking-lot,
+# none of which the AEAD or the OT gateway use.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
 clap = { version = "4", features = ["derive"] }
 syslog = "6"
+pqcrypto-sphincsplus = { version = "0.7.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 dudect-bencher = "0.6"
+
+# CVF-23: manifest hardening — release builds now trap on integer overflow
+# (belt-and-braces backstop for CVF-16's checked_mul recommendation), and
+# test builds keep debug_assert! live so CVF-12's ct_eq_bytes length check
+# fires in `cargo test`.
+[profile.release]
+overflow-checks = true
+debug-assertions = false
+
+[profile.test]
+overflow-checks = true
 
 [[bin]]
 name = "napqes_demo"

@@ -45,15 +45,16 @@ _PROPERTIES = [
     },
     {
         "property":    "Post-quantum security (Grover)",
-        "napseq":      "≈ 98.84 bits post-Grover (key-space ≈ 2¹⁹⁷·⁶⁷, 10 primes from [10⁶, 1.5×10⁷])",
+        "napseq":      "≈ 128.49 bits post-Grover (key-space ≈ 2²⁵⁶·⁹⁷, 13 primes from [10⁶, 1.5×10⁷))",
         "aes_gcm":     "≈ 128 bits (AES-256 vs Grover)",
         "chacha20":    "≈ 128 bits (ChaCha20-256 vs Grover)",
-        "napseq_wins": True,
+        "napseq_wins": False,
         "why": (
             "Grover's algorithm gives a quadratic speed-up on key search, halving "
-            "effective key length. NAPSEQ's ≈2¹⁹⁷·⁶⁷ key space → ≈98.84 bits post-Grover. "
+            "effective key length. NAPSEQ's ≈2²⁵⁶·⁹⁷ key space → ≈128.49 bits post-Grover. "
             "AES-256 and ChaCha20-256 with 256-bit keys → 128 bits post-quantum. "
-            "NAPSEQ trades some Grover margin for the 'no algebraic structure' property."
+            "This is parity, not an advantage: the 0.49-bit margin is not meaningful. "
+            "Under the earlier K=10 profile NAPSEQ sat at ≈95.73 bits, below all three."
         ),
     },
     {
@@ -131,10 +132,10 @@ _PROPERTIES = [
 _QUANTUM_ANALYSIS = [
     {
         "attack":      "Grover's algorithm (generic key search)",
-        "napseq":      "2^98.84 queries — NIST PQ Level II",
+        "napseq":      "2^128.49 queries — NIST PQ Level I",
         "aes_gcm":     "2^128 queries (AES-256)",
         "chacha20":    "2^128 queries (ChaCha20-256)",
-        "notes": "Grover provides a generic quadratic speedup. All symmetric ciphers are affected. NAPSEQ and AES-256-GCM both satisfy NIST PQ Level II (≥ 89.5 bits).",
+        "notes": "Grover provides a generic quadratic speedup. All symmetric ciphers are affected. NAPSEQ (K=13 over [1M, 15M)) and AES-256-GCM both reach the 128-bit post-quantum threshold.",
     },
     {
         "attack":      "Simon's algorithm (hidden shift / period)",
@@ -176,7 +177,7 @@ def run_benchmark(message: str, iterations: int = 10) -> dict:
     results: dict = {}
 
     # ── NAPSEQ ────────────────────────────────────────────────────────────────
-    napseq_key = generate_prime_numbers(count=10)
+    napseq_key = generate_prime_numbers()
     enc_times, dec_times = [], []
     napseq_ct = b""
     for _ in range(iterations):

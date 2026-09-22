@@ -3,11 +3,12 @@
 skills/**
 logs/**
 .github/agents/**
-demos/
+demos/**
 patents/
 tmp/
 verticals/
 rust/src/vale
+rust/src/bin/vale_demo.rs
 *.pptx
 napqes_ip_summary.html
 NAPQES_propriete_intellectuelle.pdf
@@ -18,3 +19,6 @@ docs/PROTOCOL_OVERVIEW.md
 docs/VALE_*
 *.o
 *.txt
+docs/ANSSI/**
+docs/communication/**
+tools/**
