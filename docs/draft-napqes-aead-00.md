@@ -144,9 +144,11 @@ The key is serialised to a byte string `key_bytes` for use as the HMAC key:
 key_bytes = be5(key[0]) || be5(key[1]) || ... || be5(key[K-1])
 ~~~
 
-A 10-element key in the range [1 000 000, 15 000 000] provides a key space
-of approximately 2^197.67 (approximately 2^98.84 post-Grover), meeting the
-2^98 post-quantum security target after Grover's quadratic speedup.
+A 13-element key in the range [1 000 000, 15 000 000) provides a key space
+of approximately 2^256.97 (approximately 2^128.49 post-Grover), meeting the
+2^128 post-quantum security target after Grover's quadratic speedup.  The
+range contains exactly 892 206 primes (sieve-verified); key entropy is the
+ordered-tuple count log2(|P|! / (|P|-K)!), not the 40K-bit serialised length.
 
 # Domain-Separated HMAC Derivation
 
@@ -346,15 +348,45 @@ Implementations MUST NOT release any plaintext before the tag is verified
 
 ## Streaming Mode
 
-A streaming variant exists in which padding is not applied and the auth tag
-is appended after the token stream.  The stream and block modes are **not
-cross-compatible**.  Decryption in streaming mode with verification of the
-auth tag before yielding plaintext is provided by `decrypt_stream_strict`;
-the RUP variant requires explicit caller opt-in.
+Two streaming variants exist. The v8 variant (`FORMAT_STREAM_AE_V8 = 0x02`,
+see SPEC.md §8.2) is the sole normative streaming format for new
+deployments. The legacy v7 variants are retained for compatibility with
+existing ciphertext.
 
-**Known caveat (CAV-001):** the streaming RUP API (`decrypt_stream` with
-`enable_unauthenticated_streaming=True`) yields plaintext before tag
-verification.  Callers SHOULD use `decrypt_stream_strict` instead.
+### v8 streaming AE (recommended)
+
+`encrypt_stream_ae_v8` / `decrypt_stream_ae_v8` produce a chunked stream
+in which each chunk is a self-contained v8 primitive call keyed by a
+per-chunk sub-nonce derived from `(sk_fmt, nonce, chunk_idx)` under
+domain `0x0E`. Every chunk carries exactly `F` real-codepoint slots
+(sender-chosen, public) and expands to a fixed `F * 160` bytes of
+masked_blob plus a 32-byte per-chunk tag (domain `0x0C`), giving a
+per-chunk ciphertext length that is a pure function of `F`. The final
+chunk is HMAC-filler-padded to `F` codepoints; the sentinel tag (domain
+`0x0D`) binds both the chunk count (anti-truncation) and the true
+real-codepoint count (anti-filler-forgery). Per-chunk tags verify before
+any plaintext from that chunk is yielded, so there is no RUP.
+
+**Known caveat (CAV-005).** Unlike v8 block mode, the v8 streaming
+16-byte nonce is CSPRNG-drawn, not SIV-derived (SIV requires hashing the
+full message, which is incompatible with streaming). Nonce reuse across
+two streams under the same `sk` is catastrophic (CVF3-class hazard). All
+production APIs draw the nonce internally; callers MUST NOT persist a
+"session key + stream counter" nonce derivation. See `docs/CAVEATS.md`
+CAV-005.
+
+### Legacy v7 streaming (deprecated for new ciphertext)
+
+A legacy variant exists in which padding is not applied and the auth tag
+is appended after the token stream. The stream and block modes are **not
+cross-compatible**. Decryption in this legacy streaming mode with
+verification of the auth tag before yielding plaintext is provided by
+`decrypt_stream_strict`; the RUP variant requires explicit caller opt-in.
+
+**Known caveat (CAV-001):** the legacy streaming RUP API (`decrypt_stream`
+with `enable_unauthenticated_streaming=True`) yields plaintext before tag
+verification. Callers SHOULD use `decrypt_stream_strict` instead, and
+SHOULD migrate to `encrypt_stream_ae_v8` for new deployments.
 
 # Security Considerations
 
@@ -394,8 +426,8 @@ algorithm applied to SHA-256 preimage search, reducing the effective security
 level from 256 bits to approximately 128 bits — still above all recommended
 thresholds.
 
-Key enumeration requires testing up to 2^197.67 key candidates (10-element key,
-[1M, 15M] range).  Grover's algorithm reduces this to approximately 2^98.84,
+Key enumeration requires testing up to 2^256.97 key candidates (13-element key,
+[1M, 15M) range).  Grover's algorithm reduces this to approximately 2^128.49,
 which remains computationally infeasible with foreseeable quantum hardware.
 
 ## Nonce Requirements
@@ -426,8 +458,8 @@ different byte-length depending on codepoint magnitude.
 ## Key Size and Format
 
 The prime-tuple key format is unusual compared to conventional AEAD keys.
-The minimum recommended key is a 10-element prime tuple from [1M, 15M],
-providing approximately 2^197.67 classical key entropy and approximately 2^98.84
+The minimum recommended key is a 13-element prime tuple from [1M, 15M),
+providing approximately 2^256.97 classical key entropy and approximately 2^128.49
 post-quantum key entropy.  Single-element keys provide approximately 2^23
 entropy and are NOT RECOMMENDED for production use.
 

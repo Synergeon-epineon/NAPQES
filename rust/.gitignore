@@ -1,2 +1,13 @@
 /target
-Cargo.lock
+
+# CVF-23: fuzz artifacts should not be committed, but the fuzz corpora
+# should be (see fuzz/corpus/, tracked by cargo-fuzz for coverage carry-
+# over between runs).
+fuzz/target/
+fuzz/artifacts/
+
+# CVF-23: Cargo.lock IS committed for this crate. It was previously
+# gitignored, which meant the KAT / cross-lang parity results and the
+# fuzz-attestation "10^6 corpus entries" figure could not be tied to any
+# pinned build. The lock is now tracked so a reader can reconstruct the
+# exact dependency graph attested to.

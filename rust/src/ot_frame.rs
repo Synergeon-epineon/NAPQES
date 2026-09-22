@@ -31,6 +31,12 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+// CVF-17: ot_frame is the current in-tree consumer of the v7 raw API and
+// remains on the deprecated encryptor until it is either migrated to a v8
+// byte-oriented entry point or the module is itself retired. The
+// #[allow(deprecated)] scoping is deliberately narrow — the import and the
+// two call sites — so a future migration surfaces immediately.
+#[allow(deprecated)]
 use crate::{decrypt_raw, encrypt_raw};
 
 // ─── Protocol identifiers ─────────────────────────────────────────────────────
@@ -294,6 +300,7 @@ impl KeyStore for Arc<SessionKeyStore> {
 /// the secure-side TCP connection.
 pub fn wrap_pdu(pdu: &[u8], aad: OtAad, key: &[u64]) -> Result<Vec<u8>, FrameError> {
     let aad_bytes = aad.to_bytes();
+    #[allow(deprecated)] // CVF-17: see module-level note on ot_frame
     let napqes_blob = encrypt_raw(pdu, key, &aad_bytes)
         .map_err(|e| FrameError::CryptoError(e))?;
 

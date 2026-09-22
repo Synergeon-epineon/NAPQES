@@ -19,12 +19,12 @@ A NAPQES symmetric key is an **ordered tuple** of K distinct prime integers:
 key = (p_0, p_1, ..., p_{K-1})
 ```
 
-where each `p_i` is a prime in `[1 000 000, 15 000 000]`.
+where each `p_i` is a prime in `[1 000 000, 14 999 999]`.
 
 **Recommended parameters:**
-- K = 10 (default)
-- Range: [1 000 000, 15 000 000]
-- Provides ≈2^197.67 classical key entropy (≈2^98.84 post-Grover)
+- K = 13 (default, `DEFAULT_KEY_COUNT`)
+- Range: [1 000 000, 14 999 999], equivalently the half-open [10^6, 1.5×10^7)
+- Provides ≈2^256.97 classical key entropy (≈2^128.49 post-Grover)
 
 **Minimum acceptable parameters:**
 - K = 7 (satisfies FIPS 198-1 §3: key length ≥ HMAC output length, i.e. ≥ 32 bytes)
@@ -40,7 +40,7 @@ key_bytes = be5(p_0) || be5(p_1) || ... || be5(p_{K-1})
 
 where `be5(x)` is the 5 least-significant bytes of `x` in big-endian order.
 
-For K = 10: `key_bytes` is 50 bytes (400 bits).
+For K = 13: `key_bytes` is 65 bytes (520 bits).
 
 This serialised form is used as the HMAC key for all domain-separated
 derivations. It is computed internally by `key_bytes()` in `rust/src/lib.rs`
@@ -53,9 +53,12 @@ and is never exposed through the public API.
 ### 2.1 Key generation
 
 Keys are generated using `generate_prime_numbers(count, min_val, max_val)`,
-whose defaults are the normative interval
-`P = [MIN_KEY_PRIME, MAX_KEY_PRIME] = [1 000 000, 9 900 000]` specified in
-`docs/napseq-eprint-v3.tex` §Notation (`|P| = 579 947`, verified by sieve):
+whose defaults are the normative interval of the "PQ-128" profile,
+`P = [MIN_KEY_PRIME, MAX_KEY_PRIME] = [1 000 000, 14 999 999]` — equivalently
+the half-open `[10^6, 1.5×10^7)` — specified in
+`docs/napseq-eprint-v3.tex` §Notation (`|P| = 892 206`, verified by sieve),
+with `count` defaulting to `DEFAULT_KEY_COUNT = 13`
+(`H∞ = 256.9711` bits, `128.4855` bits post-Grover):
 
 1. Initialise `rand::thread_rng()` (OS DRBG — see `DRBG_ATTESTATION.md`).
 2. Draw a uniform random candidate from `[min_val, max_val]`.
@@ -68,8 +71,11 @@ key generation completes (does not panic), which requires a sufficiently wide
 range to contain at least `count` distinct primes.
 
 The `MAX_KEY_PRIME` bound constrains key *generation* only. Validation and
-decryption accept any key element `>= MIN_KEY_PRIME`, so prime tuples
-generated under the previous, wider bound remain usable without rekeying.
+decryption accept any key element in `[MIN_KEY_PRIME, 2^40 - 1]`, so prime
+tuples generated under the previous, narrower bound (`[10^6, 9.9×10^6]`,
+`K = 10`) remain usable without rekeying. The `2^40` ceiling is the largest
+value representable in the 5-byte key serialisation; a larger element would
+be silently truncated by the Rust and C ports and is therefore rejected.
 
 Callers may also supply externally generated prime tuples. The module does
 not validate that supplied integers are prime; this is the caller's
@@ -158,10 +164,10 @@ disabled swap.
 
 | Parameter | Value | Standard reference |
 |---|---|---|
-| Classical key entropy (K=10) | ≈2^197.67 bits | SP 800-57 Pt 1 §5.6: key entropy ≥ security level |
-| Post-quantum key entropy (Grover, K=10) | ≈2^98.84 bits | SP 800-57 Pt 1 Rev 5 §5.6.3 |
+| Classical key entropy (K=13) | ≈2^256.97 bits | SP 800-57 Pt 1 §5.6: key entropy ≥ security level |
+| Post-quantum key entropy (Grover, K=13) | ≈2^128.49 bits | SP 800-57 Pt 1 Rev 5 §5.6.3 |
 | Authentication tag | 256 bits (128 post-Grover) | FIPS 198-1 |
-| Minimum key size (FIPS 198-1 §3) | K ≥ 7 (35 bytes) | Satisfied by default K=10 |
+| Minimum key size (FIPS 198-1 §3) | K ≥ 7 (35 bytes) | Satisfied by default K=13 |
 | Maximum key lifetime | Not defined by the module | Caller-determined; rotate periodically |
 | Maximum number of encrypt calls per key | Not defined | No key-material exhaustion risk for reasonable volumes; see nonce collision analysis in `DRBG_ATTESTATION.md §4.1` |
 
@@ -169,14 +175,62 @@ disabled swap.
 
 ## 4. Key Agreement and Transport
 
-The NAPQES Cryptographic Module does **not** implement key agreement or
-key transport. Symmetric keys MUST be distributed to parties by an
-out-of-band mechanism. Recommended approaches:
+The NAPQES **AEAD** module (`napqes.py`, `rust/src/lib.rs`, `C/napqes.c`)
+does not itself implement key agreement: symmetric keys are supplied to it
+by the caller. Key establishment is provided by a separate, adjacent
+component (`napqes_kem.py`, `rust/src/kem.rs`), which is **not** part of the
+C port.
+
+### 4.1 Hybrid key establishment (recommended)
+
+`keygen_hybrid` / `encapsulate_hybrid` / `decapsulate_hybrid` implement a
+**hybrid** exchange, as required by ANSSI's post-quantum migration doctrine:
+the derived key remains secure as long as *either* component holds.
+
+| Component | Mechanism | Shared secret |
+|---|---|---|
+| Post-quantum | FrodoKEM-640-AES (unstructured LWE, NIST level 1) | 16 bytes |
+| Classical | X25519, ephemeral-static (RFC 7748) | 32 bytes |
+
+Derivation:
+
+1. `ikm = ss_frodo || ss_x25519` (48 bytes, fixed order).
+2. `seed = HKDF-SHA256(salt = "NAPQES-hybrid-FrodoKEM640AES-X25519-prime-key",
+   ikm, info = transcript, L = 32)`.
+   Because HKDF-Extract is a PRF keyed by the salt, recovering `seed`
+   requires breaking **every** concatenated component — this is what makes
+   the construction a true hybrid rather than a concatenated fallback.
+3. `transcript = "v2" || be32(len)||pk_frodo || be32(len)||ct_frodo ||
+   be32(len)||pk_x25519_static || be32(len)||pk_x25519_ephemeral`, binding
+   the derived key to the full session transcript. Length prefixes make the
+   concatenation injective.
+4. `seed` is expanded by counter-mode HMAC-SHA256 into the ordered prime
+   tuple by rejection sampling (see 4.3).
+
+**Mandatory check:** an all-zero X25519 output is rejected. RFC 7748 §6.1
+leaves this optional, but for a hybrid it is required — otherwise a peer
+supplying a small-order point silently degrades the exchange to
+FrodoKEM-only.
+
+Blob sizes: public key 9 648 B, secret key 29 536 B, ciphertext 9 752 B.
+The recipient's FrodoKEM public key is carried inside the secret key so the
+decapsulator can rebuild the same transcript.
+
+### 4.2 Legacy FrodoKEM-only establishment
+
+`keygen` / `encapsulate` / `decapsulate` retain the earlier Frodo-only
+exchange for deployments provisioned before hybridisation. It uses a
+distinct HKDF salt, so the two schedules can never derive the same key from
+the same FrodoKEM secret. New deployments **SHOULD** use the hybrid API.
+
+### 4.3 Out-of-band alternatives
+
+Where the KEM component is not deployed, symmetric keys MUST be distributed
+by an out-of-band mechanism:
 
 - **Static pre-shared key:** Provisioned at manufacture or deployment.
-- **ECDH + HKDF:** Exchange ephemeral DH keys, derive NAPQES key via HKDF.
-- **ML-KEM (FIPS 203):** Post-quantum key encapsulation, derive NAPQES key
-  via a KDF. This is the recommended hybrid approach for post-quantum deployments.
+- **ML-KEM (FIPS 203):** Post-quantum key encapsulation, derive the NAPQES
+  key via a KDF — to be hybridised with a classical mechanism as above.
 
 When a KDF is used to derive the prime-tuple key from a master secret,
 the KDF output MUST be used to select prime elements via rejection sampling

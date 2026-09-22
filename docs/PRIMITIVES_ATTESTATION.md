@@ -44,9 +44,9 @@
 | `0x06` | `_pad_message` | L209–227 | Deterministic padding byte ∈ [32, 126] | FIPS 198-1 §5 |
 | `0x03` | `_compute_auth_tag` | L167–174 | AEAD authentication tag | FIPS 198-1 §5 |
 
-**Key length.** For a K-element key where each element is a 7-digit decimal
-prime (≤ 24 bits), `key_bytes` is 5K bytes. For the default K = 10,
-`key_bytes` = 50 bytes (400 bits). FIPS 198-1 §3 requires the key to be at
+**Key length.** For a K-element key where each element is a prime below
+`1.5×10^7` (≤ 24 bits), `key_bytes` is 5K bytes. For the default K = 13,
+`key_bytes` = 65 bytes (520 bits). FIPS 198-1 §3 requires the key to be at
 least as long as the hash output (256 bits); this requirement is satisfied
 for K ≥ 7 (35 bytes > 32 bytes).
 
@@ -78,8 +78,8 @@ implementation. This is stated to prevent incorrect assumptions:
 
 | Primitive | Status | Note |
 |---|---|---|
-| AES (any mode) | **Not used** | By design; NAPQES targets non-AES-hardware environments |
-| ECDH / X25519 | **Not used** | Key exchange is out of scope |
+| AES (any mode) | **Not used** | By design; NAPQES targets non-AES-hardware environments. Note the KEM component uses FrodoKEM-640-**AES**, whose internal AES is provided by liboqs / `pqcrypto-frodo`, not by the AEAD module |
+| ECDH / X25519 | **Used in the key-establishment component only** | `napqes_kem.py` / `rust/src/kem.rs` use X25519 (RFC 7748) as the classical half of the hybrid exchange. The AEAD module itself (`napqes.py`, `rust/src/lib.rs`, `C/napqes.c`) contains no asymmetric cryptography |
 | RSA | **Not used** | — |
 | Poly1305 / ChaCha20 | **Not used** | — |
 | MD5 / SHA-1 | **Not used** | — |
@@ -126,7 +126,7 @@ procurement responses, subject to counsel sign-off:
 - [x] Confirm OS entropy source classification for each supported platform
       — documented in [`docs/DRBG_ATTESTATION.md`](DRBG_ATTESTATION.md)
 - [x] Confirm FIPS 198-1 key-length requirement is met for minimum key size
-      (K ≥ 7 required; default K = 10 — currently acceptable)
+      (K ≥ 7 required; default K = 13 — currently acceptable)
 - [x] Document key-derivation path if customers use a KDF to generate
       the prime-key list — documented in [`docs/fips/KEY_MANAGEMENT.md`](fips/KEY_MANAGEMENT.md) §4
 - [x] Add platform-specific notes for embedded targets (Cortex-M, RV32)

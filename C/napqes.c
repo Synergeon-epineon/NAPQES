@@ -63,11 +63,11 @@ int napqes_is_prime(uint64_t n) {
 }
 
 /* Minimum recommended number of prime key elements (Remark "min-K",
- * docs/napseq-eprint-preprint.tex §CVF8-fix). With |P| ~ 586,000-892,000
- * primes, H_inf(key) ~= 19.16*K bits; K < 7 gives H_inf(key) < 128 bits,
- * making offline exhaustive key search feasible. Enforced as a *warning*
- * only (not a hard failure) so existing small-K KAT/test vectors keep
- * working. */
+ * docs/napseq-eprint-preprint.tex §CVF8-fix). With the "PQ-128" interval
+ * |P| = 892,206, H_inf(key) ~= 19.77*K bits; K < 7 gives H_inf(key) < 128
+ * bits, making offline exhaustive key search feasible. Enforced as a
+ * *warning* only (not a hard failure) so existing small-K KAT/test vectors
+ * keep working. */
 #define NAPQES_MIN_KEY_COUNT 7
 
 static void warn_if_weak_key_count(size_t count) {
@@ -78,7 +78,7 @@ static void warn_if_weak_key_count(size_t count) {
             "making offline exhaustive key search feasible (see "
             "docs/napseq-eprint-preprint.tex, Remark 'min-K'). This key is "
             "usable but is NOT conformant with NAPQES's IND-CPA security "
-            "claim; use K>=7 (default K=10) for production deployments.\n",
+            "claim; use K>=7 (default K=13) for production deployments.\n",
             count, NAPQES_MIN_KEY_COUNT);
     }
 }
@@ -283,6 +283,9 @@ static int validate_key(const uint64_t *primes, size_t klen) {
     for (size_t i = 0; i < klen; ++i) {
         if (!napqes_is_prime(primes[i])) return 0;
         if (primes[i] < NAPQES_MIN_KEY_PRIME) return 0;
+        /* key_bytes keeps only the low 5 bytes; a larger element would be
+         * silently truncated into a different key than Python accepts. */
+        if (primes[i] > NAPQES_MAX_SERIALISABLE_KEY_PRIME) return 0;
         for (size_t j = 0; j < i; ++j) {
             if (primes[j] == primes[i]) return 0;
         }
@@ -1205,4 +1208,491 @@ char *napqes_decrypt_str(const char *cypher,
     char *s = napqes_decrypt_bytes(bin, (size_t)n, key, klen, aad, aad_len);
     free(bin);
     return s;
+}
+
+
+/* ============================================================================
+ * V8 streaming AE (FORMAT_STREAM_AE_V8) -- see napqes.h for the wire format
+ * and docs/CAVEATS.md CAV-005 for the caveat on the CSPRNG nonce.
+ * ==========================================================================*/
+
+#define NAPQES_DOMAIN_STREAM_V8_CHUNK_TAG 0x0C
+#define NAPQES_DOMAIN_STREAM_V8_SENTINEL  0x0D
+#define NAPQES_DOMAIN_STREAM_V8_SUBNONCE  0x0E
+
+/* Domain 0x0E: sub_nonce_i = HMAC(sk_fmt, 0x0E || nonce || be4(i))[:16].
+ * Each streaming chunk is a self-contained v8 primitive call keyed by
+ * (sk_fmt, sub_nonce_i), so domains 0x00-0x07 are reused verbatim without
+ * cross-chunk state. */
+static void derive_stream_v8_sub_nonce(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                       const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                       uint32_t chunk_idx,
+                                       uint8_t out[NAPQES_NONCE_SIZE]) {
+    uint8_t tail[4] = {
+        (uint8_t)((chunk_idx >> 24) & 0xFF),
+        (uint8_t)((chunk_idx >> 16) & 0xFF),
+        (uint8_t)((chunk_idx >> 8)  & 0xFF),
+        (uint8_t)(chunk_idx         & 0xFF),
+    };
+    uint8_t d[SHA256_DIGEST_SIZE];
+    hmac_with_sep(sk_fmt, SHA256_DIGEST_SIZE, nonce,
+                  NAPQES_DOMAIN_STREAM_V8_SUBNONCE, tail, 4, d);
+    memcpy(out, d, NAPQES_NONCE_SIZE);
+}
+
+/* Domain 0x06: HMAC-derived filler codepoint for the final partial chunk.
+ * Deterministic in (sk_fmt, sub_nonce, fill_idx); indistinguishable on the
+ * wire from real codepoints once passed through c * k + addend. */
+static uint32_t derive_stream_v8_filler_cp(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                           const uint8_t sub_nonce[NAPQES_NONCE_SIZE],
+                                           uint32_t fill_idx) {
+    return derive_pad_char(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, fill_idx);
+}
+
+/* Compute the per-chunk HMAC tag (domain 0x0C).
+ * HMAC(sk_fmt, 0x0C || nonce || be4(chunk_idx) || be8(|aad|) || aad
+ *              || masked_chunk). */
+static void compute_stream_v8_chunk_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                        const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                        uint32_t chunk_idx,
+                                        const uint8_t *aad, size_t aad_len,
+                                        const uint8_t *masked_chunk, size_t masked_len,
+                                        uint8_t out[NAPQES_TAG_SIZE]) {
+    uint8_t k0[SHA256_BLOCK_SIZE];
+    memcpy(k0, sk_fmt, SHA256_DIGEST_SIZE);
+    memset(k0 + SHA256_DIGEST_SIZE, 0, SHA256_BLOCK_SIZE - SHA256_DIGEST_SIZE);
+    uint8_t ipad[SHA256_BLOCK_SIZE], opad[SHA256_BLOCK_SIZE];
+    for (int i = 0; i < SHA256_BLOCK_SIZE; ++i) {
+        ipad[i] = k0[i] ^ 0x36;
+        opad[i] = k0[i] ^ 0x5c;
+    }
+    uint8_t sep = NAPQES_DOMAIN_STREAM_V8_CHUNK_TAG;
+    uint8_t idx_be[4] = {
+        (uint8_t)((chunk_idx >> 24) & 0xFF),
+        (uint8_t)((chunk_idx >> 16) & 0xFF),
+        (uint8_t)((chunk_idx >> 8)  & 0xFF),
+        (uint8_t)(chunk_idx         & 0xFF),
+    };
+    uint8_t aad_len_be[8];
+    be_len_prefix(aad_len, AAD_LEN_WIDTH_V8, aad_len_be);
+    sha256_ctx c;
+    uint8_t inner[SHA256_DIGEST_SIZE];
+    sha256_init(&c);
+    sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
+    sha256_update(&c, &sep, 1);
+    sha256_update(&c, nonce, NAPQES_NONCE_SIZE);
+    sha256_update(&c, idx_be, 4);
+    sha256_update(&c, aad_len_be, AAD_LEN_WIDTH_V8);
+    if (aad_len) sha256_update(&c, aad, aad_len);
+    if (masked_len) sha256_update(&c, masked_chunk, masked_len);
+    sha256_final(&c, inner);
+    sha256_init(&c);
+    sha256_update(&c, opad, SHA256_BLOCK_SIZE);
+    sha256_update(&c, inner, SHA256_DIGEST_SIZE);
+    sha256_final(&c, out);
+}
+
+/* Compute the sentinel HMAC tag (domain 0x0D).
+ * HMAC(sk_fmt, 0x0D || nonce || be4(chunk_count) || be8(|aad|) || aad
+ *              || be8(total_real_codepoints)). */
+static void compute_stream_v8_sentinel_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                           const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                           uint32_t chunk_count,
+                                           const uint8_t *aad, size_t aad_len,
+                                           uint64_t total_real_cps,
+                                           uint8_t out[NAPQES_TAG_SIZE]) {
+    uint8_t k0[SHA256_BLOCK_SIZE];
+    memcpy(k0, sk_fmt, SHA256_DIGEST_SIZE);
+    memset(k0 + SHA256_DIGEST_SIZE, 0, SHA256_BLOCK_SIZE - SHA256_DIGEST_SIZE);
+    uint8_t ipad[SHA256_BLOCK_SIZE], opad[SHA256_BLOCK_SIZE];
+    for (int i = 0; i < SHA256_BLOCK_SIZE; ++i) {
+        ipad[i] = k0[i] ^ 0x36;
+        opad[i] = k0[i] ^ 0x5c;
+    }
+    uint8_t sep = NAPQES_DOMAIN_STREAM_V8_SENTINEL;
+    uint8_t idx_be[4] = {
+        (uint8_t)((chunk_count >> 24) & 0xFF),
+        (uint8_t)((chunk_count >> 16) & 0xFF),
+        (uint8_t)((chunk_count >> 8)  & 0xFF),
+        (uint8_t)(chunk_count         & 0xFF),
+    };
+    uint8_t aad_len_be[8];
+    be_len_prefix(aad_len, AAD_LEN_WIDTH_V8, aad_len_be);
+    uint8_t total_be[8];
+    for (int i = 0; i < 8; ++i)
+        total_be[7 - i] = (uint8_t)((total_real_cps >> (i * 8)) & 0xFF);
+    sha256_ctx c;
+    uint8_t inner[SHA256_DIGEST_SIZE];
+    sha256_init(&c);
+    sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
+    sha256_update(&c, &sep, 1);
+    sha256_update(&c, nonce, NAPQES_NONCE_SIZE);
+    sha256_update(&c, idx_be, 4);
+    sha256_update(&c, aad_len_be, AAD_LEN_WIDTH_V8);
+    if (aad_len) sha256_update(&c, aad, aad_len);
+    sha256_update(&c, total_be, 8);
+    sha256_final(&c, inner);
+    sha256_init(&c);
+    sha256_update(&c, opad, SHA256_BLOCK_SIZE);
+    sha256_update(&c, inner, SHA256_DIGEST_SIZE);
+    sha256_final(&c, out);
+}
+
+/* Encode exactly F * (NAPQES_MAX_NOISE_RUN + 1) tokens for one streaming
+ * chunk. Sibling of encrypt_core_det_v8 but takes a caller-supplied
+ * fixed-length codepoint slice of exactly F real codepoints (no
+ * pad_message, no 2-byte length prefix). Returns 0/-1 and sets
+ * *blob_out / *blob_len (which is exactly F * TOKEN_WIDTH * (MAX_NOISE_RUN + 1)). */
+static int encrypt_v8_stream_chunk_core(const uint32_t *chunk_cps, uint32_t F,
+                                        const uint64_t *primes, size_t klen,
+                                        const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                        const uint8_t sub_nonce[NAPQES_NONCE_SIZE],
+                                        uint8_t **blob_out, size_t *blob_len) {
+    if (klen == 0) return -1;
+    uint64_t noise_theta = derive_noise_threshold_v8(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce);
+    size_t out_bytes = (size_t)F * TOKEN_WIDTH * ((size_t)NAPQES_MAX_NOISE_RUN + 1);
+    uint8_t *buf = (uint8_t *)malloc(out_bytes ? out_bytes : 1);
+    if (!buf) return -1;
+    size_t len = 0;
+    uint64_t real_idx = 0;
+    uint64_t ct_pos = 0;
+
+    for (uint32_t i = 0; i < F; ++i) {
+        unsigned noise_run = 0;
+        for (;;) {
+            uint64_t k = primes[real_idx % klen];
+            if (noise_run < NAPQES_MAX_NOISE_RUN
+                && is_noise_pos_v8(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, ct_pos, noise_theta)) {
+                uint64_t nc  = derive_noise_char(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, ct_pos);
+                uint64_t nad = derive_noise_token_addend(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, ct_pos, k);
+                fixed_encode(nc * k + nad, buf + len);
+                len += TOKEN_WIDTH;
+                ct_pos++;
+                noise_run++;
+            } else {
+                uint64_t addend = derive_addend(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, real_idx, k);
+                fixed_encode((uint64_t)chunk_cps[i] * k + addend, buf + len);
+                len += TOKEN_WIDTH;
+                ct_pos++;
+                real_idx++;
+                break;
+            }
+        }
+    }
+    /* Fill up to the fixed ceiling. */
+    size_t cur_tokens = len / TOKEN_WIDTH;
+    size_t ceiling_tokens = (size_t)F * ((size_t)NAPQES_MAX_NOISE_RUN + 1);
+    while (cur_tokens < ceiling_tokens) {
+        uint64_t k = primes[real_idx % klen];
+        uint64_t nc  = derive_noise_char(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, ct_pos);
+        uint64_t nad = derive_noise_token_addend(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, ct_pos, k);
+        fixed_encode(nc * k + nad, buf + len);
+        len += TOKEN_WIDTH;
+        ct_pos++;
+        cur_tokens++;
+    }
+    *blob_out = buf;
+    *blob_len = len;
+    return 0;
+}
+
+/* Recover exactly F codepoints from a streaming chunk's token stream.
+ * `blob_len` must equal F * TOKEN_WIDTH * (NAPQES_MAX_NOISE_RUN + 1).
+ * Returns a malloc'd uint32_t[F] or NULL on malformed content. */
+static uint32_t *decrypt_v8_stream_chunk_core(const uint8_t *blob, size_t blob_len,
+                                              const uint64_t *primes, size_t klen,
+                                              const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                              const uint8_t sub_nonce[NAPQES_NONCE_SIZE],
+                                              uint32_t F) {
+    if (klen == 0) return NULL;
+    if (blob_len != (size_t)F * TOKEN_WIDTH * ((size_t)NAPQES_MAX_NOISE_RUN + 1)) return NULL;
+    uint64_t noise_theta = derive_noise_threshold_v8(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce);
+    size_t n_tokens = blob_len / TOKEN_WIDTH;
+
+    uint32_t *out = (uint32_t *)malloc(((size_t)F + 1) * sizeof(uint32_t));
+    if (!out) return NULL;
+    uint32_t out_n = 0;
+    uint64_t real_idx = 0;
+    size_t ct_pos = 0;
+
+    while (real_idx < F) {
+        unsigned noise_run = 0;
+        while (noise_run < NAPQES_MAX_NOISE_RUN
+               && ct_pos < n_tokens
+               && is_noise_pos_v8(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, (uint64_t)ct_pos, noise_theta)) {
+            ct_pos++;
+            noise_run++;
+        }
+        if (ct_pos >= n_tokens) { free(out); return NULL; }
+        uint64_t k = primes[real_idx % klen];
+        uint64_t addend = derive_addend(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, real_idx, k);
+        uint64_t token = fixed_decode(blob + ct_pos * TOKEN_WIDTH);
+        if (token < addend || (token - addend) % k != 0) { free(out); return NULL; }
+        uint64_t cp = (token - addend) / k;
+        if (cp > 0x10FFFFULL || (cp >= 0xD800ULL && cp <= 0xDFFFULL)) { free(out); return NULL; }
+        out[out_n++] = (uint32_t)cp;
+        ct_pos++;
+        real_idx++;
+    }
+    return out;
+}
+
+/* Emit one full CHUNK FRAME (be4(F*160) || masked || tag).
+ * Returns malloc'd frame or NULL. */
+static uint8_t *emit_stream_v8_chunk(const uint32_t *chunk_cps, uint32_t F, uint32_t idx,
+                                     const uint64_t *primes, size_t klen,
+                                     const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                     const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                     const uint8_t *aad, size_t aad_len,
+                                     size_t *frame_len) {
+    uint8_t sub_nonce[NAPQES_NONCE_SIZE];
+    derive_stream_v8_sub_nonce(sk_fmt, nonce, idx, sub_nonce);
+    uint8_t *blob = NULL;
+    size_t blob_len = 0;
+    if (encrypt_v8_stream_chunk_core(chunk_cps, F, primes, klen, sk_fmt, sub_nonce,
+                                     &blob, &blob_len) != 0) {
+        return NULL;
+    }
+    uint8_t *ks = varint_keystream_alloc(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, blob_len);
+    if (!ks) { free(blob); return NULL; }
+    for (size_t i = 0; i < blob_len; ++i) blob[i] ^= ks[i];
+    free(ks);
+
+    size_t frame_bytes = 4 + blob_len + NAPQES_TAG_SIZE;
+    uint8_t *frame = (uint8_t *)malloc(frame_bytes);
+    if (!frame) { free(blob); return NULL; }
+    frame[0] = (uint8_t)((blob_len >> 24) & 0xFF);
+    frame[1] = (uint8_t)((blob_len >> 16) & 0xFF);
+    frame[2] = (uint8_t)((blob_len >> 8)  & 0xFF);
+    frame[3] = (uint8_t)(blob_len         & 0xFF);
+    memcpy(frame + 4, blob, blob_len);
+    uint8_t tag[NAPQES_TAG_SIZE];
+    compute_stream_v8_chunk_tag(sk_fmt, nonce, idx, aad, aad_len, blob, blob_len, tag);
+    memcpy(frame + 4 + blob_len, tag, NAPQES_TAG_SIZE);
+    free(blob);
+    *frame_len = frame_bytes;
+    return frame;
+}
+
+/* Core streaming encrypt with an explicit nonce. Used by both the public
+ * CSPRNG-nonce API and the test-only nonce-injecting API. */
+static uint8_t *encrypt_stream_v8_impl(const char *message,
+                                       const uint64_t *primes, size_t klen,
+                                       const uint8_t sk[NAPQES_SK_SIZE],
+                                       const uint8_t *aad, size_t aad_len,
+                                       uint32_t F,
+                                       const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                       size_t *out_len) {
+    if (!message || !out_len || !primes || !sk || !nonce) return NULL;
+    if (!validate_key(primes, klen)) return NULL;
+    if (F < 1 || F > NAPQES_STREAM_AE_V8_MAX_FRAME) return NULL;
+
+    size_t msg_len = strlen(message);
+    size_t n_chunks = (msg_len + F - 1) / F;  /* 0 if msg_len == 0 */
+    size_t chunk_frame_len = 4 + (size_t)F * 160 + NAPQES_TAG_SIZE;
+    size_t total = 21 + n_chunks * chunk_frame_len + 44;
+
+    uint8_t *stream = (uint8_t *)malloc(total);
+    if (!stream) return NULL;
+    size_t pos = 0;
+
+    /* HEADER */
+    stream[pos++] = NAPQES_FORMAT_STREAM_AE_V8;
+    stream[pos++] = (uint8_t)((F >> 24) & 0xFF);
+    stream[pos++] = (uint8_t)((F >> 16) & 0xFF);
+    stream[pos++] = (uint8_t)((F >> 8)  & 0xFF);
+    stream[pos++] = (uint8_t)(F         & 0xFF);
+    memcpy(stream + pos, nonce, NAPQES_NONCE_SIZE);
+    pos += NAPQES_NONCE_SIZE;
+
+    uint8_t sk_fmt[SHA256_DIGEST_SIZE];
+    derive_format_subkey(sk, NAPQES_FORMAT_STREAM_AE_V8, sk_fmt);
+
+    /* Buffer for one chunk's codepoints (real + optional filler). */
+    uint32_t *cp_buf = (uint32_t *)malloc((size_t)F * sizeof(uint32_t));
+    if (!cp_buf) { free(stream); return NULL; }
+
+    uint64_t total_real_cps = 0;
+    uint32_t chunk_idx = 0;
+    size_t buf_n = 0;
+
+    for (size_t i = 0; i < msg_len; ++i) {
+        cp_buf[buf_n++] = (uint8_t)message[i];
+        total_real_cps++;
+        if (buf_n >= F) {
+            size_t frame_len = 0;
+            uint8_t *frame = emit_stream_v8_chunk(cp_buf, F, chunk_idx,
+                                                  primes, klen, sk_fmt, nonce,
+                                                  aad, aad_len, &frame_len);
+            if (!frame) { free(cp_buf); free(stream); return NULL; }
+            memcpy(stream + pos, frame, frame_len);
+            pos += frame_len;
+            free(frame);
+            buf_n = 0;
+            chunk_idx++;
+        }
+    }
+
+    if (buf_n > 0) {
+        /* Partial last chunk -- pad with filler codepoints under the same
+         * sub-nonce that will encrypt this chunk. */
+        uint8_t sub_nonce_last[NAPQES_NONCE_SIZE];
+        derive_stream_v8_sub_nonce(sk_fmt, nonce, chunk_idx, sub_nonce_last);
+        uint32_t fill_needed = F - (uint32_t)buf_n;
+        for (uint32_t j = 0; j < fill_needed; ++j) {
+            cp_buf[buf_n + j] = derive_stream_v8_filler_cp(sk_fmt, sub_nonce_last, j);
+        }
+        size_t frame_len = 0;
+        uint8_t *frame = emit_stream_v8_chunk(cp_buf, F, chunk_idx,
+                                              primes, klen, sk_fmt, nonce,
+                                              aad, aad_len, &frame_len);
+        if (!frame) { free(cp_buf); free(stream); return NULL; }
+        memcpy(stream + pos, frame, frame_len);
+        pos += frame_len;
+        free(frame);
+        chunk_idx++;
+    }
+
+    free(cp_buf);
+
+    /* SENTINEL */
+    stream[pos++] = 0; stream[pos++] = 0; stream[pos++] = 0; stream[pos++] = 0;
+    for (int i = 0; i < 8; ++i)
+        stream[pos + 7 - i] = (uint8_t)((total_real_cps >> (i * 8)) & 0xFF);
+    pos += 8;
+    uint8_t sentinel_tag[NAPQES_TAG_SIZE];
+    compute_stream_v8_sentinel_tag(sk_fmt, nonce, chunk_idx, aad, aad_len,
+                                   total_real_cps, sentinel_tag);
+    memcpy(stream + pos, sentinel_tag, NAPQES_TAG_SIZE);
+    pos += NAPQES_TAG_SIZE;
+
+    if (pos != total) { free(stream); return NULL; }
+    *out_len = total;
+    return stream;
+}
+
+uint8_t *napqes_encrypt_stream_ae_v8_bytes(const char *message,
+                                           const uint64_t *primes, size_t klen,
+                                           const uint8_t sk[NAPQES_SK_SIZE],
+                                           const uint8_t *aad, size_t aad_len,
+                                           uint32_t frame_codepoints,
+                                           size_t *out_len) {
+    uint8_t nonce[NAPQES_NONCE_SIZE];
+    if (secure_rand_bytes(nonce, NAPQES_NONCE_SIZE) != 0) return NULL;
+    return encrypt_stream_v8_impl(message, primes, klen, sk, aad, aad_len,
+                                  frame_codepoints, nonce, out_len);
+}
+
+#ifdef NAPQES_ENABLE_TEST_NONCE_API
+uint8_t *napqes_encrypt_stream_ae_v8_bytes_with_nonce(
+    const char *message,
+    const uint64_t *primes, size_t klen,
+    const uint8_t sk[NAPQES_SK_SIZE],
+    const uint8_t *aad, size_t aad_len,
+    uint32_t frame_codepoints,
+    const uint8_t nonce[NAPQES_NONCE_SIZE],
+    size_t *out_len) {
+    return encrypt_stream_v8_impl(message, primes, klen, sk, aad, aad_len,
+                                  frame_codepoints, nonce, out_len);
+}
+#endif /* NAPQES_ENABLE_TEST_NONCE_API */
+
+char *napqes_decrypt_stream_ae_v8_bytes(const uint8_t *stream, size_t stream_len,
+                                        const uint64_t *primes, size_t klen,
+                                        const uint8_t sk[NAPQES_SK_SIZE],
+                                        const uint8_t *aad, size_t aad_len) {
+    if (!stream || !primes || !sk) return NULL;
+    if (!validate_key(primes, klen)) return NULL;
+    if (stream_len < 21) return NULL;
+    if (stream[0] != NAPQES_FORMAT_STREAM_AE_V8) return NULL;
+    uint32_t F = ((uint32_t)stream[1] << 24) | ((uint32_t)stream[2] << 16)
+               | ((uint32_t)stream[3] << 8)  | (uint32_t)stream[4];
+    if (F < 1 || F > NAPQES_STREAM_AE_V8_MAX_FRAME) return NULL;
+    const uint8_t *nonce = stream + 5;
+
+    uint8_t sk_fmt[SHA256_DIGEST_SIZE];
+    derive_format_subkey(sk, NAPQES_FORMAT_STREAM_AE_V8, sk_fmt);
+
+    size_t expected_body_len = (size_t)F * TOKEN_WIDTH * ((size_t)NAPQES_MAX_NOISE_RUN + 1);
+    size_t frame_len = 4 + expected_body_len + NAPQES_TAG_SIZE;
+
+    /* Compute how many chunks are present.  Stream = 21 + n_chunks * frame_len + 44. */
+    size_t after_header = stream_len - 21;
+    if (after_header < 44) return NULL;  /* need at least a sentinel */
+    /* Sentinel is the last 44 bytes; everything between is chunk frames. */
+    size_t chunks_bytes = after_header - 44;
+    if (chunks_bytes % frame_len != 0) return NULL;
+    size_t n_chunks = chunks_bytes / frame_len;
+    if (n_chunks > 0xFFFFFFFFULL) return NULL;
+
+    /* Sentinel: verify first so we know the true real-cp count. */
+    const uint8_t *sentinel = stream + 21 + chunks_bytes;
+    if (sentinel[0] || sentinel[1] || sentinel[2] || sentinel[3]) return NULL;
+    uint64_t total_real_cps = 0;
+    for (int i = 0; i < 8; ++i) total_real_cps = (total_real_cps << 8) | sentinel[4 + i];
+    const uint8_t *recv_sentinel_tag = sentinel + 12;
+    uint8_t calc_sentinel_tag[NAPQES_TAG_SIZE];
+    compute_stream_v8_sentinel_tag(sk_fmt, nonce, (uint32_t)n_chunks, aad, aad_len,
+                                   total_real_cps, calc_sentinel_tag);
+    if (!constant_time_eq(recv_sentinel_tag, calc_sentinel_tag, NAPQES_TAG_SIZE)) return NULL;
+
+    /* Sanity: total_real_cps must lie in (n_chunks*F - F, n_chunks*F]
+     * (or exactly zero when n_chunks == 0). */
+    uint64_t max_real = (uint64_t)n_chunks * F;
+    uint64_t min_real = n_chunks == 0 ? 0 : max_real - F + 1;
+    if (n_chunks == 0) {
+        if (total_real_cps != 0) return NULL;
+        char *empty = (char *)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    if (total_real_cps < min_real || total_real_cps > max_real) return NULL;
+
+    /* Decode all chunks after verifying each tag. */
+    uint32_t *plain = (uint32_t *)malloc((size_t)total_real_cps * sizeof(uint32_t) + 1);
+    if (!plain) return NULL;
+    size_t plain_n = 0;
+    for (size_t i = 0; i < n_chunks; ++i) {
+        const uint8_t *frame = stream + 21 + i * frame_len;
+        uint32_t body_len = ((uint32_t)frame[0] << 24) | ((uint32_t)frame[1] << 16)
+                          | ((uint32_t)frame[2] << 8)  | (uint32_t)frame[3];
+        if ((size_t)body_len != expected_body_len) { free(plain); return NULL; }
+        const uint8_t *masked = frame + 4;
+        const uint8_t *recv_tag = frame + 4 + body_len;
+        uint8_t calc_tag[NAPQES_TAG_SIZE];
+        compute_stream_v8_chunk_tag(sk_fmt, nonce, (uint32_t)i, aad, aad_len,
+                                    masked, body_len, calc_tag);
+        if (!constant_time_eq(recv_tag, calc_tag, NAPQES_TAG_SIZE)) {
+            free(plain); return NULL;
+        }
+        /* Unmask + decode. */
+        uint8_t sub_nonce[NAPQES_NONCE_SIZE];
+        derive_stream_v8_sub_nonce(sk_fmt, nonce, (uint32_t)i, sub_nonce);
+        uint8_t *ks = varint_keystream_alloc(sk_fmt, SHA256_DIGEST_SIZE, sub_nonce, body_len);
+        if (!ks) { free(plain); return NULL; }
+        uint8_t *blob = (uint8_t *)malloc(body_len ? body_len : 1);
+        if (!blob) { free(ks); free(plain); return NULL; }
+        for (size_t j = 0; j < body_len; ++j) blob[j] = masked[j] ^ ks[j];
+        free(ks);
+        uint32_t *cps = decrypt_v8_stream_chunk_core(blob, body_len, primes, klen,
+                                                     sk_fmt, sub_nonce, F);
+        free(blob);
+        if (!cps) { free(plain); return NULL; }
+        /* On the last chunk, only keep the real (non-filler) codepoints. */
+        size_t keep = (i + 1 == n_chunks) ? (size_t)(total_real_cps - plain_n) : (size_t)F;
+        for (size_t j = 0; j < keep; ++j) plain[plain_n++] = cps[j];
+        free(cps);
+    }
+
+    /* Serialize codepoints to ASCII output. Matches decrypt_bytes_v8:
+     * rejects >0xFF codepoints. */
+    char *out = (char *)malloc(plain_n + 1);
+    if (!out) { free(plain); return NULL; }
+    for (size_t i = 0; i < plain_n; ++i) {
+        if (plain[i] > 0xFFu) { free(out); free(plain); return NULL; }
+        out[i] = (char)plain[i];
+    }
+    out[plain_n] = '\0';
+    free(plain);
+    return out;
 }
