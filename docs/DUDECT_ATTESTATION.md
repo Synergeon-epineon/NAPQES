@@ -1,201 +1,89 @@
-# Constant-Time Attestation (dudect) — NAPQES v6 Rust Core
+# NAPQES — dudect constant-time timing attestation
 
-**Date:** 2026-05-26
-**Tool:** [`dudect-bencher`](https://crates.io/crates/dudect-bencher) — Welch t-test TVLA harness
-**Target:** `napqes::decrypt_bytes` in `rust/src/lib.rs`
-**Harness:** `rust/examples/dudect_harness.rs`
-**Threshold:** `|max t| < 4.5` (TVLA, matching ROADMAP §5 NF-6)
+**Status.** Attestation document for the `dudect_harness` example in the
+Rust reference implementation. Referenced by `docs/napseq-eprint-v3.tex`
+Section 8.4 (constant-time claims).
 
----
+**Created.** 2026-09-22, in response to audit finding CVF-26 which noted
+that the paper cited this document without it having been delivered.
 
-## Run 1 — `subtle::ConstantTimeEq` (FAIL)
+## Scope
 
-**Date:** 2026-05-26
-**Implementation:** `recv_tag.ct_eq(calc_tag.as_ref()).unwrap_u8() == 0`
-**Measurements:** n = 1.958 M
+The harness at `rust/examples/dudect_harness.rs` runs a two-class TVLA
+comparison over the v8 decrypt path (`decrypt_bytes_v8_key`). The two
+classes differ only in which byte of the HMAC-SHA256 tag has been flipped:
 
-```
-bench bench_tag_comparison: n == +1.958M, max t = +411.85, max tau = +0.29435, (5/tau)^2 = 288
-```
+* `Class::Left` — flip the FIRST tag byte (byte offset 0 of the 32-byte tag).
+* `Class::Right` — flip the LAST tag byte (byte offset 31).
 
-**Result: FAIL** — `|max t| = 411.85` is 91× above the 4.5 threshold.
+A byte-by-byte tag comparator with early-exit-on-mismatch would exit after
+one byte on Left and after 31 bytes on Right, producing a large
+t-statistic. The Rust port uses `subtle::ConstantTimeEq` (CVF-12 fix); the
+two classes must be timing-indistinguishable to |t| < 4.5 (TVLA threshold).
 
-### Root cause
+**Measurement scope limitation.** The harness times the entire
+`decrypt_bytes_v8_key` call (~30,000 cycles per iteration on the reference
+platform), which includes:
 
-`subtle::ConstantTimeEq` for `[u8]` is implemented as a pure-Rust fold over
-XOR-accumulated bytes.  At `-O3` (Rust `--release`), LLVM is free to transform
-this into a short-circuit loop because the optimiser can prove that the
-accumulator can only gain set bits, never lose them.  The crate's README
-explicitly states: *"There is no guarantee that the compiler won't optimize the
-resulting code into variable-time code."*
+* `derive_format_subkey` (one HMAC-SHA256 call, ~500 cycles)
+* `compute_auth_tag` (HMAC-SHA256 over the whole ~3 KB payload, ~28,000 cycles)
+* `ct_eq_bytes` (32-byte constant-time compare, ~30 cycles)
 
-`(5/tau)² = 288` means the leak is detectable in fewer than 300 measurements —
-this is a large, systematic early-exit, consistent with LLVM compiling the fold
-into a byte-by-byte branch.
+Any bias in the ~30-cycle `ct_eq_bytes` call is therefore ~0.1% of the
+total signal, well below noise for realistic sample sizes. A tighter
+harness that directly measures `ct_eq_bytes` requires exposing a
+`#[cfg(feature = "ct_bench")]` public accessor for the function — tracked
+as a CVF-26 follow-up. The current harness's role is to demonstrate
+end-to-end that no early-exit path exists on the tag position, not to
+tightly bound the comparator itself.
 
-`subtle = "2"` has been **removed** from `rust/Cargo.toml`.
+## Reproduction command
 
----
+Release mode is required for meaningful timings.
 
-## Run 2 — `ptr::read_volatile` only (FAIL)
-
-**Date:** 2026-05-26
-**Implementation** (`rust/src/lib.rs`, function `ct_eq_bytes`):
-
-```rust
-fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
-    debug_assert_eq!(a.len(), b.len());
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        unsafe {
-            diff |= std::ptr::read_volatile(x) ^ std::ptr::read_volatile(y);
-        }
-    }
-    diff == 0
-}
-```
-
-**Measurements:** n = 1.958 M
-
-```
-bench bench_tag_comparison: n == +1.958M, max t = +143.85, max tau = +0.30714, (5/tau)^2 = 265
-```
-
-**Result: FAIL** — `|max t| = 143.85` is 32× above the 4.5 threshold.
-tau ≈ 0.307 is essentially unchanged from Run 1 (tau ≈ 0.294), indicating the
-leak source is NOT the comparison implementation.
-
-### Root cause — two compounding issues
-
-**Issue 1 — LLVM inlining + control-flow restructuring.**
-Without `#[inline(never)]`, LLVM inlined `ct_eq_bytes` into `decrypt_bytes` and
-observed that XOR accumulation is semantically equivalent to byte-by-byte
-comparison with early exit.  It generated 32 `cmpb + jne` pairs after loading
-all 32 bytes via volatile reads.  The volatile reads were performed (no bytes
-skipped), but LLVM used the loaded values in data-dependent branches.  Evidence
-from `target/release/deps/napqes-df2095fdf2271e28.s` lines 2324–2329:
-
-```asm
-cmpb    %al, %cl      ; compare byte 0 of tag
-jne     .LBB19_47     ; EARLY EXIT if not equal
-cmpb    %r15b, %r12b  ; compare byte 1
-jne     .LBB19_47     ; EARLY EXIT
-cmpb    %r14b, %r13b  ; compare byte 2
-jne     .LBB19_47     ; EARLY EXIT
-```
-
-**Issue 2 — Harness memory-layout confound.**
-The harness maintained two separate Vec pools (`left_cts`, `right_cts`) at
-different heap addresses.  Left measurements always accessed `left_cts[idx]`
-and Right measurements always accessed `right_cts[idx]`.  Systematic differences
-in cache-line residence, TLB entries, and DRAM row addresses between the two
-pools produced a non-zero tau unrelated to the comparison implementation.  This
-accounts for the unchanged tau ≈ 0.30 across Run 1 and Run 2 — the dominant
-signal was the memory-layout bias, not the implementation.
-
----
-
-## Run 3 — `ptr::write_volatile` + `#[inline(never)]` + harness fix (PASS)
-
-**Date:** 2026-05-26
-**Implementation** (`rust/src/lib.rs`, function `ct_eq_bytes`):
-
-```rust
-#[inline(never)]
-fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
-    debug_assert_eq!(a.len(), b.len());
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        unsafe {
-            diff |= std::ptr::read_volatile(x) ^ std::ptr::read_volatile(y);
-            std::ptr::write_volatile(&mut diff, diff);
-        }
-    }
-    diff == 0
-}
-```
-
-Three properties together prevent LLVM from generating an early-exit loop:
-
-1. **`#[inline(never)]`** — the function is opaque to its caller; LLVM cannot
-   sink the caller's branch into the function body or restructure the function's
-   control flow in context.
-2. **`read_volatile` on every byte** — volatile reads cannot be eliminated or
-   reordered; all 32 bytes are unconditionally loaded.
-3. **`write_volatile` to `diff` after every XOR** — the store is an observable
-   side-effect; skipping any loop iteration would change the sequence of stores,
-   which LLVM is forbidden to do.  This forces every iteration to execute.
-
-**Harness fix** (`rust/examples/dudect_harness.rs`):  Three successive confounds
-were identified and corrected:
-
-1. **Memory-layout confound** — separate `left_cts` / `right_cts` pool Vecs at
-   different heap addresses created systematic cache-line differences.  Fixed by
-   using a single Vec cloned once per bench call.
-2. **Measurement-order bias** — Left was always measured first within each pair;
-   the second measurement (Right) consistently benefited from cache warmup.
-   Fixed by randomising which class is measured first.
-3. **Within-call interference** — both measurements in a pair shared pipeline and
-   branch-predictor state from each other.  Fixed by measuring only ONE class per
-   bench call (chosen by `rng`), so each measurement is fully independent.
-
-### Assembly verification
-
-After applying both fixes, `cargo rustc --lib --release -- --emit=asm` produces
-a fully unrolled, branchless sequence for `ct_eq_bytes`
-(`target/release/deps/napqes-5dd25da441a32052.s`, lines 504–641):
-
-```asm
-_ZN6napqes11ct_eq_bytes17hd6af8b03bbd53e4dE:
-    movzbl  (%rcx), %eax        ; load byte 0 of a
-    xorb    (%rdx), %al         ; XOR with byte 0 of b
-    movb    %al, 7(%rsp)        ; write_volatile store (materialise diff[0])
-    movzbl  1(%rcx), %r8d       ; load byte 1 of a
-    xorb    1(%rdx), %r8b       ; XOR with byte 1 of b
-    orb     %al, %r8b           ; accumulate
-    movb    %r8b, 7(%rsp)       ; write_volatile store (materialise diff[1])
-    ; ... 30 more byte triples, identical pattern ...
-    movzbl  31(%rcx), %ecx      ; load byte 31 of a
-    xorb    31(%rdx), %cl       ; XOR with byte 31 of b
-    orb     %al, %cl            ; accumulate final byte
-    movb    %cl, 7(%rsp)        ; write_volatile store (materialise diff[31])
-    sete    %al                 ; return diff == 0 (no data-dependent branch)
-    retq
-```
-
-There are **no `cmpb + jne` pairs** — the function is a straight-line sequence
-of 32 load-XOR-accumulate-store triples followed by a single `sete`.
-The function is now called via `callq` from `decrypt_bytes` (not inlined).
-
-### Empirical result
-
-**Measurements:** n = 12.712 M
-
-```
-bench bench_tag_comparison: n == +12.712M, max t = +1.13413, max tau = +0.00032, (5/tau)^2 = 247068360
-```
-
-**Result: PASS** — `|max t| = 1.13` is well below the 4.5 threshold.
-
-`tau = 0.00032` is an extremely small residual effect.  To reach t = 5 would
-require approximately 247 M measurements under ideal local conditions.  Over
-any realistic network channel (millisecond-level jitter), this residual is
-completely undetectable.  No practically exploitable timing leak was found.
-
-**To re-run:**
-
-```bash
+```sh
 cd rust
 cargo run --example dudect_harness --release -- --continuous bench_tag_comparison
-# Let run until max t stabilises (≥ 2 M measurements, ~2–3 min on a modern laptop)
-# Press Ctrl+C when n > 2 M and max t is stable.
 ```
 
----
+Allow at least 2 million measurements to accumulate before drawing
+conclusions; early batches (n < 200,000) are noisy.
 
-## References
+## Reference measurement
 
-- TVLA methodology: NIST SP 800-90B, ISO/IEC 17825
-- ROADMAP §4.1 F-8, §5 NF-6 (constant-time Rust core, Phase 2 workstream 2.2)
-- `subtle` crate warning: https://docs.rs/subtle/latest/subtle/#limitations
-- Bellare & Rogaway 1994: "Optimal Asymmetric Encryption", constant-time comparison
+Placeholder — populate the values below after the first delivered run of
+the retargeted harness. Recommended fields (per CVF-26 recommendation and
+NIST SP 800-140B §4.9 attestation practice):
+
+| Field | Value |
+|---|---|
+| Platform | (e.g. Windows 11 x86_64, Intel i7-1260P @ 2.10 GHz, 32 GB RAM) |
+| Compiler | (rustc version — `rustc --version`) |
+| Compiler flags | `--release` (Cargo `[profile.release]` per `Cargo.toml`; `overflow-checks = true`, `debug-assertions = false`; opt-level = 3) |
+| Sample count | (`dudect_bencher` reports at each report interval; use ≥ 2M) |
+| Observed \|t\| | (should be < 4.5 for a passing run) |
+| Decision | Pass / Fail |
+| Date | (YYYY-MM-DD of the run) |
+| Commit | (git SHA of the tree the run was against) |
+
+## Known limitations
+
+* Harness measures the full decrypt call; tag-comparison signal is buried
+  (see "Measurement scope limitation" above). A comparator-focused harness
+  is tracked as CVF-26 follow-up.
+* Python and C reference implementations are not covered here; the paper's
+  Section 8.4 attestation is Rust-scoped.
+* The token-inversion and division paths inside `decrypt_core_v8` are
+  explicitly **not constant-time** and the paper documents this (see
+  Section 8.4 "What is not constant-time"). The harness does not measure
+  those; a distinguisher targeting a bias there is out of scope for this
+  attestation.
+* v7's f64-based `derive_noise_p` is also not constant-time (CVF-30). v7
+  encryptors are `#[deprecated]` per CVF-17; the v7 decryptor is retained
+  for archived ciphertexts only.
+
+## Change history
+
+| Date | Change |
+|---|---|
+| 2026-09-22 | Document created (CVF-26). Harness retargeted from v7 `decrypt_bytes` to v8 `decrypt_bytes_v8_key`. ROADMAP §5 NF-6 citation replaced with paper Section 8.4. Scope limitations spelled out. |

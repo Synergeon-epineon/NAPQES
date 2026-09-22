@@ -690,6 +690,65 @@ the expansion bound explicitly in all datasheets.
 
 ---
 
+## CAV-005 — v8 streaming AE is not misuse-resistant (accepted design residual)
+
+| Field | Value |
+|---|---|
+| **ID** | CAV-005 |
+| **Category** | Algorithm |
+| **Severity** | High if misused; accepted trade-off if respected |
+| **Affects** | `encrypt_stream_ae_v8` / `decrypt_stream_ae_v8` in Python (`napqes.py`), Rust (`rust/src/lib.rs`) and C (`C/napqes.c`) — including `StreamV8Encryptor`/`StreamV8Decryptor` (Rust) and `napqes_encrypt_stream_ae_v8_bytes` (C) |
+| **Owner** | TBD |
+| **Status** | Documented (by-design residual) |
+| **Risk retired** | N/A |
+
+**Description.** Unlike v8 block mode (which uses a synthetic IV derived
+under domain `0x0A` from `(sk_fmt, aad, message)`), the v8 streaming
+construction draws the 16-byte per-stream nonce from a CSPRNG. SIV
+requires hashing the *entire* message to compute the nonce, which is
+incompatible with streaming — the message is not available up front.
+Consequently, nonce reuse across two streams under the same `sk` is a
+CVF3-class hazard: for any two known-plaintext codepoint pairs aligned at
+the same chunk index and the same intra-chunk position, an attacker can
+recover the prime tuple via `k = (t1 - t2) / (c1 - c2)`.
+
+**Mitigations shipped.**
+1. The public entry points (`encrypt_stream_ae_v8` in every port; the
+   Rust `StreamV8Encryptor::new`; `napqes_encrypt_stream_ae_v8_bytes` in
+   C) draw the nonce internally via a 16-byte CSPRNG. There is no
+   external-nonce parameter on any production API.
+2. The Rust port runs its CRNG conditional self-test
+   (`generate_nonce_with_crng_check`) on every stream, matching the
+   FIPS 140-3 SP 800-140B §4.9.2 continuous-RNG test. Two consecutive
+   identical nonces are refused with a DRBG-failure error.
+3. The nonce-injecting helpers (`_encrypt_stream_ae_v8_with_nonce` in
+   Python, `pub(crate) fn encrypt_stream_ae_v8_with_nonce` in Rust,
+   `napqes_encrypt_stream_ae_v8_bytes_with_nonce` under
+   `NAPQES_ENABLE_TEST_NONCE_API` in C) exist for KAT reproducibility
+   only and are unreachable from production builds.
+4. The v8 block API (`encrypt_bytes_v8`) remains the recommended default
+   for messages that fit in memory; it preserves the full SIV/MRAE
+   guarantee.
+
+**Deployment guidance.** Draw a fresh CSPRNG nonce for every stream.
+Under a 128-bit birthday bound this is safe for well under 2⁴⁸ streams
+per key. Do NOT persist a "session key + stream counter" pattern with a
+deterministic nonce derivation — a snapshot-and-restore of the counter
+state reproduces a nonce and triggers the CVF3 hazard.
+
+**Follow-up under V2-CVF11.** The v8 streaming format switches from
+LEB128 tokens (retained by the v7 stream_ae format) to fixed-width 8-byte
+tokens plus a per-chunk padding ceiling of `F * (MAX_NOISE_RUN + 1)`
+tokens. Per-chunk ciphertext length is therefore a pure function of `F`,
+which is public — the LEB128 length leak documented in V2-CVF11 for v7
+streaming is closed for v8 streaming.
+
+**No fix planned.** Streaming requires either SIV (incompatible with
+unbounded messages) or fresh-nonce discipline. We ship fresh-nonce
+discipline enforced at the API boundary and document the caveat here.
+
+---
+
 ## V2-CVF4 — Ciphertext-expansion range 4–20x was inconsistent with the 0.99 noise-probability ceiling
 
 | Field | Value |
@@ -776,6 +835,17 @@ v7 ciphertexts do not have this residual, per the `CVF1` fix).
 
 **Requested action:** confirm V2-CVF11 can be marked **Fixed
 (documentation), with the by-design residual accepted**.
+
+**Update (v8 streaming, 2026-09-18).** The v8 streaming format
+(`FORMAT_STREAM_AE_V8`, SPEC.md §8.2) uses fixed-width 8-byte tokens
+identical to v8 block mode and pads each chunk to a fixed ceiling of
+`F * (MAX_NOISE_RUN + 1)` tokens, where `F` is the sender-chosen frame
+parameter carried in the clear in the header. Per-chunk masked_blob
+length is therefore a pure function of `F` — the per-token
+codepoint-magnitude leak documented here is **closed for v8 streaming**.
+The residual described above applies only to the legacy v7 streaming
+formats (`encrypt_stream_ae`, `encrypt_stream`), which remain LEB128-encoded
+for byte compatibility.
 
 ---
 
@@ -1054,8 +1124,16 @@ field.
 | **Severity** | Low |
 | **Affects** | Any `k` produced by `napqes.generate_prime_numbers` / `generate_v8_key` or their Rust and C equivalents before this change |
 | **Owner** | TBD |
-| **Status** | **Fixed with a compatibility guard** (2026-08-15) |
+| **Status** | **Fixed with a compatibility guard** (2026-08-15); **superseded 2026-09-07 by the "PQ-128" profile** — see below |
 | **Risk retired** | Yes (no security impact) |
+
+> **Superseded (2026-09-07).** The normative interval and default `K` have
+> since been changed to `P = [10^6, 1.5 x 10^7)` with `K = 13` (the
+> "PQ-128" profile) in order to reach the 128-bit post-quantum target. The
+> entry below is retained as the historical record of the 2026-08-15
+> reconciliation; see the "PQ-128" entry immediately following it for the
+> current normative values. Keys generated under **either** interval remain
+> accepted by validation and decryption.
 
 **Description.** The normative prime interval is `P = [10^6, 9.9 x 10^6]`,
 with `|P| = 579,947` (sieve-verified; both endpoints are composite). Before
@@ -1084,6 +1162,107 @@ covers. Do not "unify" it without a separate decision.
 post-Grover `95.7278`; key space `4.304 x 10^57`. The paper's previous
 `~586,000 / 2^191.6 / 2^95.8 / 4.8 x 10^57` were the figures for an upper
 bound of `10^7`, not `9.9 x 10^6`.
+
+## PQ-128 — Prime interval and default `K` changed to reach 128-bit post-quantum security
+
+| Field | Value |
+|---|---|
+| **ID** | PQ-128 (parameter change, 2026-09-07) |
+| **Category** | Key parameters / post-quantum security level |
+| **Severity** | Informational (strengthening) |
+| **Affects** | Newly generated keys only; no wire-format or ciphertext change |
+| **Owner** | TBD |
+| **Status** | **Shipped** in Python, Rust and C |
+| **Risk retired** | Yes |
+
+**Description.** The normative prime interval is now
+`P = [10^6, 1.5 x 10^7)` — equivalently the inclusive `[1,000,000,
+14,999,999]` — with `|P| = 892,206` (sieve-verified), and the default key
+element count is now `K = 13` (`DEFAULT_KEY_COUNT` in Python and Rust,
+`NAPQES_DEFAULT_KEY_COUNT` in C).
+
+**Rationale.** Using the falling-factorial min-entropy
+`H_inf(k) = log2(|P|! / (|P|-K)!)`:
+
+| Interval | \|P\| | K | `H_inf` | Post-Grover | >= 128? |
+|---|---|---|---|---|---|
+| `[10^6, 9.9 x 10^6]` | 579,947 | 10 | 191.4555 | 95.7278 | No |
+| `[10^6, 9.9 x 10^6]` | 579,947 | 13 | 248.8921 | 124.4461 | **No** |
+| `[10^6, 1.5 x 10^7)` | 892,206 | 13 | **256.9711** | **128.4855** | **Yes** |
+
+Raising `K` alone is **not** sufficient: at `K = 13` over the previous
+interval the tuple reaches only 124.4 bits post-Grover. Both the interval
+and `K` had to change together. Key space is now `~2.27 x 10^77`.
+
+**Secondary benefit.** `P` is now identical to the interval the
+key-establishment component (`napqes_kem.py`, `rust/src/kem.rs`) has always
+used, and `K = 13` matches its `NAPQES_KEY_COUNT`. The AEAD/KEM parameter
+divergence recorded as "out of scope" in the V3-CVF12 entry above is
+therefore closed.
+
+**Compatibility.** Only **generation** changed. Validation and decryption
+still accept any prime in `[MIN_KEY_PRIME, 2^40 - 1]`, so keys provisioned
+under either earlier interval remain usable without rekeying. `K` is not
+transmitted and does not appear in the wire format; both parties must agree
+on it out of band exactly as they agree on `k` itself. Verified: both KAT
+corpora (`v6_vectors.json`, 37 vectors; `v8_vectors.json`, 20 vectors)
+regenerate byte-identically, and `|C| = 48 + 160(B+2)` is unchanged since
+ciphertext length depends on the padding bucket, not on `K`.
+
+**Cost.** Stored key material grows from `5K + 32 = 82` bytes to `97` bytes.
+There is no ciphertext-size, bandwidth or throughput cost.
+
+**New upper bound on key elements.** Validation now also rejects elements
+above `2^40 - 1`, the largest value representable in the 5-byte key
+serialisation. Previously the Rust and C ports would silently truncate such
+an element to its low 5 bytes, producing a different key than Python
+(which raised); the three implementations now agree on every accepted key.
+
+## HYBRID-KEM — Key establishment hybridised with X25519
+
+| Field | Value |
+|---|---|
+| **ID** | HYBRID-KEM (2026-09-07) |
+| **Category** | Key establishment |
+| **Severity** | Informational (strengthening) |
+| **Affects** | `napqes_kem.py`, `rust/src/kem.rs` |
+| **Owner** | TBD |
+| **Status** | **Shipped** (Python + Rust) |
+
+**Description.** `keygen_hybrid` / `encapsulate_hybrid` /
+`decapsulate_hybrid` combine FrodoKEM-640-AES with X25519
+(ephemeral-static). Both shared secrets are concatenated
+(`ss_frodo || ss_x25519`, fixed order) into a single HKDF-SHA256 extract
+under a dedicated salt, with the full session transcript — both public keys
+and both ciphertext halves, each length-prefixed — bound in as HKDF `info`.
+Because HKDF-Extract is a PRF keyed by the salt, the derived seed stays
+secret as long as **either** component holds.
+
+**Rationale.** ANSSI's post-quantum migration doctrine requires
+hybridisation of a post-quantum mechanism with a well-understood classical
+one until the post-quantum assumptions have matured. The previous
+FrodoKEM-only exchange did not satisfy this.
+
+**Mandatory check.** An all-zero X25519 output is rejected. RFC 7748 §6.1
+leaves this optional, but omitting it here would let a peer supplying a
+small-order point silently degrade the exchange to FrodoKEM-only.
+
+**Domain separation.** The hybrid schedule uses a distinct HKDF salt from
+the legacy Frodo-only one, so the same FrodoKEM shared secret can never
+yield the same NAPQES key under both.
+
+**Residuals.**
+
+- The **C port has no KEM at all** (AEAD only) and therefore no hybrid
+  exchange; C deployments must obtain keys out of band.
+- The legacy Frodo-only API is retained for already-provisioned
+  deployments. It is **not** hybrid and should not be used for new ones.
+- There is still no FrodoKEM KAT corpus and no liboqs↔`pqcrypto-frodo`
+  encapsulation parity test; cross-language agreement is pinned only at the
+  derivation layer (`test_derive_hybrid_cross_language_vector`).
+- The candidate reduction `digest[:8] mod 14,000,000` is not unbiased range
+  sampling. The bias is bounded by `14 x 10^6 / 2^64 < 2^-40` per draw and
+  is negligible, but it is not zero.
 
 ## V3-CVF14 / V3-CVF24 — Only the tag comparison is constant-time
 

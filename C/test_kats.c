@@ -238,9 +238,10 @@ static char *read_file(const char *path) {
  * paper claims: `frame(F)` makes |C| independent of the plaintext length, and
  * the default `bucket` profile does not. Decryption is profile-agnostic. */
 static int test_pad_profiles(void) {
-    uint64_t primes[10];
+    uint64_t primes[NAPQES_DEFAULT_KEY_COUNT];
     uint8_t sk[NAPQES_SK_SIZE];
-    if (napqes_generate_v8_key(primes, 10, NAPQES_MIN_KEY_PRIME,
+    if (napqes_generate_v8_key(primes, NAPQES_DEFAULT_KEY_COUNT,
+                               NAPQES_MIN_KEY_PRIME,
                                NAPQES_MAX_KEY_PRIME, sk) != 0) {
         printf("[FAIL] PAD: key generation failed\n");
         return 1;
@@ -486,6 +487,160 @@ static int run_v8_corpus(const char *path, int *passed, int *skipped) {
     return failed;
 }
 
+/* -- v8 STREAM corpus ------------------------------------------------------
+ * Cross-language KAT pass over tests/kat/v8_stream_vectors.json using the
+ * test-only nonce-injecting entry point `napqes_encrypt_stream_ae_v8_bytes
+ * _with_nonce`. Every positive vector is re-encrypted byte-for-byte and its
+ * ciphertext is round-tripped through the public decrypt path. */
+static int parse_primes_array(const char *json, uint64_t primes[], size_t *klen) {
+    const char *p = strstr(json, "\"primes\":");
+    if (!p) return -1;
+    p += strlen("\"primes\":");
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '[') return -1;
+    p++;
+    *klen = 0;
+    while (*p && *p != ']') {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',') p++;
+        if (*p == ']') break;
+        char *end;
+        unsigned long long v = strtoull(p, &end, 10);
+        if (end == p) return -1;
+        primes[(*klen)++] = (uint64_t)v;
+        p = end;
+        if (*klen > 32) return -1;
+    }
+    return (*klen > 0) ? 0 : -1;
+}
+
+static int run_v8_stream_corpus(const char *path, int *passed, int *skipped) {
+    char *json = read_file(path);
+    if (!json) {
+        fprintf(stderr, "ERROR: cannot open %s\n", path);
+        return 1;
+    }
+
+    const char *vec_body = strstr(json, "\"vectors\"");
+    if (vec_body) {
+        vec_body = strchr(vec_body, '[');
+        if (vec_body) vec_body++;
+    }
+    if (!vec_body) vec_body = json;
+
+    const char *starts[MAX_VECTORS], *ends[MAX_VECTORS];
+    int nv = split_vectors(vec_body, starts, ends, MAX_VECTORS);
+    if (nv == 0) {
+        fprintf(stderr, "ERROR: no v8 stream vectors found in %s\n", path);
+        free(json);
+        return 1;
+    }
+
+    int failed = 0;
+    for (int i = 0; i < nv; i++) {
+        size_t obj_len = (size_t)(ends[i] - starts[i]);
+        char *obj = malloc(obj_len + 1);
+        if (!obj) { failed++; continue; }
+        memcpy(obj, starts[i], obj_len);
+        obj[obj_len] = '\0';
+
+        char *id       = json_str(obj, "id");
+        char *kind     = json_str(obj, "kind");
+        char *sk_hex   = json_str(obj, "sk_hex");
+        char *nonce_h  = json_str(obj, "nonce_hex");
+        char *aad_h    = json_str(obj, "aad_hex");
+        char *ct_hex   = json_str(obj, "ciphertext_hex");
+        char *msg      = json_str(obj, "message");
+        uint64_t primes[32];
+        size_t klen = 0;
+
+        /* frame_codepoints is an int; extract it manually. */
+        uint32_t F = 0;
+        const char *fp = strstr(obj, "\"frame_codepoints\":");
+        if (fp) {
+            fp += strlen("\"frame_codepoints\":");
+            while (*fp == ' ' || *fp == '\t') fp++;
+            F = (uint32_t)strtoul(fp, NULL, 10);
+        }
+
+        if (!id || !kind || !sk_hex || !nonce_h || !ct_hex
+            || parse_primes_array(obj, primes, &klen) != 0 || F == 0) {
+            (*skipped)++;
+            free(id); free(kind); free(sk_hex); free(nonce_h); free(aad_h);
+            free(ct_hex); free(msg); free(obj);
+            continue;
+        }
+
+        int has_nonascii = 0;
+        if (msg)
+            for (const unsigned char *q = (const unsigned char *)msg; *q; q++)
+                if (*q > 127) { has_nonascii = 1; break; }
+
+        if (strcmp(kind, "positive") != 0) {
+            printf("[SKIP] %s: unknown kind '%s'\n", id, kind);
+            (*skipped)++;
+        } else if (has_nonascii) {
+            printf("[SKIP] %s: non-ASCII message (C stream port is byte-API only)\n", id);
+            (*skipped)++;
+        } else if (!msg) {
+            printf("[SKIP] %s: missing message field\n", id);
+            (*skipped)++;
+        } else {
+            size_t sk_len = 0, nonce_len = 0, aad_len = 0, ct_len = 0;
+            uint8_t *sk    = hex_decode(sk_hex, &sk_len);
+            uint8_t *nonce = hex_decode(nonce_h, &nonce_len);
+            uint8_t *aad   = (aad_h && aad_h[0] != '\0') ? hex_decode(aad_h, &aad_len) : NULL;
+            uint8_t *ct    = hex_decode(ct_hex, &ct_len);
+
+            int ok = 1;
+            if (!sk || sk_len != NAPQES_SK_SIZE) {
+                printf("[FAIL] %s: bad sk_hex\n", id); ok = 0;
+            } else if (!nonce || nonce_len != NAPQES_NONCE_SIZE) {
+                printf("[FAIL] %s: bad nonce_hex\n", id); ok = 0;
+            } else if (!ct) {
+                printf("[FAIL] %s: bad ciphertext_hex\n", id); ok = 0;
+            }
+
+            /* Test 1: deterministic re-encrypt matches KAT byte-for-byte. */
+            if (ok) {
+                size_t enc_len = 0;
+                uint8_t *enc = napqes_encrypt_stream_ae_v8_bytes_with_nonce(
+                    msg, primes, klen, sk, aad, aad_len, F, nonce, &enc_len);
+                if (!enc || enc_len != ct_len || memcmp(enc, ct, ct_len) != 0) {
+                    char *enc_hex = enc ? hex_encode(enc, enc_len) : NULL;
+                    printf("[FAIL] %s stream-encrypt-with-nonce: got  %s\n"
+                           "                                     want %s\n",
+                           id, enc_hex ? enc_hex : "(null)", ct_hex);
+                    free(enc_hex);
+                    ok = 0;
+                }
+                free(enc);
+            }
+
+            /* Test 2: decrypt of the Python-produced ciphertext round-trips. */
+            if (ok) {
+                char *plain = napqes_decrypt_stream_ae_v8_bytes(
+                    ct, ct_len, primes, klen, sk, aad, aad_len);
+                if (!plain || strcmp(plain, msg) != 0) {
+                    printf("[FAIL] %s stream-decrypt: got \"%s\", want \"%s\"\n",
+                           id, plain ? plain : "(null)", msg);
+                    ok = 0;
+                }
+                free(plain);
+            }
+
+            if (ok) { printf("[PASS] %s\n", id); (*passed)++; }
+            else failed++;
+
+            free(sk); free(nonce); free(aad); free(ct);
+        }
+
+        free(id); free(kind); free(sk_hex); free(nonce_h); free(aad_h);
+        free(ct_hex); free(msg); free(obj);
+    }
+    free(json);
+    return failed;
+}
+
 int main(int argc, char *argv[]) {
     const char *vec_path = (argc > 1) ? argv[1] : "../tests/kat/v6_vectors.json";
     const char *v8_path  = (argc > 2) ? argv[2] : "../tests/kat/v8_vectors.json";
@@ -671,6 +826,17 @@ int main(int argc, char *argv[]) {
     free(json);
 
     failed += run_v8_corpus(v8_path, &passed, &skipped);
+
+    if (argc > 3) {
+        failed += run_v8_stream_corpus(argv[3], &passed, &skipped);
+    } else {
+        const char *default_stream = "../tests/kat/v8_stream_vectors.json";
+        FILE *probe = fopen(default_stream, "rb");
+        if (probe) {
+            fclose(probe);
+            failed += run_v8_stream_corpus(default_stream, &passed, &skipped);
+        }
+    }
 
     int pad_failures = test_pad_profiles();
     if (pad_failures) failed += pad_failures; else passed++;

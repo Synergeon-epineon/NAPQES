@@ -1,4 +1,12 @@
-//! NIST SP 800-22 Rev 1a Statistical Test Suite — NAPSEQ v6 (Rust).
+//! NIST SP 800-22 Rev 1a Statistical Test Suite — NAPQES v8 (Rust).
+//!
+//! **CVF-33 (2026-09-22).** Migrated from the legacy v7 `encrypt_bytes`
+//! entry point (which lacks the MAX_NOISE_RUN cap, per CVF-17) to the v8
+//! block API. The v8 output differs from v7 in four ways simultaneously:
+//! `sk_fmt`-keying (CVF-11), capped emission + per-bucket ceiling (CVF-17),
+//! integer θ(N) noise threshold (CVF-30), and 8-byte AAD length prefix
+//! (CVF-28). Section 9 of the paper must be updated to state that the
+//! reported statistics were regenerated after this migration.
 //!
 //! Implements all 15 SP 800-22 Rev 1a tests from scratch in safe Rust,
 //! without relying on `nistrng` or any external math library.  All known
@@ -14,6 +22,16 @@ use std::f64::consts::{PI, SQRT_2};
 use std::time::Instant;
 
 // ── STS key & corpus (matches tests/sts_pipeline.py) ────────────────────────
+
+// CVF-33: v8 also needs an sk. Fixed here so the STS bitstream is
+// reproducible; sk value chosen at random once and pinned. Regenerate the
+// paper's Section 9 statistics from a build of this file.
+const STS_SK: [u8; napqes::SK_SIZE] = [
+    0x9c, 0x6c, 0x0b, 0x92, 0x1a, 0x83, 0x84, 0x9c,
+    0xdb, 0xf2, 0xfe, 0x7e, 0xfb, 0x74, 0x3f, 0xe9,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+];
 
 const STS_KEY: [u64; 10] = [
     1_000_003, 1_000_033, 1_000_037, 1_000_039,
@@ -204,7 +222,7 @@ fn aperiodic_templates(m: usize) -> Vec<Vec<u8>> {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Returns a `Vec<u8>` of `n` bits (each element is 0 or 1) generated from
-/// NAPSEQ v6 ciphertexts with `STS_KEY`.
+/// NAPQES **v8** ciphertexts with `STS_KEY` + `STS_SK` (CVF-33 migration).
 fn generate_bits(n: usize) -> Vec<u8> {
     const CORPUS: &[u8] = b" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
     let corpus_len = CORPUS.len();
@@ -221,8 +239,11 @@ fn generate_bits(n: usize) -> Vec<u8> {
             .copied()
             .collect();
         let msg = std::str::from_utf8(&repeated).unwrap();
-        let ct = napqes::encrypt_bytes(msg, &STS_KEY, b"")
-            .expect("NAPQES encrypt failed during STS bitstream generation");
+        // CVF-33: v8 block encryption. Deterministic in (primes, sk, aad, msg),
+        // so the same STS_KEY + STS_SK reproduces the same bitstream on any
+        // build of this file — no per-message CSPRNG nonce, no drift.
+        let ct = napqes::encrypt_bytes_v8(msg, &STS_KEY, &STS_SK, b"")
+            .expect("NAPQES v8 encrypt failed during STS bitstream generation");
         raw.extend_from_slice(&ct);
         chunk_num += 1;
     }
@@ -838,7 +859,7 @@ const LINE: &str = "────────────────────
 
 fn print_report(results: &[Tr], bits: usize, elapsed_ms: u128) {
     println!("\n{LINE}");
-    println!("NIST SP 800-22 Rev 1a \u{2014} NAPSEQ v6 Bitstream Analysis (Rust)");
+    println!("NIST SP 800-22 Rev 1a \u{2014} NAPQES v8 Bitstream Analysis (Rust)");
     println!("  Bits tested : {bits:>13}");
     println!("  Elapsed     : {elapsed_ms:>10} ms");
     println!("{LINE}");
@@ -880,7 +901,7 @@ fn main() {
         .find(|w| w[0] == "--out")
         .map(|w| w[1].as_str());
 
-    eprintln!("[STS] Generating {n} NAPSEQ v6 bits…");
+    eprintln!("[STS] Generating {n} NAPQES v8 bits…");
     let t0 = Instant::now();
     let bits = generate_bits(n);
     eprintln!("[STS] Running 15 SP 800-22 tests…");

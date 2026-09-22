@@ -54,7 +54,7 @@ LengthFn = Callable[[int], int]
 
 def napqes_length_fn(pad_profile: napqes.PadProfile) -> LengthFn:
     """Ciphertext length under NAPQES v8 with *pad_profile*, by encryption."""
-    primes = napqes.generate_prime_numbers(10)
+    primes = napqes.generate_prime_numbers()
     sk = napqes.generate_v8_key()
     if isinstance(sk, tuple):          # tolerate either return shape
         sk = sk[-1]

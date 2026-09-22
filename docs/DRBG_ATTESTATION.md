@@ -115,8 +115,8 @@ detects catastrophic DRBG failures by verifying successive nonces differ.
 
 ### 4.2 Key entropy
 
-For a K = 10 element key over [1 000 000, 15 000 000], the key space is
-P(892 206, 10) ordered tuples ≈ 2^197.67 bits (prime count verified by sieve, 2026-05-28). The prime-selection
+For a K = 13 element key over [1 000 000, 14 999 999], the key space is
+|P|!/(|P|-13)! ordered tuples ≈ 2^256.97 (|P| = 892 206, prime count verified by sieve). The prime-selection
 loop draws candidates from the OS DRBG until K distinct primes are found.
 The quality of the key entropy is bounded by the quality of the OS DRBG.
 

@@ -4576,3 +4576,126 @@ The five skipped C KATs are a pre-existing streaming-field gap in the
 scope.
 
 
+
+
+# Parameter Change: "PQ-128" Profile and Hybrid Key Establishment
+
+Not an audit finding. Recorded here for traceability because it supersedes a
+decision taken in response to third-round finding V3-CVF12, and because it
+changes figures that several audit responses above quote.
+
+## PQ-128 — Prime interval and default K raised to reach 128-bit post-quantum security
+
+**Status:** Shipped (2026-09-07), Python + Rust + C.
+**Category:** Key parameters.
+**Severity:** Informational (strengthening).
+
+**Change.** The normative prime interval becomes `P = [10^6, 1.5 x 10^7)`
+(inclusive `[1,000,000, 14,999,999]`, `|P| = 892,206` sieve-verified) and the
+default key element count becomes `K = 13`.
+
+**Why both had to change.** Using the falling-factorial min-entropy
+`H_inf(k) = log2(|P|! / (|P|-K)!)`:
+
+| Interval | \|P\| | K | `H_inf` | Post-Grover | >= 128? |
+|---|---|---|---|---|---|
+| `[10^6, 9.9 x 10^6]` | 579,947 | 10 | 191.4555 | 95.7278 | No |
+| `[10^6, 9.9 x 10^6]` | 579,947 | 13 | 248.8921 | 124.4461 | No |
+| `[10^6, 1.5 x 10^7)` | 892,206 | 13 | **256.9711** | **128.4855** | Yes |
+
+Raising `K` alone is not sufficient. At `K = 13` over the V3-CVF12 interval the
+tuple reaches only 124.4 bits post-Grover, short of the target. Key space is
+now `~2.27 x 10^77`.
+
+**Relationship to V3-CVF12.** V3-CVF12 unified all three languages at
+`[10^6, 9.9 x 10^6]` on the stated grounds that "the paper's interval is
+normative: it is the audited artefact." That was a reconciliation choice, not
+a security or arithmetic requirement, and it is now superseded. The V3-CVF12
+entry above is retained unedited as the historical record; `docs/CAVEATS.md`
+carries a superseding note plus a new `PQ-128` entry.
+
+V3-CVF12 also recorded, as explicitly out of scope, that `napqes_kem.py` and
+`rust/src/kem.rs` used `[10^6, 1.5 x 10^7)` with `K = 13` while the AEAD used
+`[10^6, 9.9 x 10^6]` with `K = 10`. That divergence is now closed: the AEAD has
+adopted the KEM's parameter set, so one prime set serves both layers.
+
+**No overflow.** With `k < 1.5 x 10^7`, the maximum token is
+`(0x10FFFF + 1) * 14,999,999 - 1 ~= 1.671 x 10^13 ~= 2^43.9`, far below the
+8-byte token field. The 5-byte prime serialisation represents up to `2^40 - 1`,
+so 15M is comfortably inside it.
+
+**Compatibility.** Only generation changed. Validation and decryption still
+accept any prime in `[MIN_KEY_PRIME, 2^40 - 1]`, so keys provisioned under
+either earlier interval remain usable without rekeying. `K` is not
+transmitted and is not part of the wire format.
+
+**Related robustness fix.** Validation now rejects key elements above
+`2^40 - 1`. Previously Rust and C silently truncated such an element to its
+low 5 bytes while Python raised, so the three implementations could disagree
+on a key they all accepted.
+
+**Cost.** Stored key material grows from `5K + 32 = 82` to `97` bytes. There is
+no ciphertext-size or throughput cost: `|C| = 48 + 160(B+2)` depends on the
+padding bucket, not on `K`. Confirmed by re-running
+`traffic_analysis_bench.py`, whose leakage figures are unchanged
+(bucket 2.0224 bits, coarse(3) 0.9389 bits, frame(1024) 0.0 bits).
+
+## HYBRID-KEM — Key establishment hybridised with X25519
+
+**Status:** Shipped (2026-09-07), Python + Rust. Not applicable to C.
+**Category:** Key establishment.
+**Severity:** Informational (strengthening).
+
+**Change.** `keygen_hybrid` / `encapsulate_hybrid` / `decapsulate_hybrid`
+combine FrodoKEM-640-AES with X25519 (ephemeral-static). Both shared secrets
+are concatenated as `ss_frodo(16) || ss_x25519(32)` into one HKDF-SHA256
+extract under a dedicated salt, with the full session transcript bound in as
+HKDF `info`. Because HKDF-Extract is a PRF keyed by the salt, the derived seed
+stays secret as long as either component holds.
+
+**Why.** ANSSI's post-quantum migration doctrine requires hybridisation of a
+post-quantum mechanism with a well-understood classical one until the
+post-quantum assumptions mature. The previous FrodoKEM-only exchange did not
+satisfy this.
+
+**Transcript binding.** `info = "v2" || be32(len)||pk_frodo ||
+be32(len)||ct_frodo || be32(len)||pk_x25519_static ||
+be32(len)||pk_x25519_ephemeral`. Length prefixes make the concatenation
+injective; splicing one half from another session changes the derived key.
+
+**Mandatory small-order check.** An all-zero X25519 output is rejected.
+RFC 7748 6.1 leaves this optional, but omitting it would let a peer supplying
+a small-order point silently degrade the exchange to FrodoKEM-only.
+
+**Domain separation.** The legacy Frodo-only schedule keeps its own HKDF salt,
+so the same FrodoKEM shared secret can never derive the same NAPQES key under
+both. The legacy API is retained for already-provisioned deployments.
+
+**Scope and residuals.**
+
+- The C port has no KEM at all and therefore no hybrid exchange.
+- X25519 contributes nothing post-quantum; every post-quantum figure still
+  rests on FrodoKEM and NAPQES alone. It raises the classical floor only.
+- Still no FrodoKEM KAT corpus and no liboqs / `pqcrypto-frodo` encapsulation
+  parity test. Cross-language agreement is pinned at the derivation layer by
+  `test_derive_known_vector_hybrid` (Python) and
+  `test_derive_hybrid_cross_language_vector` (Rust).
+- The candidate reduction `digest[:8] mod 14,000,000` is not unbiased range
+  sampling; the bias is under `2^-40` per draw and is negligible, not zero.
+
+## Verification of this change
+
+| Check | Command | Result |
+|---|---|---|
+| Python | `python -m pytest tests -q` | 292 passed, 1 skipped (was 280/1) |
+| v7 KAT parity | `python tests/gen_kats.py --check` | OK, 37 vectors, byte-identical |
+| v8 KAT parity | `python tests/gen_kats_v8.py --check` | OK, 20 vectors, byte-identical |
+| Rust | `cd rust; cargo test --lib` | 173 passed, 0 failed |
+| Rust binaries | `cd rust; cargo build` | clean |
+| C | MSVC `/W3 /O2` and `/W4 /Od /RTC1` + `kat-test` | 53 passed, 0 failed, 5 skipped |
+| Paper | `pdflatex` x3 | exit 0, zero undefined or multiply-defined references |
+| Length leakage | `python traffic_analysis_bench.py --json` | unchanged, confirming K has no ciphertext-size cost |
+
+Both KAT corpora regenerating byte-identically is the regression proof that
+the wire format is untouched: the generators pin explicit prime lists, so the
+change to the generation default cannot reach them.

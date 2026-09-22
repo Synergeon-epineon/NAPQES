@@ -334,6 +334,7 @@
       "aad_hex": "",
       "tampered_hex": "0000000000000000000000000000000000000000",
       "expected_exception": "not a valid authenticated v7 payload",
+      "expected_error_contains": "too short",
       "allow_legacy_unauthenticated": false
     },
     {
