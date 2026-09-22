@@ -137,7 +137,7 @@ def load_or_generate_key():
     if KEY_PATH.exists():
         data = json.loads(KEY_PATH.read_text())
         return data["key"], False   # (key, was_generated)
-    key = napqes.generate_prime_numbers(10)
+    key = napqes.generate_prime_numbers()
     KEY_PATH.write_text(json.dumps({"key": key}, indent=2))
     return key, True
 

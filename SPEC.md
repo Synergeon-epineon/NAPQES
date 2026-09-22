@@ -101,10 +101,11 @@ throughout the session.
 > (`docs/napseq-eprint-preprint.tex`, Theorem 1) includes a key-guessing
 > term `q_F·2^(−H∞(k))` where `H∞(k) = log2(|𝒫|!/(|𝒫|−K)!)` is the key's
 > min-entropy — **not** its raw `40K`-bit serialised length. For the
-> default prime range this is ≈19.16 bits per key element, so `K` **MUST**
-> be at least `7` (≈134 bits) to keep this term negligible against the
-> paper's ≈128-bit post-Grover target, and `K=10` (the library default,
-> ≈196 bits) or higher **SHOULD** be used. `K` below `7` is a materially
+> default prime range this is ≈19.77 bits per key element, so `K` **MUST**
+> be at least `7` (≈138 bits) to keep this term negligible against the
+> paper's ≈128-bit post-Grover target, and `K=13` (the library default,
+> ≈257 bits, i.e. ≈128.5 bits post-Grover) or higher **SHOULD** be used.
+> `K` below `7` is a materially
 > weaker configuration, not merely a smaller margin — see
 > `docs/CAVEATS.md` CVF8 for detail. No reference implementation currently
 > enforces this floor at the API level; callers who override the default
@@ -232,8 +233,13 @@ Domain-byte summary:
 | `0x05` | Noise-token addend |
 | `0x06` | Padding codepoint derivation |
 | `0x07` | Token blob keystream masking |
-| `0x08` | Per-chunk authentication tag (streaming AE) |
-| `0x09` | Final sentinel tag (streaming AE, binds total chunk count) |
+| `0x08` | Per-chunk authentication tag (v7 streaming AE) |
+| `0x09` | Final sentinel tag (v7 streaming AE, binds total chunk count) |
+| `0x0A` | v8 synthetic nonce derivation (block only) |
+| `0x0B` | v8 format subkey derivation |
+| `0x0C` | Per-chunk authentication tag (v8 streaming AE) |
+| `0x0D` | Sentinel tag (v8 streaming AE, binds chunk count + real-codepoint count) |
+| `0x0E` | v8 streaming per-chunk sub-nonce derivation |
 
 Streaming-AE domains (CVF2 fix — see `docs/napseq-eprint-preprint.tex`
 §sec:streaming-ae): `chunk_tag = HMAC(key_bytes, b'\x08' || nonce ||
@@ -504,6 +510,89 @@ identical for equal inputs.
 
 ---
 
+## 8.2 Streaming AE wire format v8 (`FORMAT_STREAM_AE_V8 = 0x02`)
+
+*(napqes.py `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`;
+rust/src/lib.rs `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`,
+`StreamV8Encryptor`; C/napqes.c `napqes_encrypt_stream_ae_v8_bytes`,
+`napqes_decrypt_stream_ae_v8_bytes`)*
+
+The v8 streaming construction upgrades §8.1 to the full v8 primitive family
+(independent 256-bit subkey `sk` + per-format subkey
+`sk_fmt = HMAC(sk, 0x0B || FORMAT_STREAM_AE_V8)`), uses fixed-width 8-byte
+tokens (closing the per-token length leak retained by §8.1 for LEB128
+tokens), and pads each chunk to a fixed `F * (MAX_NOISE_RUN + 1)` token
+ceiling so per-chunk ciphertext size is a pure function of the sender-chosen
+frame parameter `F`, which is public.
+
+```
+stream = 0x02 || uint32_be(F) || nonce (16 bytes)             # HEADER (21 B)
+       || [ uint32_be(F * 160)                                  # CHUNK FRAME × C
+            || masked_chunk (F * 160 bytes)                     #   (each frame is
+            || chunk_tag (32 bytes) ] × C                       #   4 + F*160 + 32 B,
+                                                                #   fixed per stream)
+       || uint32_be(0) || uint64_be(total_real_codepoints)      # SENTINEL (44 B)
+            || sentinel_tag (32 bytes)
+```
+
+`F` = codepoints per chunk (sender-chosen; default 128, hard upper bound
+16384). Every chunk carries exactly `F` real-codepoint slots; if the input
+stream ends mid-chunk, the remaining slots are filled with HMAC-derived
+filler codepoints (domain `0x06`, keyed by the per-chunk sub-nonce). The
+decoder strips filler using `total_real_codepoints` from the sentinel.
+
+**Sub-nonce (domain `0x0E`).** Each chunk `i` is encrypted as a
+self-contained v8 primitive call keyed by `(sk_fmt, sub_nonce_i)` where
+
+```
+sub_nonce_i = HMAC(sk_fmt, 0x0E || nonce || uint32_be(i))[:16]
+```
+
+so domains `0x00`–`0x07` (position oracle, addend, noise char/addend,
+threshold, keystream) are reused verbatim from v8 block mode.
+
+**Per-chunk tag (domain `0x0C`).**
+
+```
+chunk_tag_i = HMAC(sk_fmt,
+    0x0C || nonce || uint32_be(i) || uint64_be(len(aad)) || aad || masked_chunk)
+```
+
+**Sentinel tag (domain `0x0D`).**
+
+```
+sentinel_tag = HMAC(sk_fmt,
+    0x0D || nonce || uint32_be(C) || uint64_be(len(aad)) || aad
+         || uint64_be(total_real_codepoints))
+```
+
+The sentinel binds *both* the chunk count `C` (anti-truncation) and the
+real-codepoint count (needed to strip filler from the last chunk safely).
+
+**Security properties:**
+- **Verify-before-yield.** Per-chunk tag verifies before any of that
+  chunk's plaintext contributes to the output; the sentinel verifies
+  before the last chunk's real codepoints are emitted.
+- **Anti-truncation.** Chunk count `C` is bound into `sentinel_tag`.
+- **Anti-reorder.** `chunk_idx` is bound into every `chunk_tag_i`.
+- **Length hiding at chunk granularity.** Per-chunk masked_blob length is
+  a pure function of `F`, which is public — the LEB128 residual
+  (V2-CVF11) that §8.1 retains is closed here.
+- **Not misuse-resistant** — the 16-byte nonce is CSPRNG-drawn per stream,
+  not SIV-derived (SIV requires hashing the full message, which is
+  incompatible with streaming). Nonce reuse across two streams under the
+  same `sk` is catastrophic (CVF3-class hazard on aligned codepoint
+  positions). See `docs/CAVEATS.md` CAV-005.
+
+**Compatibility.** v8 streams are **not** cross-compatible with:
+- §5 (v7 block) — different keying and no format subkey.
+- §8   (v7 streaming basic, deprecated) — different keying, no format subkey.
+- §8.1 (v7 streaming AE) — different keying, different domain bytes.
+- v8 *block* mode — different format subkey (`FORMAT_STREAM_AE_V8` vs
+  `FORMAT_BLOCK_V8`) and different domain bytes.
+
+---
+
 ## 9. Legacy format compatibility (read-only, opt-in)
 
 *(napqes.py `decrypt_str`, approx. L397–; `decrypt_bytes`, approx. L360–)*
@@ -545,6 +634,7 @@ See [`docs/CAVEATS.md`](docs/CAVEATS.md) for full triage. Summary:
 | CAV-002 | 16-bit length cap | Low | Phase 5 (v7 wire format) |
 | CAV-003 | Padding length-bucket leak | Low | Phase 5 (v7 fixed-frame option) |
 | CAV-004 | Ciphertext expansion bound | Info | No fix planned |
+| CAV-005 | v8 streaming is not misuse-resistant | High if misused | Documented (by-design residual — SIV cannot stream) |
 ---
 
 ## 12. Test vectors (KAT)

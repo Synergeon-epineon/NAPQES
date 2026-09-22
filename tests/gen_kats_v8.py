@@ -71,12 +71,25 @@ def _build_positive(
     sk_index: int,
     message: str,
     aad: bytes = b"",
+    pad_profile=None,
 ) -> dict:
+    """Build one positive KAT vector.
+
+    ``pad_profile`` accepts either ``None`` (default = ``bucket`` — omitted
+    from the JSON to preserve byte-identical W001-W012 vectors), the string
+    ``"bucket"``, or a Python tuple ``("coarse", g)`` / ``("frame", F)`` per
+    the Python API. The emitted JSON serialises the tuple as an object
+    ``{"coarse": g}`` or ``{"frame": F}`` (CVF-32 schema extension).
+    """
     sk = _sk(sk_index)
-    ct = napqes.encrypt_bytes_v8(message, key, sk, aad=aad)
-    back = napqes.decrypt_bytes_v8(ct, key, sk, aad=aad)
+    if pad_profile is None:
+        ct = napqes.encrypt_bytes_v8(message, key, sk, aad=aad)
+        back = napqes.decrypt_bytes_v8(ct, key, sk, aad=aad)
+    else:
+        ct = napqes.encrypt_bytes_v8(message, key, sk, aad=aad, pad_profile=pad_profile)
+        back = napqes.decrypt_bytes_v8(ct, key, sk, aad=aad)
     assert back == message, f"Roundtrip failed for {vec_id}: got {back!r}"
-    return {
+    vec = {
         "id": vec_id,
         "kind": "positive",
         "description": description,
@@ -86,6 +99,15 @@ def _build_positive(
         "aad_hex": aad.hex(),
         "ciphertext_hex": ct.hex(),
     }
+    if pad_profile is not None and pad_profile != "bucket":
+        # CVF-32: emit the extension field only when it differs from default,
+        # so existing consumers of the corpus schema see no change on the
+        # twelve pre-existing vectors.
+        if isinstance(pad_profile, tuple) and len(pad_profile) == 2:
+            vec["pad_profile"] = {pad_profile[0]: pad_profile[1]}
+        else:
+            vec["pad_profile"] = pad_profile
+    return vec
 
 
 def _build_negative(
@@ -215,6 +237,26 @@ def generate() -> list[dict]:
     vectors.append(_build_positive(
         "W012", "Message with punctuation and mixed case",
         KEY_10, idx := idx + 1, "Hello, CVF1!", aad=b"aad-test",
+    ))
+
+    # ── CVF-32: pad_profile coverage (coarse and frame) ─────────────────
+    # bucket is exercised by W001-W012 (default profile); these vectors pin
+    # cross-port byte-parity for the two non-default profiles the paper
+    # specifies.
+    vectors.append(_build_positive(
+        "W013", "coarse(3) at stride-boundary n=17 (must round B up to 128)",
+        KEY_4, idx := idx + 1, "A" * 17, aad=b"",
+        pad_profile=("coarse", 3),
+    ))
+    vectors.append(_build_positive(
+        "W014", "coarse(12) extreme thinning at n=17 (B jumps to 65536)",
+        KEY_4, idx := idx + 1, "A" * 17, aad=b"",
+        pad_profile=("coarse", 12),
+    ))
+    vectors.append(_build_positive(
+        "W015", "frame(1024) fixed frame at n=1023 (max under-frame message)",
+        KEY_4, idx := idx + 1, "A" * 1023, aad=b"",
+        pad_profile=("frame", 1024),
     ))
 
     # ── Negative: authentication must fail ───────────────────────────────

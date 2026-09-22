@@ -63,7 +63,7 @@ def load_or_generate_key(key_path: Path) -> list[int]:
         key  = data["key"]
         print(f"[KEY]  Loaded existing key from {key_path}")
     else:
-        key = napqes.generate_prime_numbers(10)
+        key = napqes.generate_prime_numbers()
         key_path.parent.mkdir(parents=True, exist_ok=True)
         key_path.write_text(json.dumps({"key": key}, indent=2))
         print(f"[KEY]  Generated new key -> {key_path}")
