@@ -550,3 +550,24 @@ fn v8_stream_positive_decrypt_roundtrip() {
     eprintln!("\nRust v8 stream KAT decrypt: {} passed", tested);
     assert!(tested > 0, "No v8 stream positive vectors were tested");
 }
+
+#[test]
+fn v8_stream_negative_returns_err() {
+    let vectors = load_v8_stream_vectors();
+    let mut tested = 0;
+    for vec in vectors.iter().filter(|v| v["kind"] == "negative") {
+        let id = vec["id"].as_str().unwrap();
+        let ct = hex_decode(vec["tampered_hex"].as_str().unwrap());
+        let aad = hex_decode(vec["aad_hex"].as_str().unwrap_or(""));
+        let want = vec["expected_exception"].as_str().unwrap();
+        let primes = v8_stream_primes(vec);
+        let sk = v8_stream_sk(vec);
+
+        match decrypt_stream_ae_v8(&ct, &primes, &sk, &aad) {
+            Ok(pt) => panic!("[{}] expected Err but got Ok({:?})", id, pt),
+            Err(e) => assert!(e.contains(want), "[{}] expected {:?}, got: {}", id, want, e),
+        }
+        tested += 1;
+    }
+    assert!(tested > 0, "No v8 stream negative vectors were tested");
+}

@@ -272,20 +272,22 @@ static int is_noise_pos_v8(const uint8_t *kb, size_t klen,
     return u64_from_be8(d) < theta;
 }
 
-/* Reject a prime tuple that is empty, composite, undersized or repeating.
+/* Reject a prime tuple that is empty, longer than NAPQES_MAX_KEY_ELEMENTS,
+ * outside [NAPQES_MIN_KEY_PRIME, NAPQES_MAX_KEY_PRIME], composite or repeating.
  * The correctness argument recovers c from c*k + a by exact division, which
  * needs gcd(a, k) = 1 for every addend a in [1, k-1] -- true only when k is
  * prime. Called from both v8 entry points so that a caller supplying a
  * malformed key gets a failure here rather than a silently undecryptable
  * ciphertext, matching _validate_key in the Python port. */
 static int validate_key(const uint64_t *primes, size_t klen) {
-    if (klen == 0) return 0;
+    if (klen == 0 || klen > NAPQES_MAX_KEY_ELEMENTS) return 0;
+    /* Range before primality: trial division of a huge value is slow. */
+    for (size_t i = 0; i < klen; ++i) {
+        if (primes[i] < NAPQES_MIN_KEY_PRIME) return 0;
+        if (primes[i] > NAPQES_MAX_KEY_PRIME) return 0;
+    }
     for (size_t i = 0; i < klen; ++i) {
         if (!napqes_is_prime(primes[i])) return 0;
-        if (primes[i] < NAPQES_MIN_KEY_PRIME) return 0;
-        /* key_bytes keeps only the low 5 bytes; a larger element would be
-         * silently truncated into a different key than Python accepts. */
-        if (primes[i] > NAPQES_MAX_SERIALISABLE_KEY_PRIME) return 0;
         for (size_t j = 0; j < i; ++j) {
             if (primes[j] == primes[i]) return 0;
         }
@@ -854,6 +856,8 @@ static uint32_t *decrypt_core_v8(const uint8_t *blob, size_t blob_len,
     free(tokens);
 
     if (padded_n < 2) { free(padded); return NULL; }
+    /* CVF-43: prefix codepoints must be byte-valued so the length is canonical. */
+    if (padded[0] > 0xFFu || padded[1] > 0xFFu) { free(padded); return NULL; }
     size_t orig_n = ((size_t)padded[0] << 8) | (size_t)padded[1];
     if (2 + orig_n > padded_n) { free(padded); return NULL; }
 
@@ -1051,8 +1055,21 @@ uint8_t *napqes_encrypt_bytes_v8_profiled(const char *message,
     uint8_t sk_fmt[SHA256_DIGEST_SIZE];
     derive_format_subkey(sk, NAPQES_FORMAT_BLOCK_V8, sk_fmt);
 
+    /* The SIV input is UTF-8(M); each input byte is codepoint U+0000..U+00FF. */
+    uint8_t *utf8 = (uint8_t *)malloc(2 * n + 1);
+    if (!utf8) { free(cp); return NULL; }
+    size_t utf8_len = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (cp[i] < 0x80u) {
+            utf8[utf8_len++] = (uint8_t)cp[i];
+        } else {
+            utf8[utf8_len++] = (uint8_t)(0xC0u | (cp[i] >> 6));
+            utf8[utf8_len++] = (uint8_t)(0x80u | (cp[i] & 0x3Fu));
+        }
+    }
     uint8_t nonce[NAPQES_NONCE_SIZE];
-    synthetic_nonce(sk_fmt, aad, aad_len, (const uint8_t *)message, n, nonce);
+    synthetic_nonce(sk_fmt, aad, aad_len, utf8, utf8_len, nonce);
+    free(utf8);
 
     uint8_t *blob = NULL;
     size_t blob_len = 0;
@@ -1091,6 +1108,9 @@ char *napqes_decrypt_bytes_v8(const uint8_t *ciphertext, size_t ct_len,
     if (!ciphertext || !primes || !sk) return NULL;
     if (!validate_key(primes, klen)) return NULL;
     if (ct_len < NAPQES_NONCE_SIZE + NAPQES_TAG_SIZE) return NULL;
+    /* Dec step (3): the token count depends on |C| alone, so reject before the tag. */
+    if ((ct_len - NAPQES_NONCE_SIZE - NAPQES_TAG_SIZE)
+            % ((size_t)TOKEN_WIDTH * ((size_t)NAPQES_MAX_NOISE_RUN + 1)) != 0) return NULL;
 
     size_t payload_len = ct_len - NAPQES_TAG_SIZE;
     const uint8_t *recv_tag = ciphertext + payload_len;

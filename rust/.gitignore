@@ -1,4 +1,5 @@
 /target
+/target-softsha
 
 # CVF-23: fuzz artifacts should not be committed, but the fuzz corpora
 # should be (see fuzz/corpus/, tracked by cargo-fuzz for coverage carry-

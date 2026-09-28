@@ -391,11 +391,16 @@ _V8_NEGATIVE = [v for v in _V8_ALL if v["kind"] == "negative"]
 @pytest.mark.parametrize("vec", _V8_POSITIVE, ids=[v["id"] for v in _V8_POSITIVE])
 def test_v8_positive_encrypt_deterministic(vec):
     """encrypt_bytes_v8 must reproduce the stored ciphertext byte-for-byte."""
+    profile = vec.get("pad_profile", napqes.PAD_BUCKET)
+    if isinstance(profile, dict):
+        ((kind, param),) = profile.items()
+        profile = (kind, param)
     ct = napqes.encrypt_bytes_v8(
         vec["message"],
         vec["key"],
         bytes.fromhex(vec["sk_hex"]),
         aad=bytes.fromhex(vec["aad_hex"]),
+        pad_profile=profile,
     )
     assert ct.hex() == vec["ciphertext_hex"], f"{vec['id']}: v8 ciphertext mismatch"
 
@@ -448,4 +453,58 @@ def test_gen_kats_v8_check_mode():
     )
     assert result.returncode == 0, (
         "gen_kats_v8.py --check failed:\n" + result.stdout + result.stderr
+    )
+
+
+# ---------------------------------------------------------------------------
+# v8 streaming KAT vectors (tests/kat/v8_stream_vectors.json)
+# ---------------------------------------------------------------------------
+
+_V8S_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "kat", "v8_stream_vectors.json"
+)
+with open(_V8S_PATH, encoding="utf-8") as _f:
+    _V8S_ALL = json.load(_f)["vectors"]
+_V8S_POSITIVE = [v for v in _V8S_ALL if v["kind"] == "positive"]
+_V8S_NEGATIVE = [v for v in _V8S_ALL if v["kind"] == "negative"]
+
+
+@pytest.mark.parametrize("vec", _V8S_POSITIVE, ids=[v["id"] for v in _V8S_POSITIVE])
+def test_v8_stream_positive_encrypt_deterministic(vec):
+    got = b"".join(napqes._encrypt_stream_ae_v8_with_nonce(
+        iter(vec["message"]), vec["primes"], bytes.fromhex(vec["sk_hex"]),
+        bytes.fromhex(vec["nonce_hex"]), bytes.fromhex(vec["aad_hex"]),
+        frame_codepoints=vec["frame_codepoints"],
+    ))
+    assert got.hex() == vec["ciphertext_hex"], f"{vec['id']}: v8 stream ciphertext mismatch"
+
+
+@pytest.mark.parametrize("vec", _V8S_POSITIVE, ids=[v["id"] for v in _V8S_POSITIVE])
+def test_v8_stream_positive_decrypt_roundtrip(vec):
+    pt = "".join(napqes.decrypt_stream_ae_v8(
+        [bytes.fromhex(vec["ciphertext_hex"])], vec["primes"],
+        bytes.fromhex(vec["sk_hex"]), bytes.fromhex(vec["aad_hex"]),
+    ))
+    assert pt == vec["message"], f"{vec['id']}: v8 stream roundtrip mismatch"
+
+
+@pytest.mark.parametrize("vec", _V8S_NEGATIVE, ids=[v["id"] for v in _V8S_NEGATIVE])
+def test_v8_stream_negative_raises(vec):
+    with pytest.raises(ValueError, match=vec["expected_exception"]):
+        "".join(napqes.decrypt_stream_ae_v8(
+            [bytes.fromhex(vec["tampered_hex"])], vec["primes"],
+            bytes.fromhex(vec["sk_hex"]), bytes.fromhex(vec["aad_hex"]),
+        ))
+
+
+def test_gen_kats_v8_stream_check_mode():
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "tests/gen_kats_v8_stream.py", "--check"],
+        capture_output=True,
+        text=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    assert result.returncode == 0, (
+        "gen_kats_v8_stream.py --check failed:\n" + result.stdout + result.stderr
     )

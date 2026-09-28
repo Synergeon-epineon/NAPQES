@@ -382,46 +382,7 @@ fn validate_key(key: &[u64]) -> Result<(), String> {
     if key.is_empty() {
         return Err("Key must be a non-empty list of primes.".into());
     }
-    for (i, &k) in key.iter().enumerate() {
-        if !is_prime(k) {
-            return Err(format!("Key element at index {} ({}) is not prime.", i, k));
-        }
-        if k < MIN_KEY_PRIME {
-            return Err(format!(
-                "Key element at index {} ({}) is below the minimum of {}.",
-                i, k, MIN_KEY_PRIME
-            ));
-        }
-        // CVF-16: enforce the normative upper bound on every key, not just on
-        // generation. Prior revisions accepted any prime up to
-        // MAX_SERIALISABLE_KEY_PRIME on decrypt paths; a key element in that
-        // wider band could wrap `c * k + addend` past u64 silently in release
-        // builds (release default overflow-checks = false — see CVF-23).
-        if k > MAX_KEY_PRIME {
-            return Err(format!(
-                "Key element at index {} ({}) exceeds MAX_KEY_PRIME ({}).",
-                i, k, MAX_KEY_PRIME
-            ));
-        }
-        // key_bytes keeps only the low 5 bytes; a larger element would be
-        // silently truncated into a different key than Python would accept.
-        // With the MAX_KEY_PRIME check above this branch is now unreachable
-        // for well-formed keys, but the check is retained as a fail-safe.
-        if k > MAX_SERIALISABLE_KEY_PRIME {
-            return Err(format!(
-                "Key element at index {} ({}) exceeds {}, the largest value \
-                 representable in the 5-byte key serialisation.",
-                i, k, MAX_SERIALISABLE_KEY_PRIME
-            ));
-        }
-        // CVF-41: linear `key[..i].contains(&k)` distinctness scan was
-        // O(K²) — a 10^6-element key would cost ~5×10¹¹ comparisons per
-        // encrypt/decrypt on the bare-slice v8 surface. Retained here for
-        // K ≤ MAX_KEY_ELEMENTS so a caller-supplied K is capped. The
-        // sort-and-scan fallback below is O(K log K) on a copy that
-        // preserves the caller's tuple order (order is a security parameter
-        // per the module doc).
-    }
+    // Cheap checks first: trial division of an out-of-range u64 costs seconds.
     if key.len() > MAX_KEY_ELEMENTS {
         return Err(format!(
             "Key has {} elements, exceeding MAX_KEY_ELEMENTS ({}). Very large \
@@ -431,6 +392,36 @@ fn validate_key(key: &[u64]) -> Result<(), String> {
             key.len(),
             MAX_KEY_ELEMENTS
         ));
+    }
+    for (i, &k) in key.iter().enumerate() {
+        if k < MIN_KEY_PRIME {
+            return Err(format!(
+                "Key element at index {} ({}) is below the minimum of {}.",
+                i, k, MIN_KEY_PRIME
+            ));
+        }
+        // CVF-16: enforce the normative upper bound on every key, not just on
+        // generation.
+        if k > MAX_KEY_PRIME {
+            return Err(format!(
+                "Key element at index {} ({}) exceeds MAX_KEY_PRIME ({}).",
+                i, k, MAX_KEY_PRIME
+            ));
+        }
+        // key_bytes keeps only the low 5 bytes; unreachable while
+        // MAX_KEY_PRIME < 2^40, retained as a fail-safe.
+        if k > MAX_SERIALISABLE_KEY_PRIME {
+            return Err(format!(
+                "Key element at index {} ({}) exceeds {}, the largest value \
+                 representable in the 5-byte key serialisation.",
+                i, k, MAX_SERIALISABLE_KEY_PRIME
+            ));
+        }
+    }
+    for (i, &k) in key.iter().enumerate() {
+        if !is_prime(k) {
+            return Err(format!("Key element at index {} ({}) is not prime.", i, k));
+        }
     }
     // Distinctness via sort-and-scan on a local clone (CVF-41).
     let mut sorted = key.to_vec();
@@ -1385,7 +1376,11 @@ pub const SK_SIZE: usize = 32;
 /// `[θ_min, θ_max]`, ranging from 3.99 at p=0.75 to 18.21 at p=0.99;
 /// without the run cap it would be about 13.4 (CVF-39 corrects the earlier
 /// "~13.4x average" phrasing which conflated the capped and uncapped means).
+#[cfg(not(feature = "noise_x10"))]
 pub const MAX_NOISE_RUN: u64 = 19;
+/// Demo-only x10 token budget; ciphertexts are NOT interoperable with the default build.
+#[cfg(feature = "noise_x10")]
+pub const MAX_NOISE_RUN: u64 = 9;
 
 /// Domain `0x0B` format-subkey identifier for v8 block mode.
 pub const FORMAT_BLOCK_V8: u8 = 0x01;
@@ -1409,7 +1404,17 @@ fn derive_format_subkey(sk: &[u8], format_id: u8) -> [u8; 32] {
 /// The two components MUST be generated independently (never one derived
 /// from the other) for the CVF8/CVF13 security argument above to hold, and
 /// MUST both be treated as secret key material.
+///
+/// Panics if `[min_val, max_val]` is not a sub-range of the normative interval
+/// `[MIN_KEY_PRIME, MAX_KEY_PRIME]` (such a key would fail `validate_key`), or
+/// if `count` distinct primes cannot be drawn from it. Prefer
+/// [`crate::NapqesKey::generate`], which cannot panic.
 pub fn generate_v8_key(count: usize, min_val: u64, max_val: u64) -> (Vec<u64>, [u8; SK_SIZE]) {
+    assert!(
+        MIN_KEY_PRIME <= min_val && max_val <= MAX_KEY_PRIME,
+        "generate_v8_key: range [{}, {}] lies outside [MIN_KEY_PRIME, MAX_KEY_PRIME]",
+        min_val, max_val
+    );
     let primes = generate_prime_numbers(count, min_val, max_val);
     let mut sk = [0u8; SK_SIZE];
     rand::thread_rng().fill_bytes(&mut sk);
@@ -1585,6 +1590,14 @@ pub(crate) fn decrypt_bytes_v8_core(
             NONCE_SIZE + TAG_SIZE
         ));
     }
+    // Dec step (3): the token count depends on |C| alone, so reject before the tag.
+    let blob_len = ciphertext.len() - NONCE_SIZE - TAG_SIZE;
+    if blob_len % (TOKEN_WIDTH * (MAX_NOISE_RUN as usize + 1)) != 0 {
+        return Err(
+            "Malformed v8 ciphertext: token count is not a multiple of the padding ceiling; \
+             expected exactly real_token_count * (MAX_NOISE_RUN + 1) tokens.".into(),
+        );
+    }
     // CVF-37: same sk_fmt scope-wipe pattern as encrypt_bytes_v8_core.
     let mut sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
     let result = decrypt_bytes_v8_core_inner(&sk_fmt, ciphertext, primes, aad);
@@ -1628,6 +1641,21 @@ pub fn zeroize_sk(sk: &mut [u8; SK_SIZE]) {
     for x in sk.iter_mut() {
         unsafe { std::ptr::write_volatile(x, 0u8) };
     }
+}
+
+/// v8 block tag over `payload = nonce || masked` under `sk` (used by KAT-6).
+pub(crate) fn retag_block_v8(payload: &[u8], sk: &[u8; SK_SIZE], aad: &[u8]) -> [u8; TAG_SIZE] {
+    let mut sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
+    let tag = compute_auth_tag(&sk_fmt, aad, payload, AAD_LEN_WIDTH_V8);
+    zeroize_sk(&mut sk_fmt);
+    tag
+}
+
+/// Fuzzing hook: lets the fuzzer reach post-authentication decode paths.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_retag_block_v8(payload: &[u8], sk: &[u8; SK_SIZE], aad: &[u8]) -> [u8; TAG_SIZE] {
+    retag_block_v8(payload, sk, aad)
 }
 
 // ─── Key zeroization ─────────────────────────────────────────────────────────
@@ -1895,8 +1923,21 @@ pub(crate) fn encrypt_stream_ae_v8_with_nonce(
     validate_key(primes)?;
     validate_stream_v8_frame(frame_codepoints)?;
 
+    let mut sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
+    let result = encrypt_stream_ae_v8_inner(plaintext, primes, &sk_fmt, nonce, aad, frame_codepoints);
+    zeroize_sk(&mut sk_fmt);
+    result
+}
+
+fn encrypt_stream_ae_v8_inner(
+    plaintext: &str,
+    primes: &[u64],
+    sk_fmt: &[u8; 32],
+    nonce: &[u8; NONCE_SIZE],
+    aad: &[u8],
+    frame_codepoints: u32,
+) -> Result<Vec<u8>, String> {
     let f = frame_codepoints as usize;
-    let sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
 
     let mut stream: Vec<u8> = Vec::new();
     // HEADER
@@ -1912,31 +1953,40 @@ pub(crate) fn encrypt_stream_ae_v8_with_nonce(
         cp_buf.push(ch as u32);
         total_real_cps += 1;
         if cp_buf.len() >= f {
-            let frame = emit_stream_v8_chunk(&cp_buf[..f], chunk_idx, primes, &sk_fmt, nonce, aad);
+            let next = next_stream_chunk_idx(chunk_idx)?;
+            let frame = emit_stream_v8_chunk(&cp_buf[..f], chunk_idx, primes, sk_fmt, nonce, aad);
             stream.extend_from_slice(&frame);
             cp_buf.drain(..f);
-            chunk_idx += 1;
+            chunk_idx = next;
         }
     }
 
     if !cp_buf.is_empty() {
-        let sub_nonce_last = derive_stream_v8_sub_nonce(&sk_fmt, nonce, chunk_idx);
+        let next = next_stream_chunk_idx(chunk_idx)?;
+        let sub_nonce_last = derive_stream_v8_sub_nonce(sk_fmt, nonce, chunk_idx);
         let fill_needed = f - cp_buf.len();
         for i in 0..fill_needed {
-            cp_buf.push(derive_stream_v8_filler_cp(&sk_fmt, &sub_nonce_last, i as u32));
+            cp_buf.push(derive_stream_v8_filler_cp(sk_fmt, &sub_nonce_last, i as u32));
         }
-        let frame = emit_stream_v8_chunk(&cp_buf, chunk_idx, primes, &sk_fmt, nonce, aad);
+        let frame = emit_stream_v8_chunk(&cp_buf, chunk_idx, primes, sk_fmt, nonce, aad);
         stream.extend_from_slice(&frame);
-        chunk_idx += 1;
+        chunk_idx = next;
     }
 
     let sentinel_tag = compute_stream_v8_sentinel_tag(
-        &sk_fmt, nonce, chunk_idx, aad, total_real_cps);
+        sk_fmt, nonce, chunk_idx, aad, total_real_cps);
     stream.extend_from_slice(&0u32.to_be_bytes());
     stream.extend_from_slice(&total_real_cps.to_be_bytes());
     stream.extend_from_slice(&sentinel_tag);
 
     Ok(stream)
+}
+
+/// Chunk indices are u32 and bound into every sub-nonce; wrapping would reuse keystream.
+fn next_stream_chunk_idx(chunk_idx: u32) -> Result<u32, String> {
+    chunk_idx
+        .checked_add(1)
+        .ok_or_else(|| "v8 stream exceeds the 2^32 - 1 chunk limit.".to_string())
 }
 
 /// v8 streaming-AE encryption -- returns the full ciphertext byte stream.
@@ -1984,8 +2034,18 @@ pub fn decrypt_stream_ae_v8(
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(primes)?;
-    let sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
+    let mut sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
+    let result = decrypt_stream_ae_v8_inner(stream, primes, &sk_fmt, aad);
+    zeroize_sk(&mut sk_fmt);
+    result
+}
 
+fn decrypt_stream_ae_v8_inner(
+    stream: &[u8],
+    primes: &[u64],
+    sk_fmt: &[u8; 32],
+    aad: &[u8],
+) -> Result<String, String> {
     if stream.len() < 1 + 4 + NONCE_SIZE {
         return Err(format!(
             "Stream truncated: need at least {} header bytes, got {}",
@@ -2035,7 +2095,7 @@ pub fn decrypt_stream_ae_v8(
             let total_real_cps = u64::from_be_bytes(tr);
             let recv_tag = &stream[pos + 8..pos + 8 + TAG_SIZE];
             let calc = compute_stream_v8_sentinel_tag(
-                &sk_fmt, &nonce, chunk_idx, aad, total_real_cps);
+                sk_fmt, &nonce, chunk_idx, aad, total_real_cps);
             if !ct_eq_bytes(recv_tag, calc.as_ref()) {
                 return Err("Authentication failed: invalid v8 stream sentinel tag.".into());
             }
@@ -2044,9 +2104,12 @@ pub fn decrypt_stream_ae_v8(
             let pending_len = pending.as_ref().map(|v| v.len()).unwrap_or(0);
             let delivered_len = delivered.len() as u64;
             let available = delivered_len + (pending_len as u64);
-            if total_real_cps > available
-                || (pending.is_none() && total_real_cps != delivered_len)
-            {
+            // Canonical form: the final chunk carries at least one real codepoint.
+            let consistent = match pending {
+                Some(_) => total_real_cps > delivered_len && total_real_cps <= available,
+                None => total_real_cps == delivered_len,
+            };
+            if !consistent {
                 return Err(format!(
                     "Malformed v8 stream sentinel: total_real_codepoints {} \
                      inconsistent with decoded stream ({} delivered + {} pending).",
@@ -2087,7 +2150,7 @@ pub fn decrypt_stream_ae_v8(
         }
         let masked = &stream[pos..pos + chunk_len];
         let recv_tag = &stream[pos + chunk_len..pos + chunk_len + TAG_SIZE];
-        let calc = compute_stream_v8_chunk_tag(&sk_fmt, &nonce, chunk_idx, aad, masked);
+        let calc = compute_stream_v8_chunk_tag(sk_fmt, &nonce, chunk_idx, aad, masked);
         if !ct_eq_bytes(recv_tag, calc.as_ref()) {
             return Err(format!(
                 "Authentication failed: invalid tag on v8 stream chunk {}.",
@@ -2095,19 +2158,20 @@ pub fn decrypt_stream_ae_v8(
             ));
         }
         pos += chunk_len + TAG_SIZE;
+        let next = next_stream_chunk_idx(chunk_idx)?;
 
         // Tag verified -- unmask and decode.
-        let sub_nonce = derive_stream_v8_sub_nonce(&sk_fmt, &nonce, chunk_idx);
-        let ks = varint_keystream(&sk_fmt, &sub_nonce, chunk_len);
+        let sub_nonce = derive_stream_v8_sub_nonce(sk_fmt, &nonce, chunk_idx);
+        let ks = varint_keystream(sk_fmt, &sub_nonce, chunk_len);
         let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
         let tokens = fixed_decode_tokens(&blob)?;
-        let cps = decrypt_v8_stream_chunk_core(&tokens, primes, &sk_fmt, &sub_nonce, f)?;
+        let cps = decrypt_v8_stream_chunk_core(&tokens, primes, sk_fmt, &sub_nonce, f)?;
 
         if let Some(p) = pending.take() {
             delivered.extend(p);
         }
         pending = Some(cps);
-        chunk_idx += 1;
+        chunk_idx = next;
     }
 }
 
@@ -2171,6 +2235,9 @@ impl StreamV8Encryptor {
         if self.finished {
             return Err("StreamV8Encryptor: push after finish".into());
         }
+        if self.chunk_idx == u32::MAX {
+            return Err("v8 stream exceeds the 2^32 - 1 chunk limit.".into());
+        }
         self.cp_buf.push(ch as u32);
         self.total_real_cps += 1;
         if self.cp_buf.len() >= self.f as usize {
@@ -2223,6 +2290,13 @@ impl StreamV8Encryptor {
         out.extend_from_slice(&self.total_real_cps.to_be_bytes());
         out.extend_from_slice(&tag);
         Ok(out)
+    }
+}
+
+impl Drop for StreamV8Encryptor {
+    fn drop(&mut self) {
+        zeroize_sk(&mut self.sk_fmt);
+        zeroize_key(&mut self.primes);
     }
 }
 
@@ -2716,23 +2790,65 @@ mod tests {
 
     #[test]
     fn cvf41_validate_key_rejects_key_above_max_elements() {
-        // A 129-element key must fail even if every element is prime and in range.
-        let primes: Vec<u64> = (0..(MAX_KEY_ELEMENTS + 1))
-            .map(|i| 1_000_003u64 + (i as u64) * 30) // 1000003, 1000033, ... — distinct
+        let primes: Vec<u64> = (MIN_KEY_PRIME..)
+            .filter(|&n| is_prime(n))
+            .take(MAX_KEY_ELEMENTS + 1)
             .collect();
-        // Not every element in that arithmetic sequence is prime, but this is
-        // enough to hit the length check before the primality check.
-        let err = encrypt_bytes_v8(
-            "hi",
-            &primes,
-            &[0u8; SK_SIZE],
-            b"",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("MAX_KEY_ELEMENTS") || err.contains("not prime"),
-            "expected upper-bound or primality error, got: {}", err
-        );
+        let err = encrypt_bytes_v8("hi", &primes, &[0u8; SK_SIZE], b"").unwrap_err();
+        assert!(err.contains("MAX_KEY_ELEMENTS"), "expected length-cap error, got: {}", err);
+    }
+
+    // Range must be checked before trial division: a u64 prime took ~3 s to reject.
+    #[test]
+    fn validate_key_rejects_huge_prime_without_trial_division() {
+        let start = std::time::Instant::now();
+        let err = encrypt_bytes_v8("hi", &[18_446_744_073_709_551_557u64], &[0u8; SK_SIZE], b"")
+            .unwrap_err();
+        assert!(err.contains("MAX_KEY_PRIME"), "got: {}", err);
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+    }
+
+    fn forge_stream_sentinel(ct: &mut [u8], sk: &[u8; SK_SIZE], aad: &[u8], chunks: u32, total: u64) {
+        let n = ct.len();
+        let nonce: [u8; NONCE_SIZE] = ct[5..5 + NONCE_SIZE].try_into().unwrap();
+        let sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
+        let tag = compute_stream_v8_sentinel_tag(&sk_fmt, &nonce, chunks, aad, total);
+        ct[n - TAG_SIZE - 8..n - TAG_SIZE].copy_from_slice(&total.to_be_bytes());
+        ct[n - TAG_SIZE..].copy_from_slice(&tag);
+    }
+
+    // A validly-tagged sentinel below the delivered count used to underflow (panic).
+    #[test]
+    fn stream_sentinel_total_below_delivered_is_rejected() {
+        let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        let mut ct = encrypt_stream_ae_v8("abcdef", &primes, &sk, b"x", 2).unwrap();
+        forge_stream_sentinel(&mut ct, &sk, b"x", 3, 1);
+        let err = decrypt_stream_ae_v8(&ct, &primes, &sk, b"x").unwrap_err();
+        assert!(err.contains("Malformed v8 stream sentinel"), "got: {}", err);
+    }
+
+    // A final chunk with zero real codepoints is never produced by the encoder.
+    #[test]
+    fn stream_sentinel_dropping_final_chunk_is_rejected() {
+        let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        let mut ct = encrypt_stream_ae_v8("abcdef", &primes, &sk, b"x", 2).unwrap();
+        forge_stream_sentinel(&mut ct, &sk, b"x", 3, 4);
+        let err = decrypt_stream_ae_v8(&ct, &primes, &sk, b"x").unwrap_err();
+        assert!(err.contains("Malformed v8 stream sentinel"), "got: {}", err);
+    }
+
+    #[test]
+    fn stream_chunk_index_limit_is_an_error() {
+        assert!(next_stream_chunk_idx(u32::MAX - 1).is_ok());
+        assert!(next_stream_chunk_idx(u32::MAX).is_err());
+    }
+
+    // Paper Dec step (3) runs before the tag: an illegal length never reaches the HMAC.
+    #[test]
+    fn v8_illegal_length_is_rejected_before_the_tag() {
+        let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        let err = decrypt_bytes_v8(&[0u8; NONCE_SIZE + TAG_SIZE + 8], &primes, &sk, b"").unwrap_err();
+        assert!(err.contains("padding ceiling"), "got: {}", err);
     }
 
     // CVF-16 regression: MAX_KEY_PRIME upper bound is enforced on validation.

@@ -6,11 +6,18 @@ edition = "2021"
 # CVF-47: opt-in FIPS 140-3 self-test gating. When enabled, every public v8
 # entry point calls `self_test::require_post()?` before doing crypto — the
 # caller MUST first call `run_power_on_self_tests()` and it MUST succeed,
-# else all crypto operations return `Err(BuildProvenanceMismatch)`. Disabled
+# else all crypto operations return `Err(NotOperational)`. Disabled
 # by default so existing (non-FIPS) consumers see zero behaviour change.
 [features]
 default = []
 fips_gate = []
+# Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
+# Wire-incompatible with the default build and the Python/C KATs.
+noise_x10 = []
+# Benchmark-only: disable SHA-NI so HMAC-SHA256 runs in portable software.
+soft_sha = ["sha2/force-soft"]
+# Exposes a v8 re-tag hook so cargo-fuzz can reach post-authentication paths.
+fuzzing = []
 
 [dependencies]
 hmac = "0.12"

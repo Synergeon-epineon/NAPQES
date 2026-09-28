@@ -242,7 +242,10 @@ fn generate_bits(n: usize) -> Vec<u8> {
         // CVF-33: v8 block encryption. Deterministic in (primes, sk, aad, msg),
         // so the same STS_KEY + STS_SK reproduces the same bitstream on any
         // build of this file — no per-message CSPRNG nonce, no drift.
-        let ct = napqes::encrypt_bytes_v8(msg, &STS_KEY, &STS_SK, b"")
+        // The corpus offset repeats every 19 chunks and v8 is deterministic, so
+        // a per-chunk AAD keeps repeated plaintexts from repeating ciphertexts.
+        let aad = (chunk_num as u64).to_be_bytes();
+        let ct = napqes::encrypt_bytes_v8(msg, &STS_KEY, &STS_SK, &aad)
             .expect("NAPQES v8 encrypt failed during STS bitstream generation");
         raw.extend_from_slice(&ct);
         chunk_num += 1;
@@ -821,7 +824,7 @@ fn write_json_report(path: &str, results: &[Tr], bits: usize, elapsed_ms: u128) 
     let mut s = String::with_capacity(4096);
     s.push_str("{\n");
     s.push_str("  \"spec\": \"NIST SP 800-22 Rev 1a\",\n");
-    s.push_str("  \"napseq_version\": \"v6\",\n");
+    s.push_str("  \"napseq_version\": \"v8\",\n");
     s.push_str(&format!("  \"bits_tested\": {bits},\n"));
     s.push_str(&format!("  \"elapsed_ms\": {elapsed_ms},\n"));
     s.push_str("  \"summary\": {\n");
