@@ -893,6 +893,7 @@ fn print_report(results: &[Tr], bits: usize, elapsed_ms: u128) {
 // ════════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    napqes::self_test::run_power_on_self_tests().expect("power-on self-tests failed");
     let args: Vec<String> = std::env::args().collect();
 
     let n: usize = args.windows(2)

@@ -66,6 +66,7 @@ mod kat_cross_check;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
+use key::Secret32;
 use rand::RngCore;
 use sha2::Sha256;
 use std::sync::Mutex;
@@ -80,6 +81,18 @@ pub const TAG_SIZE: usize = 32;
 const AAD_LEN_WIDTH_V8: usize = 8;
 /// Legacy v7 AAD length-prefix width, kept for byte compatibility.
 const AAD_LEN_WIDTH_V7: usize = 4;
+
+/// CVF-28: the v7 tag carries `|A|` in a 4-byte prefix, so longer AAD is an
+/// error rather than a silent wraparound.
+fn check_v7_aad_len(aad_len: usize) -> Result<(), String> {
+    if aad_len as u64 > u32::MAX as u64 {
+        return Err(format!(
+            "AAD of {} bytes exceeds the v7 4-byte length prefix.",
+            aad_len
+        ));
+    }
+    Ok(())
+}
 
 // ─── CRNG conditional self-test ──────────────────────────────────────────────
 
@@ -187,19 +200,22 @@ pub fn is_prime(n: u64) -> bool {
 /// canonical enumeration + rejection scheme — both are unbiased — and does
 /// not require enumerating `P` up front.
 ///
-/// Panics with a descriptive message if `count > 0` distinct primes cannot be
-/// found within `4·span` attempts. For the normative interval
-/// `[MIN_KEY_PRIME, MAX_KEY_PRIME]` this is safe by a large margin: the
-/// interval contains 892,206 primes against `DEFAULT_KEY_COUNT = 13`, so an
-/// exhaustion of the attempt cap is a caller misuse (empty interval,
-/// `count` too large) rather than a randomness pathology.
-pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Vec<u64> {
+/// Returns `Err` (CVF-20) if the range is empty or if `count` distinct primes
+/// are not found within [`KEYGEN_DRAWS_PER_PRIME`] draws per requested prime.
+/// At the normative interval's prime density (about 1 in 16) that cap is
+/// roughly 250 times the expected number of draws, so a prime-poor range is
+/// diagnosed in milliseconds instead of after `4·span` primality tests.
+pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Result<Vec<u64>, String> {
     use rand::distributions::{Distribution, Uniform};
-    assert!(max_val > min_val, "generate_prime_numbers: max_val must exceed min_val");
+    if max_val <= min_val {
+        return Err(format!(
+            "generate_prime_numbers: empty range [{}, {}]",
+            min_val, max_val
+        ));
+    }
     let mut rng = rand::thread_rng();
     let dist = Uniform::new_inclusive(min_val, max_val);
-    let span = max_val - min_val + 1;
-    let max_attempts = span.saturating_mul(4);
+    let max_attempts = (count.max(1) as u64).saturating_mul(KEYGEN_DRAWS_PER_PRIME);
     let mut primes: Vec<u64> = Vec::with_capacity(count);
     let mut attempts: u64 = 0;
     while primes.len() < count && attempts < max_attempts {
@@ -212,28 +228,30 @@ pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Vec<u
         attempts += 1;
     }
     if primes.len() < count {
-        panic!(
+        return Err(format!(
             "generate_prime_numbers: could not find {} distinct primes in \
-             [{}, {}] within {} attempts. The prime density in the requested \
-             interval may be too low for the requested count, or the \
-             interval is too narrow. For the normative interval \
-             [MIN_KEY_PRIME, MAX_KEY_PRIME] the pool contains 892,206 \
-             primes, so this failure indicates a caller-supplied range issue.",
+             [{}, {}] within {} draws; the range is too narrow or too prime-poor \
+             for the requested count.",
             count, min_val, max_val, max_attempts
-        );
+        ));
     }
-    primes
+    Ok(primes)
 }
+
+/// Draw budget per requested prime in [`generate_prime_numbers`] (CVF-20).
+pub const KEYGEN_DRAWS_PER_PRIME: u64 = 4096;
 
 // ─── HMAC helpers ────────────────────────────────────────────────────────────
 
-fn key_bytes(key: &[u64]) -> Vec<u8> {
+/// v7 HMAC key: the 5-byte big-endian serialisation of the prime tuple,
+/// wiped on drop (CVF-37).
+fn key_bytes(key: &[u64]) -> crate::key::SecretBytes {
     let mut out = Vec::with_capacity(key.len() * 5);
     for &k in key {
         let b = k.to_be_bytes(); // 8 bytes
         out.extend_from_slice(&b[3..8]); // low 5 bytes, big-endian
     }
-    out
+    crate::key::SecretBytes::new(out)
 }
 
 fn hmac_digest(kb: &[u8], data: &[u8]) -> [u8; 32] {
@@ -623,10 +641,9 @@ impl PadProfile {
 /// Each padding codepoint is in [32, 126], matching the reference exactly.
 fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
     let n = msg.len();
-    // CVF-34: public entry points now check MAX_PLAINTEXT_CODEPOINTS at the
-    // head and return `Err`. This debug_assert! is retained as a belt-and-
-    // braces invariant for internal callers.
-    debug_assert!(n <= MAX_PLAINTEXT_CODEPOINTS, "Message too long for 2-codepoint length prefix");
+    // CVF-34: public entry points check MAX_PLAINTEXT_CODEPOINTS and return
+    // `Err`; this is the release-mode backstop for internal callers.
+    assert!(n <= MAX_PLAINTEXT_CODEPOINTS, "Message too long for 2-codepoint length prefix");
     pad_to_block(msg, kb, nonce, bucket_block_size(n))
 }
 
@@ -634,7 +651,8 @@ fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
 /// which [`PadProfile::block_size`] guarantees for the profiles it accepts.
 fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<u32> {
     let n = msg.len();
-    debug_assert!(block_size > n, "padding block must exceed the message");
+    // CVF-31: a release build must never reach `block_size - n` with block_size <= n.
+    assert!(block_size > n, "padding block must exceed the message");
     let pad_len = block_size - n;
     let mut out = Vec::with_capacity(2 + block_size);
     out.push(((n >> 8) & 0xFF) as u32);
@@ -716,7 +734,9 @@ fn unpad_message(padded: &[u32]) -> Result<Vec<u32>, String> {
             ceiling (audit CVF-17): ciphertext length is a random function \
             of the CSPRNG-drawn nonce rather than of the padding bucket, so \
             the length-hiding property Corollary 4.14 proves for v8 does not \
-            hold. Use encrypt_bytes_v8 / encrypt_bytes_v8_with_profile."
+            hold; v7 is keyed by the prime tuple, not sk, and no theorem of \
+            the paper applies (CVF-28). Use encrypt_bytes_v8 / \
+            encrypt_bytes_v8_with_profile."
 )]
 pub fn encrypt(message: &[u32], key: &[u64]) -> ([u8; NONCE_SIZE], Vec<u64>) {
     // CVF-34: uphold the length cap even on this Vec<u64>-returning legacy
@@ -796,6 +816,7 @@ fn decrypt_core(
 /// or an error if the token stream is malformed. Prior to CVF-14 this returned
 /// `Vec<u32>` and panicked on a malformed padded buffer (see V3-CVF8); the
 /// new signature propagates the error like every other decryption path.
+/// Legacy v7: see [`decrypt_bytes`] for the caveats.
 pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Result<Vec<u32>, String> {
     validate_key(key)?; // CVF-15
     let kb = key_bytes(key);
@@ -902,7 +923,9 @@ fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Resu
 
 // ─── Constant-time tag comparison ────────────────────────────────────────────
 
-/// Compare two byte slices in constant time.
+/// Compare two byte slices in time independent of their contents. Lengths are
+/// treated as public: unequal lengths return `false` without comparing
+/// (CVF-45).
 ///
 /// Delegates to [`subtle::ConstantTimeEq`], the vetted primitive Section 8.4
 /// of the paper credits for the Rust port's tag comparison. `ConstantTimeEq`
@@ -1023,11 +1046,13 @@ fn fixed_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
-            ceiling (audit CVF-17). Use encrypt_bytes_v8 / \
-            encrypt_bytes_v8_with_profile."
+            ceiling (audit CVF-17); v7 is keyed by the prime tuple, not sk, \
+            and no theorem of the paper applies (CVF-28). Use \
+            encrypt_bytes_v8 / encrypt_bytes_v8_with_profile."
 )]
 pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
     validate_key(key)?; // CVF-15
+    check_v7_aad_len(aad.len())?;
     // CVF-34: cap plaintext length at MAX_PLAINTEXT_CODEPOINTS at the entry
     // point (was an `assert!` in `pad_message`, which aborted release
     // builds — Section 12's "raises an error immediately; no silent
@@ -1103,8 +1128,12 @@ pub(crate) fn encrypt_bytes_with_nonce(
     payload
 }
 
+/// Legacy v7 decryptor, kept for archived ciphertexts. v7 keys every
+/// derivation by the serialised prime tuple rather than an independent `sk`,
+/// and no theorem of the NAPQES v4 paper applies to it (CVF-28).
 pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
     validate_key(key)?; // CVF-15
+    check_v7_aad_len(aad.len())?;
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
         return Err(format!(
             "Ciphertext too short: {} bytes; header+tag require at least {}.",
@@ -1153,7 +1182,8 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
-            ceiling (audit CVF-17). Use encrypt_bytes_v8."
+            ceiling (audit CVF-17); v7 is keyed by the prime tuple, not sk, \
+            and no theorem of the paper applies (CVF-28). Use encrypt_bytes_v8."
 )]
 pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
     // CVF-15: transitively covered by encrypt_bytes, but early-rejecting a
@@ -1163,6 +1193,8 @@ pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> Result<String, Str
     Ok(STANDARD.encode(encrypt_bytes(message, key, aad)?))
 }
 
+/// Legacy v7 decryptor (base64 wrapper over [`decrypt_bytes`]); see that
+/// function for the v7 caveats.
 pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
     validate_key(key)?; // CVF-15 — reject before base64 decode
     let bytes = STANDARD
@@ -1186,11 +1218,14 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
             ceiling (audit CVF-17), and the byte-vs-codepoint encoding \
-            ambiguity of CVF-14 remains. Use encrypt_bytes_v8 for text or \
-            wrap the bytes in a caller-chosen text encoding."
+            ambiguity of CVF-14 remains; v7 is keyed by the prime tuple, not \
+            sk, and no theorem of the paper applies (CVF-28). Use \
+            encrypt_bytes_v8 for text or wrap the bytes in a caller-chosen \
+            text encoding."
 )]
 pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
     validate_key(key)?; // CVF-15
+    check_v7_aad_len(aad.len())?;
     // CVF-34: cap at MAX_PLAINTEXT_CODEPOINTS bytes (each byte becomes a
     // codepoint under the raw-encode convention, so the same 2-codepoint
     // length prefix caps the byte count).
@@ -1219,11 +1254,15 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
 
 /// Decrypt binary data previously encrypted with [`encrypt_raw`].
 ///
+/// Legacy v7 decryptor, kept for archived ciphertexts; see [`decrypt_bytes`]
+/// for the v7 caveats.
+///
 /// Verifies the HMAC tag (constant-time) before decrypting.  Returns
 /// `Err` on authentication failure — the caller must never use the
 /// ciphertext for any purpose if this returns an error.
 pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
     validate_key(key)?; // CVF-15
+    check_v7_aad_len(aad.len())?;
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
         return Err(format!(
             "Ciphertext too short: {} bytes; header+tag require at least {}.",
@@ -1409,20 +1448,28 @@ fn derive_format_subkey(sk: &[u8], format_id: u8) -> [u8; 32] {
 /// from the other) for the CVF8/CVF13 security argument above to hold, and
 /// MUST both be treated as secret key material.
 ///
-/// Panics if `[min_val, max_val]` is not a sub-range of the normative interval
-/// `[MIN_KEY_PRIME, MAX_KEY_PRIME]` (such a key would fail `validate_key`), or
-/// if `count` distinct primes cannot be drawn from it. Prefer
-/// [`crate::NapqesKey::generate`], which cannot panic.
-pub fn generate_v8_key(count: usize, min_val: u64, max_val: u64) -> (Vec<u64>, [u8; SK_SIZE]) {
-    assert!(
-        MIN_KEY_PRIME <= min_val && max_val <= MAX_KEY_PRIME,
-        "generate_v8_key: range [{}, {}] lies outside [MIN_KEY_PRIME, MAX_KEY_PRIME]",
-        min_val, max_val
-    );
-    let primes = generate_prime_numbers(count, min_val, max_val);
+/// Returns `Err` (CVF-20) if `[min_val, max_val]` is not a sub-range of the
+/// normative interval `[MIN_KEY_PRIME, MAX_KEY_PRIME]` (such a key would fail
+/// `validate_key`), or if `count` distinct primes cannot be drawn from it.
+///
+/// The returned `sk` is `Copy`: wipe every copy (see [`zeroize_sk`]), or use
+/// [`crate::NapqesKey::generate`], which owns both components and wipes them
+/// on drop.
+pub fn generate_v8_key(
+    count: usize,
+    min_val: u64,
+    max_val: u64,
+) -> Result<(Vec<u64>, [u8; SK_SIZE]), String> {
+    if !(MIN_KEY_PRIME <= min_val && max_val <= MAX_KEY_PRIME) {
+        return Err(format!(
+            "generate_v8_key: range [{}, {}] lies outside [MIN_KEY_PRIME, MAX_KEY_PRIME]",
+            min_val, max_val
+        ));
+    }
+    let primes = generate_prime_numbers(count, min_val, max_val)?;
     let mut sk = [0u8; SK_SIZE];
     rand::thread_rng().fill_bytes(&mut sk);
-    (primes, sk)
+    Ok((primes, sk))
 }
 
 /// Synthetic IV (SIV-style) nonce derivation — domain byte `0x0A`.
@@ -1492,14 +1539,9 @@ pub(crate) fn encrypt_bytes_v8_core(
     aad: &[u8],
     pad_profile: PadProfile,
 ) -> Result<Vec<u8>, String> {
-    // CVF-37: the value that actually keys every derivation is `sk_fmt`,
-    // not the input `sk`. Take ownership of the derived bytes and wipe them
-    // via a scope guard so early returns and the success path all zeroize
-    // (see `crate::key::Secret32`).
-    let mut sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
-    let result = encrypt_bytes_v8_core_inner(&sk_fmt, message, primes, aad, pad_profile);
-    zeroize_sk(&mut sk_fmt);
-    result
+    // CVF-37: `sk_fmt` keys every derivation; the guard wipes it on every exit.
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_BLOCK_V8));
+    encrypt_bytes_v8_core_inner(sk_fmt.as_ref(), message, primes, aad, pad_profile)
 }
 
 fn encrypt_bytes_v8_core_inner(
@@ -1602,11 +1644,8 @@ pub(crate) fn decrypt_bytes_v8_core(
              expected exactly real_token_count * (MAX_NOISE_RUN + 1) tokens.".into(),
         );
     }
-    // CVF-37: same sk_fmt scope-wipe pattern as encrypt_bytes_v8_core.
-    let mut sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
-    let result = decrypt_bytes_v8_core_inner(&sk_fmt, ciphertext, primes, aad);
-    zeroize_sk(&mut sk_fmt);
-    result
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_BLOCK_V8));
+    decrypt_bytes_v8_core_inner(sk_fmt.as_ref(), ciphertext, primes, aad)
 }
 
 fn decrypt_bytes_v8_core_inner(
@@ -1640,7 +1679,11 @@ fn decrypt_bytes_v8_core_inner(
     Ok(s)
 }
 
-/// Securely erase a v8 HMAC subkey by overwriting it with zero.
+/// Securely erase the v8 master secret `sk` by overwriting it with zero.
+///
+/// The derived format subkey `sk_fmt` is wiped inside each entry point.
+/// `[u8; SK_SIZE]` is `Copy`, so this wipes only the copy passed in; every
+/// other copy the caller made must be wiped too (CVF-37).
 pub fn zeroize_sk(sk: &mut [u8; SK_SIZE]) {
     for x in sk.iter_mut() {
         unsafe { std::ptr::write_volatile(x, 0u8) };
@@ -1649,10 +1692,8 @@ pub fn zeroize_sk(sk: &mut [u8; SK_SIZE]) {
 
 /// v8 block tag over `payload = nonce || masked` under `sk` (used by KAT-6).
 pub(crate) fn retag_block_v8(payload: &[u8], sk: &[u8; SK_SIZE], aad: &[u8]) -> [u8; TAG_SIZE] {
-    let mut sk_fmt = derive_format_subkey(sk, FORMAT_BLOCK_V8);
-    let tag = compute_auth_tag(&sk_fmt, aad, payload, AAD_LEN_WIDTH_V8);
-    zeroize_sk(&mut sk_fmt);
-    tag
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_BLOCK_V8));
+    compute_auth_tag(sk_fmt.as_ref(), aad, payload, AAD_LEN_WIDTH_V8)
 }
 
 /// Fuzzing hook: lets the fuzzer reach post-authentication decode paths.
@@ -1927,10 +1968,8 @@ pub(crate) fn encrypt_stream_ae_v8_with_nonce(
     validate_key(primes)?;
     validate_stream_v8_frame(frame_codepoints)?;
 
-    let mut sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
-    let result = encrypt_stream_ae_v8_inner(plaintext, primes, &sk_fmt, nonce, aad, frame_codepoints);
-    zeroize_sk(&mut sk_fmt);
-    result
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8));
+    encrypt_stream_ae_v8_inner(plaintext, primes, sk_fmt.as_ref(), nonce, aad, frame_codepoints)
 }
 
 fn encrypt_stream_ae_v8_inner(
@@ -2038,10 +2077,8 @@ pub fn decrypt_stream_ae_v8(
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(primes)?;
-    let mut sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
-    let result = decrypt_stream_ae_v8_inner(stream, primes, &sk_fmt, aad);
-    zeroize_sk(&mut sk_fmt);
-    result
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8));
+    decrypt_stream_ae_v8_inner(stream, primes, sk_fmt.as_ref(), aad)
 }
 
 fn decrypt_stream_ae_v8_inner(
@@ -2321,6 +2358,16 @@ mod tests {
     #![allow(deprecated)]
 
     use super::*;
+
+    // CVF-20: key generation is fallible; these shadow the glob import for
+    // tests that only use the always-valid normative interval.
+    fn generate_v8_key(count: usize, min_val: u64, max_val: u64) -> (Vec<u64>, [u8; SK_SIZE]) {
+        super::generate_v8_key(count, min_val, max_val).unwrap()
+    }
+
+    fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Vec<u64> {
+        super::generate_prime_numbers(count, min_val, max_val).unwrap()
+    }
 
     fn test_key() -> Vec<u64> {
         // 10 fixed 7-digit primes — deterministic for tests.
@@ -2689,13 +2736,43 @@ mod tests {
 
     #[test]
     fn cvf31_block_size_rejects_oversized_n() {
-        // Any n >= 2^16 is outside the reachable bucket set.
-        let bucket = PadProfile::Bucket;
-        let err = bucket.block_size(1usize << PAD_MAX_EXP).unwrap_err();
+        // Any n >= 2^16 is outside the reachable bucket set, under every profile.
+        let n = 1usize << PAD_MAX_EXP;
+        for p in [
+            PadProfile::Bucket,
+            PadProfile::Coarse(3),
+            PadProfile::Coarse(12),
+            PadProfile::Frame(1u32 << PAD_MAX_EXP),
+        ] {
+            for m in [n, n + 1, usize::MAX] {
+                assert!(p.block_size(m).is_err(), "{:?} accepted n={}", p, m);
+            }
+        }
+        let err = PadProfile::Bucket.block_size(n).unwrap_err();
         assert!(err.contains("maximum bucket"), "got: {}", err);
-        let coarse = PadProfile::Coarse(3);
-        let err = coarse.block_size(1usize << PAD_MAX_EXP).unwrap_err();
-        assert!(err.contains("maximum bucket"), "got: {}", err);
+    }
+
+    #[test]
+    #[should_panic(expected = "padding block must exceed the message")]
+    fn cvf31_pad_to_block_precondition_is_enforced() {
+        let _ = pad_to_block(&[0x41; 16], &[0u8; 32], &[0u8; NONCE_SIZE], 16);
+    }
+
+    #[test]
+    fn cvf20_keygen_reports_errors_instead_of_panicking() {
+        assert!(super::generate_prime_numbers(1, 10, 10).is_err());
+        // [24, 28] holds no prime: the draw budget must end the search.
+        assert!(super::generate_prime_numbers(1, 24, 28).is_err());
+        assert!(super::generate_v8_key(1, 2, 100).is_err());
+        assert!(super::generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME + 1).is_err());
+        assert!(NapqesKey::generate().is_ok());
+    }
+
+    #[test]
+    fn cvf28_v7_aad_length_is_checked() {
+        assert!(check_v7_aad_len(u32::MAX as usize).is_ok());
+        let err = check_v7_aad_len(u32::MAX as usize + 1).unwrap_err();
+        assert!(err.contains("4-byte length prefix"), "got: {}", err);
     }
 
     #[test]
@@ -2936,6 +3013,20 @@ mod tests {
         let last = ct.len() - 1;
         ct[last] ^= 0x01;
         assert!(decrypt_bytes_v8(&ct, &primes, &sk, b"").is_err());
+    }
+
+    /// CVF-19: the tag must cover the nonce and the masked blob, not only itself.
+    #[test]
+    fn v8_nonce_and_blob_tamper_fail() {
+        let primes = test_key();
+        let sk = test_sk();
+        let ct = encrypt_bytes_v8("secret", &primes, &sk, b"").unwrap();
+        for i in [0, NONCE_SIZE - 1, NONCE_SIZE, ct.len() / 2, ct.len() - TAG_SIZE - 1] {
+            let mut bad = ct.clone();
+            bad[i] ^= 0x01;
+            let err = decrypt_bytes_v8(&bad, &primes, &sk, b"").unwrap_err();
+            assert!(err.contains("Authentication failed"), "byte {}: {}", i, err);
+        }
     }
 
     /// CVF3: encrypting the same (aad, message) twice under the same key

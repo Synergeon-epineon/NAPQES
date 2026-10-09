@@ -58,13 +58,13 @@ impl NapqesKey {
 
     /// Generate a fresh `NapqesKey` via [`crate::generate_v8_key`] under the
     /// normative `[MIN_KEY_PRIME, MAX_KEY_PRIME]` interval and
-    /// `DEFAULT_KEY_COUNT` primes. Never fails for well-formed constants.
+    /// `DEFAULT_KEY_COUNT` primes.
     pub fn generate() -> Result<Self, String> {
         let (primes, sk) = crate::generate_v8_key(
             crate::DEFAULT_KEY_COUNT,
             crate::MIN_KEY_PRIME,
             crate::MAX_KEY_PRIME,
-        );
+        )?;
         Self::new(primes, sk)
     }
 
@@ -102,19 +102,10 @@ impl Drop for NapqesKey {
 // genuinely needs to duplicate a key, they can construct a new one from the
 // same `(primes, sk)`.
 
-/// A stack-allocated 32-byte secret with volatile-write zeroization on drop.
-///
-/// The v8 block-mode encrypt/decrypt cores currently wipe `sk_fmt` via an
-/// inline `zeroize_sk` at the outer function's exit path (see
-/// `encrypt_bytes_v8_core` / `decrypt_bytes_v8_core` in `lib.rs`); this
-/// wrapper is retained for future use in helpers that construct short-lived
-/// subkeys of their own without an obvious exit point (e.g. streaming AE's
-/// chunk-tag derivations). Marked `#[allow(dead_code)]` until such a caller
-/// lands.
-#[allow(dead_code)]
-pub(crate) struct Secret32(pub [u8; 32]);
+/// A 32-byte secret (the derived `sk_fmt`) wiped with volatile writes on
+/// drop, so every exit path of the v8 entry points erases it (CVF-37).
+pub(crate) struct Secret32([u8; 32]);
 
-#[allow(dead_code)]
 impl Secret32 {
     #[inline]
     pub(crate) fn new(bytes: [u8; 32]) -> Self { Self(bytes) }
@@ -134,6 +125,28 @@ impl Drop for Secret32 {
 impl fmt::Debug for Secret32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Secret32(<redacted>)")
+    }
+}
+
+/// Heap secret wiped on drop: the v7 `key_bytes(primes)` HMAC key (CVF-37).
+pub(crate) struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    #[inline]
+    pub(crate) fn new(bytes: Vec<u8>) -> Self { Self(bytes) }
+}
+
+impl std::ops::Deref for SecretBytes {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] { &self.0 }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        for x in self.0.iter_mut() {
+            unsafe { std::ptr::write_volatile(x, 0u8) };
+        }
     }
 }
 

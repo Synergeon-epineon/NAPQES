@@ -407,6 +407,8 @@ async fn run_egress_listener(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    napqes::self_test::run_power_on_self_tests()
+        .map_err(|e| format!("power-on self-tests failed: {}", e))?;
     let cli = Cli::parse();
 
     let config_text = std::fs::read_to_string(&cli.config)
