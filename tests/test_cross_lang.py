@@ -27,6 +27,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -61,6 +62,17 @@ def _require_tool(*names: str) -> None:
         pytest.skip(f"Required tool(s) not on PATH: {', '.join(names)}")
 
 
+def _count_kind(path: Path, kind: str) -> int:
+    with open(path, encoding="utf-8") as f:
+        return sum(v["kind"] == kind for v in json.load(f)["vectors"])
+
+
+def _count_v7_block_positives() -> int:
+    with open(_VECTORS, encoding="utf-8") as f:
+        return sum(v["kind"] == "positive" and v.get("api") != "stream_ae"
+                   for v in json.load(f)["vectors"])
+
+
 # ---------------------------------------------------------------------------
 # Python → Rust
 # ---------------------------------------------------------------------------
@@ -81,17 +93,22 @@ class TestPythonToRust:
                 f"Rust KAT harness failed (exit {result.returncode}):\n"
                 f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
             )
-        # Confirm at least 5 positive vectors were decrypted successfully.
-        # The Rust harness prints "Rust KAT positive: N passed, ..." in stderr.
+        # The Rust harness prints "Rust KAT positive: N passed, ..."; it must
+        # report every v7 block positive in the corpus (CVF-25).
         combined = result.stdout + result.stderr
         import re
         m = re.search(r"Rust KAT positive:\s*(\d+)\s*passed", combined)
-        if m:
-            count = int(m.group(1))
-            assert count >= 5, (
-                f"Expected Rust to pass ≥5 positive KAT vectors; got {count}.\n"
-                f"Full output:\n{combined}"
-            )
+        assert m, f"Rust harness did not report a positive count:\n{combined}"
+        expected = _count_v7_block_positives()
+        assert int(m.group(1)) == expected, (
+            f"Rust decrypted {m.group(1)} v7 positive vectors; corpus has {expected}."
+        )
+        m8 = re.search(r"Rust v8 KAT encrypt:\s*(\d+)\s*passed", combined)
+        assert m8, f"Rust harness did not report a v8 count:\n{combined}"
+        expected8 = _count_kind(_V8_VECTORS, "positive")
+        assert int(m8.group(1)) == expected8, (
+            f"Rust matched {m8.group(1)} v8 positive vectors; corpus has {expected8}."
+        )
 
     def test_rust_deterministic_encrypt_matches_python(self):
         """positive_encrypt_bytes_deterministic in Rust must match Python ciphertext_hex."""
@@ -114,12 +131,11 @@ class TestPythonToRust:
         import re
         combined = result.stdout + result.stderr
         m = re.search(r"Rust KAT deterministic encrypt:\s*(\d+)\s*passed", combined)
-        if m:
-            count = int(m.group(1))
-            assert count >= 5, (
-                f"Expected Rust deterministic encrypt to pass ≥5 vectors; got {count}.\n"
-                f"Full output:\n{combined}"
-            )
+        assert m, f"Rust harness did not report a count:\n{combined}"
+        expected = _count_v7_block_positives()
+        assert int(m.group(1)) == expected, (
+            f"Rust reproduced {m.group(1)} v7 ciphertexts; corpus has {expected}."
+        )
 
 
 # ---------------------------------------------------------------------------
