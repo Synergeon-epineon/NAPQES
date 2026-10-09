@@ -19,18 +19,33 @@ applies a `MAX_NOISE_RUN` cap plus a per-bucket token ceiling so ciphertext
 length depends only on the padding bucket.
 
 ```rust
+use napqes::{decrypt_bytes_v8_key, encrypt_bytes_v8_key, NapqesKey};
+
+// Required under `--features fips_gate` (see "Power-on self-tests" below);
+// harmless otherwise.
+napqes::self_test::run_power_on_self_tests().expect("POST failed");
+
+// Validated once at construction, wiped on drop.
+let key = NapqesKey::generate().unwrap();
+let ct = encrypt_bytes_v8_key("hello", &key, b"aad").unwrap();
+let pt = decrypt_bytes_v8_key(&ct, &key, b"aad").unwrap();
+assert_eq!(pt, "hello");
+```
+
+The bare-slice entry points take the two key components directly and
+re-validate the prime tuple on every call:
+
+```rust
 use napqes::{
     generate_v8_key, encrypt_bytes_v8, decrypt_bytes_v8,
     zeroize_key, zeroize_sk,
     DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME,
 };
 
-// Required under `--features fips_gate` (see "Power-on self-tests" below);
-// harmless otherwise.
 napqes::self_test::run_power_on_self_tests().expect("POST failed");
 
 let (mut primes, mut sk) =
-    generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+    generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME).unwrap();
 
 let ct = encrypt_bytes_v8("hello", &primes, &sk, b"aad").unwrap();
 let pt = decrypt_bytes_v8(&ct, &primes, &sk, b"aad").unwrap();
@@ -62,7 +77,7 @@ use napqes::{
 
 napqes::self_test::run_power_on_self_tests().expect("POST failed");
 
-let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME).unwrap();
 
 // All-at-once
 let ct = encrypt_stream_ae_v8("hello, streaming!", &primes, &sk, b"", 128).unwrap();

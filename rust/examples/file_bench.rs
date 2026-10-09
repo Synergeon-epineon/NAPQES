@@ -40,7 +40,9 @@ fn main() {
     let chunk = arg(&args, "--chunk", 1 << 16).max(1).min(size.max(1));
     let frame = arg(&args, "--frame", 1024) as u32;
 
-    let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+    napqes::self_test::run_power_on_self_tests().expect("power-on self-tests failed");
+    let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME)
+        .expect("key generation failed");
     let mut rng = rand::thread_rng();
     let enc = |p: &str| encrypt_stream_ae_v8(p, &primes, &sk, b"", frame).expect("encrypt");
 
