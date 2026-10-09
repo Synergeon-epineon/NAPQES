@@ -25,6 +25,10 @@ use napqes::{
     DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME,
 };
 
+// Required under `--features fips_gate` (see "Power-on self-tests" below);
+// harmless otherwise.
+napqes::self_test::run_power_on_self_tests().expect("POST failed");
+
 let (mut primes, mut sk) =
     generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
 
@@ -56,6 +60,8 @@ use napqes::{
     DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME,
 };
 
+napqes::self_test::run_power_on_self_tests().expect("POST failed");
+
 let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
 
 // All-at-once
@@ -77,9 +83,23 @@ same `sk` is a CVF-3-class hazard. See `docs/CAVEATS.md` CAV-005. For
 messages that fit in memory, prefer the SIV-protected block API
 (`encrypt_bytes_v8` / `decrypt_bytes_v8`).
 
+## Power-on self-tests (FIPS 140-3)
+
+`napqes::self_test::run_power_on_self_tests()` runs the SP 800-140B §4.9.1
+KATs (v7 and v8) and latches the outcome process-wide. Building with
+`--features fips_gate` makes every public v8 encrypt/decrypt entry point
+(block, streaming, `NapqesKey` variants) refuse to run
+(`module not operational`) until that call has returned `Ok(())`; a failed
+POST keeps the module in the error state. Without the feature the outcome
+is still latched but not enforced. The gate covers v8 encryption and
+decryption only — key generation, the v7 legacy decryptors, `kem`,
+`kem_exchange`, `ot_frame`, `protocols` and `vale` are outside it.
+
 ## Public surface
 
 **Recommended (v8):**
+`NapqesKey` with `encrypt_bytes_v8_key`, `decrypt_bytes_v8_key`,
+`encrypt_bytes_v8_with_profile_key` (validates once, wipes on drop);
 `encrypt_bytes_v8`, `encrypt_bytes_v8_with_profile`, `decrypt_bytes_v8`,
 `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`, `StreamV8Encryptor`,
 `generate_v8_key`, `zeroize_key`, `zeroize_sk`.

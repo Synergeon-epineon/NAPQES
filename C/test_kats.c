@@ -29,6 +29,15 @@
 
 /* ── Hex helpers ─────────────────────────────────────────────────────────── */
 
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* No sscanf: MSVC's sscanf strlen()s the remaining input per call, which is
+ * quadratic on the 20 MB W014 hex string. */
 static uint8_t *hex_decode(const char *hex, size_t *out_len) {
     *out_len = 0;
     if (!hex || hex[0] == '\0') return NULL;
@@ -38,9 +47,9 @@ static uint8_t *hex_decode(const char *hex, size_t *out_len) {
     uint8_t *buf = malloc(n);
     if (!buf) return NULL;
     for (size_t i = 0; i < n; i++) {
-        unsigned int byte;
-        if (sscanf(hex + 2 * i, "%02x", &byte) != 1) { free(buf); return NULL; }
-        buf[i] = (uint8_t)byte;
+        int hi = hex_nibble(hex[2 * i]), lo = hex_nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) { free(buf); return NULL; }
+        buf[i] = (uint8_t)((hi << 4) | lo);
     }
     *out_len = n;
     return buf;
@@ -143,6 +152,52 @@ static char *json_str(const char *json, const char *key) {
     }
     *out = '\0';
     return val;
+}
+
+/* UTF-8 -> Latin-1. The C port maps one byte to one codepoint, so messages whose
+ * codepoints are all <= U+00FF are testable. Returns NULL for anything wider. */
+static char *utf8_to_latin1(const char *s) {
+    size_t n = strlen(s);
+    char *out = malloc(n + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) {
+            out[j++] = (char)c;
+            i++;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < n
+                   && ((unsigned char)s[i + 1] & 0xC0) == 0x80) {
+            unsigned cp = ((c & 0x1Fu) << 6) | ((unsigned char)s[i + 1] & 0x3Fu);
+            if (cp < 0x80 || cp > 0xFF) { free(out); return NULL; }
+            out[j++] = (char)cp;
+            i += 2;
+        } else {
+            free(out);
+            return NULL;
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* Optional "pad_profile": {"coarse": g} | {"frame": F}. Returns NULL for bucket. */
+static const napqes_pad_profile_t *parse_pad_profile(const char *obj,
+                                                     napqes_pad_profile_t *out) {
+    const char *p = strstr(obj, "\"pad_profile\":");
+    if (!p) return NULL;
+    const char *c = strstr(p, "\"coarse\":");
+    const char *f = strstr(p, "\"frame\":");
+    if (c) {
+        out->kind = NAPQES_PAD_COARSE;
+        out->param = (uint32_t)strtoul(c + strlen("\"coarse\":"), NULL, 10);
+    } else if (f) {
+        out->kind = NAPQES_PAD_FRAME;
+        out->param = (uint32_t)strtoul(f + strlen("\"frame\":"), NULL, 10);
+    } else {
+        return NULL;
+    }
+    return out;
 }
 
 /* Parse JSON integer array "[n0, n1, ...]" into key[] and set *klen.
@@ -409,14 +464,18 @@ static int run_v8_corpus(const char *path, int *passed, int *skipped) {
             if (msg)
                 for (const unsigned char *q = (const unsigned char *)msg; *q; q++)
                     if (*q > 127) { has_nonascii = 1; break; }
+            if (has_nonascii) {
+                char *latin1 = utf8_to_latin1(msg);
+                if (latin1) { free(msg); msg = latin1; has_nonascii = 0; }
+            }
 
             if (!ct_hex || !msg) {
                 printf("[SKIP] %s: missing fields\n", id);
                 (*skipped)++;
             } else if (has_nonascii) {
                 /* The C port maps one input byte to one codepoint; Python maps
-                 * one Unicode codepoint. The two agree exactly on ASCII. */
-                printf("[SKIP] %s: non-ASCII message (C port is byte-API only)\n", id);
+                 * one Unicode codepoint. They agree up to U+00FF. */
+                printf("[SKIP] %s: codepoints above U+00FF (C port is byte-API only)\n", id);
                 (*skipped)++;
             } else {
                 size_t ct_len = 0;
@@ -434,8 +493,10 @@ static int run_v8_corpus(const char *path, int *passed, int *skipped) {
                 free(plain);
 
                 size_t enc_len = 0;
-                uint8_t *enc = napqes_encrypt_bytes_v8(msg, key, klen, sk,
-                                                       aad, aad_len, &enc_len);
+                napqes_pad_profile_t prof;
+                uint8_t *enc = napqes_encrypt_bytes_v8_profiled(
+                    msg, key, klen, sk, aad, aad_len,
+                    parse_pad_profile(obj, &prof), &enc_len);
                 if (!enc || enc_len != ct_len || !ct || memcmp(enc, ct, ct_len) != 0) {
                     char *enc_hex = enc ? hex_encode(enc, enc_len) : NULL;
                     printf("[FAIL] %s encrypt: got  %s\n"
@@ -549,6 +610,7 @@ static int run_v8_stream_corpus(const char *path, int *passed, int *skipped) {
         char *nonce_h  = json_str(obj, "nonce_hex");
         char *aad_h    = json_str(obj, "aad_hex");
         char *ct_hex   = json_str(obj, "ciphertext_hex");
+        char *tamp_hex = json_str(obj, "tampered_hex");
         char *msg      = json_str(obj, "message");
         uint64_t primes[32];
         size_t klen = 0;
@@ -562,11 +624,11 @@ static int run_v8_stream_corpus(const char *path, int *passed, int *skipped) {
             F = (uint32_t)strtoul(fp, NULL, 10);
         }
 
-        if (!id || !kind || !sk_hex || !nonce_h || !ct_hex
+        if (!id || !kind || !sk_hex || !nonce_h || (!ct_hex && !tamp_hex)
             || parse_primes_array(obj, primes, &klen) != 0 || F == 0) {
             (*skipped)++;
             free(id); free(kind); free(sk_hex); free(nonce_h); free(aad_h);
-            free(ct_hex); free(msg); free(obj);
+            free(ct_hex); free(tamp_hex); free(msg); free(obj);
             continue;
         }
 
@@ -575,7 +637,26 @@ static int run_v8_stream_corpus(const char *path, int *passed, int *skipped) {
             for (const unsigned char *q = (const unsigned char *)msg; *q; q++)
                 if (*q > 127) { has_nonascii = 1; break; }
 
-        if (strcmp(kind, "positive") != 0) {
+        if (strcmp(kind, "negative") == 0) {
+            size_t sk_len = 0, aad_len = 0, t_len = 0;
+            uint8_t *sk  = hex_decode(sk_hex, &sk_len);
+            uint8_t *aad = (aad_h && aad_h[0] != '\0') ? hex_decode(aad_h, &aad_len) : NULL;
+            uint8_t *t   = tamp_hex ? hex_decode(tamp_hex, &t_len) : NULL;
+            char *plain = (sk && t && sk_len == NAPQES_SK_SIZE)
+                ? napqes_decrypt_stream_ae_v8_bytes(t, t_len, primes, klen, sk, aad, aad_len)
+                : NULL;
+            if (!t || !sk || sk_len != NAPQES_SK_SIZE) {
+                printf("[FAIL] %s: bad sk_hex/tampered_hex\n", id);
+                failed++;
+            } else if (plain == NULL) {
+                printf("[PASS] %s (rejected)\n", id);
+                (*passed)++;
+            } else {
+                printf("[FAIL] %s: stream decrypt succeeded on invalid stream\n", id);
+                failed++;
+            }
+            free(plain); free(sk); free(aad); free(t);
+        } else if (strcmp(kind, "positive") != 0) {
             printf("[SKIP] %s: unknown kind '%s'\n", id, kind);
             (*skipped)++;
         } else if (has_nonascii) {
@@ -635,7 +716,7 @@ static int run_v8_stream_corpus(const char *path, int *passed, int *skipped) {
         }
 
         free(id); free(kind); free(sk_hex); free(nonce_h); free(aad_h);
-        free(ct_hex); free(msg); free(obj);
+        free(ct_hex); free(tamp_hex); free(msg); free(obj);
     }
     free(json);
     return failed;

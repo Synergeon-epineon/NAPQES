@@ -352,15 +352,16 @@ pub fn unwrap_pdu(
 ) -> Result<Vec<u8>, FrameError> {
     let (protocol, device_id, seq, blob_start, blob_len) = parse_envelope_header(buf)?;
 
-    counters.validate_recv(protocol, device_id, seq)?;
-
     let napqes_blob = &buf[blob_start..blob_start + blob_len];
     let aad = OtAad { protocol, device_id, seq };
     let aad_bytes = aad.to_bytes();
 
-    decrypt_raw(napqes_blob, key, &aad_bytes).map_err(|_| {
+    let pdu = decrypt_raw(napqes_blob, key, &aad_bytes).map_err(|_| {
         FrameError::AuthenticationFailed { device_id, protocol, seq }
-    })
+    })?;
+    // Only an authenticated seq may advance the replay window.
+    counters.validate_recv(protocol, device_id, seq)?;
+    Ok(pdu)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -420,6 +421,23 @@ mod tests {
         // seq=1 must be rejected as replay
         let result = unwrap_pdu(&env1, &key, &counters);
         assert!(matches!(result, Err(FrameError::ReplayDetected { .. })));
+    }
+
+    #[test]
+    fn forged_high_seq_does_not_advance_replay_window() {
+        let key      = test_key();
+        let counters = SequenceCounter::new();
+        let pdu      = b"\x01\x03\x00\x00\x00\x0a";
+        let genuine  = wrap_pdu(pdu, make_aad(ProtocolId::ModbusTcp, 1, 1), &key).unwrap();
+
+        // Unauthenticated attacker rewrites seq to u64::MAX (tag no longer verifies).
+        let mut forged = genuine.clone();
+        forged[11..19].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(
+            unwrap_pdu(&forged, &key, &counters),
+            Err(FrameError::AuthenticationFailed { .. })
+        ));
+        assert_eq!(unwrap_pdu(&genuine, &key, &counters).unwrap(), pdu.as_ref());
     }
 
     #[test]

@@ -127,13 +127,21 @@ class TestGeneratePrimeNumbers:
         assert napqes.MIN_KEY_PRIME == 1_000_000
         assert napqes.MAX_KEY_PRIME == 14_999_999
 
-    def test_serialisation_upper_bound_rejects_untruncatable_prime(self):
-        # 5-byte key serialisation: Rust/C would silently truncate a larger
-        # element, so Python must refuse it rather than diverge.
-        too_big = (1 << 40) + 15  # prime
-        assert napqes.is_prime(too_big)
-        with pytest.raises(ValueError, match="5-byte key serialisation"):
-            napqes._validate_key([too_big])
+    def test_validation_rejects_prime_above_max_key_prime(self):
+        # 15_000_017 is the smallest prime above MAX_KEY_PRIME (CVF-16 parity with Rust/C).
+        assert napqes.is_prime(15_000_017)
+        with pytest.raises(ValueError, match="exceeds MAX_KEY_PRIME"):
+            napqes._validate_key([15_000_017])
+
+    def test_validation_rejects_too_many_elements(self):
+        primes = []
+        n = napqes.MIN_KEY_PRIME
+        while len(primes) <= napqes.MAX_KEY_ELEMENTS:
+            if napqes.is_prime(n):
+                primes.append(n)
+            n += 1
+        with pytest.raises(ValueError, match="MAX_KEY_ELEMENTS"):
+            napqes._validate_key(primes)
 
     def test_no_duplicates(self):
         primes = napqes.generate_prime_numbers(count=13)
