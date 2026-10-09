@@ -11,6 +11,8 @@ edition = "2021"
 [features]
 default = []
 fips_gate = []
+# Requires the unpublished rust/src/vale sources (gitignored).
+vale = []
 # Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
 # Wire-incompatible with the default build and the Python/C KATs.
 noise_x10 = []
@@ -73,6 +75,7 @@ path = "src/bin/ls_gateway.rs"
 [[bin]]
 name = "vale_demo"
 path = "src/bin/vale_demo.rs"
+required-features = ["vale"]
 
 [lib]
 name = "napqes"
