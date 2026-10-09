@@ -28,7 +28,10 @@ use std::sync::OnceLock;
 /// Fresh, validated NapqesKey generated once at startup (CVF-29/37/41 wrapper).
 fn fixed_key() -> &'static NapqesKey {
     static KEY: OnceLock<NapqesKey> = OnceLock::new();
-    KEY.get_or_init(|| NapqesKey::generate().expect("dudect: NapqesKey::generate failed"))
+    KEY.get_or_init(|| {
+        napqes::self_test::run_power_on_self_tests().expect("dudect: POST failed");
+        NapqesKey::generate().expect("dudect: NapqesKey::generate failed")
+    })
 }
 
 /// One valid v8 ciphertext produced once at startup. Both classes derive

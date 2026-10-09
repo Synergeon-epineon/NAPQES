@@ -20,15 +20,17 @@ Run:
 
 Output schema per vector:
   id                  unique string identifier
-  kind                "positive" or "negative"
+  kind                "positive", "negative" (decrypt must fail) or
+                      "encrypt_negative" (encrypt must fail)
   description         human-readable note
-  key                 list[int] – prime key elements
-  sk_hex              hex of the 32-byte independent HMAC subkey ``sk``
-  message             plaintext string (positive only)
+  key                 list[int] – prime key elements, decimal, in tuple order
+  sk_hex              lowercase hex of the 32-byte independent HMAC subkey ``sk``
+  message             plaintext string (positive / encrypt_negative)
+  pad_profile         optional {"coarse": g} | {"frame": F}; absent = bucket
   aad_hex             hex of AAD bytes ("" means empty)
   ciphertext_hex      expected encrypt_bytes_v8() output (positive only)
   tampered_hex        ciphertext that must fail to decrypt (negative only)
-  expected_exception  substring of the expected ValueError message (negative)
+  expected_exception  substring of the expected ValueError message (negatives)
 """
 
 import argparse
@@ -215,6 +217,53 @@ def _noncanonical_length_prefix_ct(key: list[int], sk: bytes) -> bytes:
         key, sk, "n" * 300,
         lambda padded: (0, (padded[0] << 8) | padded[1]),
     )
+
+
+def _surrogate_codepoint_ct(key: list[int], sk: bytes) -> bytes:
+    """Validly tagged ciphertext whose first real codepoint decodes to U+D800."""
+    real_pad = napqes._pad_message
+
+    def _bogus_pad(msg, kb, nonce, pad_profile=napqes.PAD_BUCKET):
+        padded = real_pad(msg, kb, nonce, pad_profile)
+        padded[2] = 0xD800
+        return padded
+
+    napqes._pad_message = _bogus_pad
+    try:
+        return napqes.encrypt_bytes_v8("surrogate", key, sk, aad=b"")
+    finally:
+        napqes._pad_message = real_pad
+
+
+def _build_encrypt_negative(
+    vec_id: str,
+    description: str,
+    key: list[int],
+    sk_index: int,
+    message: str,
+    pad_profile: tuple,
+    expected_exception: str,
+) -> dict:
+    """An input that every port must refuse to encrypt (no ciphertext exists)."""
+    sk = _sk(sk_index)
+    try:
+        napqes.encrypt_bytes_v8(message, key, sk, aad=b"", pad_profile=pad_profile)
+    except ValueError as exc:
+        assert re.search(expected_exception, str(exc)), (
+            f"{vec_id}: expected /{expected_exception}/, got: {exc}")
+    else:
+        raise AssertionError(f"{vec_id}: encrypt_negative vector encrypted successfully")
+    return {
+        "id": vec_id,
+        "kind": "encrypt_negative",
+        "description": description,
+        "key": key,
+        "sk_hex": sk.hex(),
+        "message": message,
+        "aad_hex": "",
+        "pad_profile": {pad_profile[0]: pad_profile[1]},
+        "expected_exception": expected_exception,
+    }
 
 
 def generate() -> list[dict]:
@@ -436,6 +485,36 @@ def generate() -> list[dict]:
         KEY_4, sk_n11,
         _noncanonical_length_prefix_ct(KEY_4, sk_n11),
         expected_exception="are not byte-valued",
+    ))
+
+    # ── Final-pass coverage (CVF-25 / CVF-32), appended so earlier sk
+    # indices and vectors stay byte-identical. ──
+    vectors.append(_build_positive(
+        "W020", "coarse(3) at n=15 (must stay at B=16)",
+        KEY_4, idx := idx + 1, "A" * 15, pad_profile=("coarse", 3),
+    ))
+    vectors.append(_build_positive(
+        "W021", "coarse(3) at n=16 (e(n) 4 -> 5 rounds B up to 128, like n=17)",
+        KEY_4, idx := idx + 1, "A" * 16, pad_profile=("coarse", 3),
+    ))
+    vectors.append(_build_positive(
+        "W022", "Top of the BMP: U+FFFE and U+FFFF, then U+10000",
+        KEY_4, idx := idx + 1, "\ufffe\uffff \U00010000",
+    ))
+
+    sk_n12 = _sk(idx := idx + 1)
+    vectors.append(_build_negative(
+        "W-N12",
+        "First real codepoint decodes to the surrogate U+D800; re-tagged",
+        KEY_4, sk_n12,
+        _surrogate_codepoint_ct(KEY_4, sk_n12),
+        expected_exception="is not a Unicode scalar value",
+    ))
+
+    vectors.append(_build_encrypt_negative(
+        "W-E01", "frame(1024) at n=1024: the profile requires n < F",
+        KEY_4, idx := idx + 1, "A" * 1024, ("frame", 1024),
+        expected_exception="profile admits messages of at most",
     ))
 
     return vectors

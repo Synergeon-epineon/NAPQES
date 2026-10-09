@@ -16,6 +16,11 @@
 //!   KAT-6  v8 structural reject: a validly re-tagged ciphertext one real
 //!          token short (R = 17) must pass the tag and be refused by
 //!          decrypt_core_v8's post-authentication bucket check.
+//!   KAT-7  v8 tamper: W002 ciphertext with a flipped tag byte must fail
+//!          authentication.
+//!   KAT-8  KEM: FrodoKEM-640 key derivation from a fixed shared secret
+//!          (known answer, matches napqes_kem.py), plus a pairwise-consistency
+//!          round trip for the FrodoKEM and hybrid FrodoKEM+X25519 KEMs.
 //!   INT-1  Software build-provenance check — a self-declared build-metadata
 //!          comparator, renamed from "integrity" per CVF-18: comparing
 //!          CARGO_PKG_VERSION to a literal is a version-string tautology, not
@@ -466,6 +471,19 @@ const KAT_V8_EXPECTED_SHA256: [u8; 32] = [
     0x5d, 0x8e, 0x7f, 0x1e, 0xb3, 0x99, 0x4c, 0xed,
 ];
 
+// ─── KEM KAT constants (CVF-18 / CVF-47) ──────────────────────────────────────────
+//
+// `napqes_kem._derive_napqes_key(bytes(range(16)))` from the Python reference.
+const KAT_KEM_SHARED_SECRET: [u8; 16] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+];
+const KAT_KEM_EXPECTED_KEY: [u64; 13] = [
+    9_983_011, 10_152_529, 7_834_763, 10_632_887, 2_925_119, 10_279_739,
+    14_182_411, 11_926_879, 5_090_131, 7_862_971, 11_050_261, 11_123_929,
+    3_865_637,
+];
+
 // ─── Error type ──────────────────────────────────────────────────────────────
 
 /// Errors returned by power-on self-tests.
@@ -483,6 +501,10 @@ pub enum SelfTestError {
     KatV8DecryptFailed,
     /// KAT-6: v8 structural-reject KAT accepted a malformed ciphertext (CVF-18).
     KatV8StructuralAccept,
+    /// KAT-7: v8 tampered ciphertext was not rejected (CVF-18).
+    KatV8TamperNotRejected,
+    /// KAT-8: KEM derivation or pairwise-consistency test failed (CVF-18).
+    KatKemFailed,
     /// INT-1: build-provenance mismatch. **Renamed from `IntegrityCheckFailed`
     /// per CVF-18.** This check compares `CARGO_PKG_VERSION` to an operator-
     /// supplied `NAPQES_ATTESTED_VERSION`; it is not a binary HMAC integrity
@@ -504,6 +526,8 @@ impl fmt::Display for SelfTestError {
             Self::KatV8EncryptFailed     => write!(f, "KAT-4 FAIL: v8 encrypt round-trip failed"),
             Self::KatV8DecryptFailed     => write!(f, "KAT-5 FAIL: v8 decrypt round-trip failed"),
             Self::KatV8StructuralAccept  => write!(f, "KAT-6 FAIL: v8 structural-reject accepted malformed ciphertext"),
+            Self::KatV8TamperNotRejected => write!(f, "KAT-7 FAIL: v8 tampered ciphertext was not rejected"),
+            Self::KatKemFailed           => write!(f, "KAT-8 FAIL: KEM derivation or pairwise-consistency test failed"),
             Self::BuildProvenanceMismatch => write!(f, "INT-1 FAIL: build-provenance check mismatch"),
             Self::NotOperational         => write!(f, "module not operational: power-on self-tests have not passed"),
             Self::InternalError(s)       => write!(f, "SELF-TEST INTERNAL ERROR: {}", s),
@@ -544,6 +568,8 @@ pub fn run_power_on_self_tests() -> Result<(), SelfTestError> {
         kat_v8_encrypt()?;
         kat_v8_decrypt()?;
         kat_v8_structural_reject()?;
+        kat_v8_tamper_rejection()?;
+        kat_kem()?;
         build_provenance_check()?;
         Ok(())
     })();
@@ -631,6 +657,40 @@ fn kat_v8_structural_reject() -> Result<(), SelfTestError> {
         Err(e) if e.contains("is not B + 2") => Ok(()),
         _ => Err(SelfTestError::KatV8StructuralAccept),
     }
+}
+
+// ─── KAT-7: v8 tamper rejection (CVF-18) ─────────────────────────────────────────
+
+fn kat_v8_tamper_rejection() -> Result<(), SelfTestError> {
+    let mut ct = crate::encrypt_bytes_v8(KAT_V8_MESSAGE, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD)
+        .map_err(|_| SelfTestError::KatV8TamperNotRejected)?;
+    let last = ct.len() - 1;
+    ct[last] ^= 0xFF;
+    match crate::decrypt_bytes_v8(&ct, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD) {
+        Err(e) if e.contains("Authentication failed") => Ok(()),
+        _ => Err(SelfTestError::KatV8TamperNotRejected),
+    }
+}
+
+// ─── KAT-8: KEM derivation + pairwise consistency (CVF-18 / CVF-47) ────────────────
+
+fn kat_kem() -> Result<(), SelfTestError> {
+    use crate::kem;
+    let fail = |_| SelfTestError::KatKemFailed;
+    if kem::derive_napqes_key(&KAT_KEM_SHARED_SECRET) != KAT_KEM_EXPECTED_KEY {
+        return Err(SelfTestError::KatKemFailed);
+    }
+    let (pk, sk) = kem::keygen();
+    let (ct, key_a) = kem::encapsulate(&pk).map_err(fail)?;
+    if kem::decapsulate(&ct, &sk).map_err(fail)? != key_a {
+        return Err(SelfTestError::KatKemFailed);
+    }
+    let (pk, sk) = kem::keygen_hybrid();
+    let (ct, key_a) = kem::encapsulate_hybrid(&pk).map_err(fail)?;
+    if kem::decapsulate_hybrid(&ct, &sk).map_err(fail)? != key_a {
+        return Err(SelfTestError::KatKemFailed);
+    }
+    Ok(())
 }
 
 // ─── INT-1: build-provenance check (CVF-18, renamed from integrity_check) ───

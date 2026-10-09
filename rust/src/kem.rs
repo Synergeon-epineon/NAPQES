@@ -55,6 +55,8 @@ pub fn keygen() -> (Vec<u8>, Vec<u8>) {
 ///
 /// Returns `Err` if `public_key` is not a valid FrodoKEM-640-AES public key.
 pub fn encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u64>), String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
     let pk = PublicKey::from_bytes(public_key)
         .map_err(|_| "invalid FrodoKEM-640-AES public key".to_string())?;
     let (ss, ct) = frodokem640aes::encapsulate(&pk);
@@ -69,6 +71,8 @@ pub fn encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u64>), String> {
 ///
 /// Returns `Err` if the ciphertext or secret key are not valid FrodoKEM-640-AES bytes.
 pub fn decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> Result<Vec<u64>, String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
     let ct = Ciphertext::from_bytes(ciphertext)
         .map_err(|_| "invalid FrodoKEM-640-AES ciphertext".to_string())?;
     let sk = SecretKey::from_bytes(secret_key)
@@ -245,6 +249,8 @@ pub fn keygen_hybrid() -> (Vec<u8>, Vec<u8>) {
 ///
 /// Returns `Err` if `public_key` is malformed or the derivation is rejected.
 pub fn encapsulate_hybrid(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u64>), String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
     if public_key.len() != HYBRID_PUBLIC_KEY_SIZE {
         return Err(format!(
             "Hybrid public key must be {} bytes, got {}",
@@ -285,6 +291,8 @@ pub fn encapsulate_hybrid(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u64>), Stri
 ///
 /// Returns `Err` if either blob is malformed or the derivation is rejected.
 pub fn decapsulate_hybrid(ciphertext: &[u8], secret_key: &[u8]) -> Result<Vec<u64>, String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
     if ciphertext.len() != HYBRID_CIPHERTEXT_SIZE {
         return Err(format!(
             "Hybrid ciphertext must be {} bytes, got {}",
