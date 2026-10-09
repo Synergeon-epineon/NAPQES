@@ -49,6 +49,8 @@ pub mod kem;
 pub mod kem_exchange;
 pub mod ot_frame;
 pub mod protocols;
+// rust/src/vale is not published (gitignored); build it with `--features vale`.
+#[cfg(feature = "vale")]
 pub mod vale;
 
 // CVF-29 + CVF-37 + CVF-41: validated + auto-wiped v8 key wrapper.
