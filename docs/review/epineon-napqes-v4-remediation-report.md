@@ -96,7 +96,7 @@ Legend: **C** = closed in this pass; **C+D** = closed with follow-up items expli
 | 46 | Mod | architecture | C | `emit_tokens_v7` shared helper extracted; four v7 encryptors reduced to a single-line call; byte-identical output verified against the v6 KAT corpus |
 | 47 | Mod | procedural | C | `POST_STATE: AtomicU8` + `require_post()`; every public v8 encrypt/decrypt entry (block, streaming incl. `StreamV8Encryptor::push`/`finish`, `NapqesKey` variants) gated behind opt-in `[features] fips_gate`; four-state (`NOT_RUN` / `RUNNING` / `PASSED` / `FAILED`) latch with explicit test for each transition |
 
-**Total:** 37/37 addressed. Named deferrals: 3 (CVF-18, CVF-23, CVF-26 — see §6). Residual gaps identified by the final verification pass are listed in §8.3 and are **not** claimed closed.
+**Total:** 37/37 addressed. Named deferrals: 3 (CVF-18, CVF-23, CVF-26 — see §6). Residual gaps identified by the final verification pass are listed in §8.4 and are **not** claimed closed.
 
 ---
 
@@ -357,9 +357,9 @@ Named `cvf<N>_...` where possible so `cargo test --lib cvf` surfaces the whole s
 
 A last pass re-ran the full matrix and re-checked every finding of both audit rounds (v3 paper CVF-1–25, v4 code CVF-11–47) against the code and the paper.
 
-### 8.1 Matrix (all green after the fixes in §8.2)
+### 8.1 Matrix (all green after the fixes in §8.2 and §8.3)
 
-`python -m pytest tests` (363 passed, 1 skipped); `gen_kats.py`, `gen_kats_v8.py`, `gen_kats_v8_stream.py --check`; `cargo test --release` and `cargo test --features fips_gate` (unit + doctests); `cargo build --examples --release`; `cargo check --bins` in `rust/fuzz`; C KAT harness built with MSVC `/W4` (zero warnings) passing all three corpora; independent v8 re-implementation 30/30; paper builds with no undefined references.
+`python -m pytest tests` (372 passed, 1 skipped, including the Rust cross-language tests); `gen_kats.py` (37), `gen_kats_v8.py` (35) and `gen_kats_v8_stream.py` (14) `--check`; `cargo test --release` (144 unit + 4 doc), `--features vale` (251 + 4) and `--features "fips_gate vale"` (253 + 4); `cargo build --release --bins` with zero warnings, with and without `fips_gate`; `cargo build --release --examples`; `cargo check --bins` in `rust/fuzz`; C KAT harness built with MSVC `/W4` (zero warnings) passing all three corpora with 0 failures; independent v8 re-implementation 35/35; paper builds with no errors or undefined references.
 
 ### 8.2 Regressions and inaccuracies found and fixed
 
@@ -375,21 +375,34 @@ A last pass re-ran the full matrix and re-checked every finding of both audit ro
 - `C/README.md` example declared `uint64_t key[10]` but generated `NAPQES_DEFAULT_KEY_COUNT` (13) primes into it.
 - Paper: CVF-40 items 1–8 plus the `be5` bound note; v7 surface, OT-frame use of `encrypt_raw`, per-call key-validation timing and v7 `f64` threshold disclosed (CVF-17/28/29/30); v8-scoped length-cap wording (CVF-34); v3 items — truncated nonce formula in Contributions (CVF-19), "keystream" → "ciphertext output" (CVF-20), comparison-table expansion cell (CVF-3), mismatched-key decryptor behaviour (CVF-18), two-hop PRF description in Contributions; the comparison table no longer runs off the page.
 
-### 8.3 Residual gaps (not claimed closed)
+### 8.3 Closed in the close-out pass
 
-- **CVF-14:** v7 byte and codepoint encodings remain indistinguishable for values ≤ U+00FF (`encrypt_bytes("é")` decrypts under `decrypt_raw` as `0xE9`). Inherent to the shared v7 format; v7 encryptors are deprecated.
-- **CVF-17:** `ot_frame` still encrypts with v7 `encrypt_raw` (disclosed in paper §8.2).
-- **CVF-18:** POST has no v8 tag-flip KAT (KAT-3 is v7), and the embedded KAT constants are not cross-checked against the corpus in CI.
-- **CVF-20:** `generate_prime_numbers` / `generate_v8_key` still panic on an invalid range rather than returning `Result` (`NapqesKey::generate` is the non-panicking path).
-- **CVF-19/25/32/44:** corpus tests assert a non-zero count, not an expected count; no vectors yet for `coarse(3)` at n = 15/16, a `frame(1024)` n = 1024 rejection, the 65,535-codepoint boundary, a non-scalar recovered codepoint, or noise-run exhaustion.
-- **CVF-21:** `SPEC.md` and `docs/draft-napqes-aead-00.md` still specify v6/v7; the v8 streaming format is specified only in code, the paper corpus section and `docs/CAVEATS.md`.
+- **CVF-18:** POST gained KAT-7 (v8 tag-flip rejection on W002) and KAT-8 (KEM key-derivation known answer matching `napqes_kem.py`, plus FrodoKEM and hybrid pairwise consistency). A unit test checks the embedded KAT constants against corpus vectors V002 and W002, so they cannot drift silently.
+- **CVF-19:** every harness pins its corpus sizes (v6 37/26/11; v8 35/22/12/1; stream 14/11/3); new tests flip nonce and masked-blob bytes, not only tag bytes.
+- **CVF-20:** `generate_prime_numbers` and `generate_v8_key` return `Result` instead of panicking, and the draw budget is `KEYGEN_DRAWS_PER_PRIME` per requested prime rather than `4·span`.
+- **CVF-25 / CVF-32:** new vectors W020/W021 (`coarse(3)` at n = 15 → B = 16 and n = 16 → B = 128), W022 (U+FFFE/U+FFFF), W-N12 (validly tagged ciphertext decoding to the surrogate U+D800) and W-E01 (`frame(1024)` at n = 1024, which every port must refuse to encrypt). W001–W019 and W-N01–W-N11 are byte-identical. The corpus is located by searching upward from the crate rather than `parent().unwrap()`; v7 harness tests are named `legacy_v7_*`; the cross-language Python tests now require the Rust-reported counts to equal the corpus counts.
+- **CVF-28:** v7 entry points reject AAD longer than the 4-byte prefix can encode; each v7 deprecation note and decryptor doc states that v7 is keyed by the prime tuple and outside the paper's theorems; paper §10 says so too.
+- **CVF-31:** `pad_to_block` and `pad_message` preconditions are `assert!` (release builds included); the oversize test covers every profile, `Frame` included.
+- **CVF-37:** `sk_fmt` is held in the `Secret32` guard on every v8 path (wiped on all exits, including unwinding); the v7 `key_bytes` buffer is a wipe-on-drop `SecretBytes`; `zeroize_sk` and `generate_v8_key` document that `sk` is `Copy`; paper §12 gained a key-lifetime caveat.
+- **CVF-38:** paper Definition 3.1 states `key_bytes` is a storage encoding only; paper §10 specifies the corpus key-pair JSON encoding.
+- **CVF-45:** the comparator doc states that lengths are public.
+- **CVF-47:** KEM encapsulate/decapsulate (FrodoKEM and hybrid) are gated under `fips_gate`, and POST now covers the KEM; the bundled binaries and examples run POST at start-up.
+- **CVF-14 / CVF-21:** paper Remark 3.16 notes that Rust's v7 byte pair behaves like the C port and is outside Π; paper §3.3 points to `SPEC.md` §8.2, which specifies the v8 streaming format (the earlier claim that it was specified only in code was wrong).
+- **CVF-24:** `rust/README.md` leads with `NapqesKey`, lists the full public surface, and drops the crate-private `encrypt_bytes_with_nonce` from the deprecated list.
+- **CVF-44:** no vector can reach the exhaustion branch: Dec step (3) admits only 20R tokens, and the decoder consumes at most 19 noise tokens per real token, so R real tokens always fit. The branch is kept as a defensive check.
+- **v3 CVF-13:** paper §10 gives the corpus SHA-256.
+- The pre-existing unused import in `rust/src/bin/ls_gateway.rs` is removed.
+
+### 8.4 Open (not claimed closed)
+
+- **CVF-17 / CVF-28:** `ot_frame` still encrypts with v7 `encrypt_raw` (disclosed in paper §8.2). Moving it to v8 needs the KEM to derive `sk` as well as the prime tuple, a protocol change across the Rust and Python KEMs.
+- **CVF-14:** v7 byte and codepoint encodings stay indistinguishable for values ≤ U+00FF; separating them would change the archived v7 format.
+- **CVF-18:** binary-HMAC integrity check (INT-1 remains a build-provenance check). **CVF-26:** comparator-only dudect harness.
 - **CVF-22:** no recorded run of the re-tagging fuzz target (stated in paper §11).
-- **CVF-23:** no MSRV / pinned toolchain.
-- **CVF-29/41:** bare-slice APIs re-validate per call (disclosed in paper §8.4; `NapqesKey` avoids it).
-- **CVF-31:** `pad_to_block` precondition is a `debug_assert!`; the oversize test does not cover `Frame`.
-- **CVF-47:** `kem`, `kem_exchange`, `ot_frame`, `protocols`, `vale` and key generation are outside the gate; `fips_gate` is off by default; unit-test builds auto-run POST, so `NOT_RUN` is not exercised through the public API.
-- **v3 CVF-13:** the paper gives no digest of `v8_vectors.json`.
-- Outside both audits: `demos/drone` displays K=10 / 50-byte keys while generating K=13; pre-existing unused import in `rust/src/bin/ls_gateway.rs`; the CI ruff step lists a non-existent `main.py`.
+- **CVF-23:** feature-gating `kem`/`net`/gateway modules and declaring an MSRV / pinned toolchain.
+- **CVF-29 / CVF-41:** bare-slice APIs re-validate the key on every call (disclosed in paper §8.4; `NapqesKey` avoids it).
+- **CVF-47:** `fips_gate` is off by default; key generation, `ot_frame`, `protocols` and `vale` are outside the gate; unit-test builds auto-run POST, so `NOT_RUN` is not exercised through the public API.
+- Outside both audits: `SPEC.md` §1–§8.1 and `docs/draft-napqes-aead-00.md` still describe v6/v7; `demos/drone` displays K=10 / 50-byte keys while generating K=13; the CI ruff step lists a non-existent `main.py`.
 
 ---
 

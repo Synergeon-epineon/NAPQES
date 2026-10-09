@@ -535,6 +535,25 @@ static int run_v8_corpus(const char *path, int *passed, int *skipped) {
             }
             free(tampered_h);
 
+        } else if (strcmp(kind, "encrypt_negative") == 0) {
+            char *msg = json_str(obj, "message");
+            napqes_pad_profile_t prof;
+            size_t enc_len = 0;
+            uint8_t *enc = msg ? napqes_encrypt_bytes_v8_profiled(
+                msg, key, klen, sk, aad, aad_len,
+                parse_pad_profile(obj, &prof), &enc_len) : NULL;
+            if (!msg) {
+                printf("[SKIP] %s: missing message\n", id);
+                (*skipped)++;
+            } else if (enc == NULL) {
+                printf("[PASS] %s (encrypt refused)\n", id);
+                (*passed)++;
+            } else {
+                printf("[FAIL] %s: encrypt succeeded on an inadmissible input\n", id);
+                failed++;
+            }
+            free(enc); free(msg);
+
         } else {
             printf("[SKIP] %s: unknown kind '%s'\n", id, kind);
             (*skipped)++;

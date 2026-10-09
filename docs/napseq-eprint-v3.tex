@@ -300,6 +300,11 @@ key is
 \[
   \mathsf{key\_bytes}(\mathbf{k}) = \mathrm{be5}(k_1) \| \mathrm{be5}(k_2) \| \cdots \| \mathrm{be5}(k_K).
 \]
+This is a storage and transport encoding only: $\mathbf{k}$ enters the
+construction solely through the token map $c\mapsto c\cdot k_j+a$, and no
+step of $\mathsf{Enc}$ or $\mathsf{Dec}$ computes $\mathsf{key\_bytes}$ (the
+legacy v7 format of Section~\ref{sec:implementation} used it as its HMAC
+key).
 \end{definition}
 
 \begin{remark}[Concrete sampling algorithm]\label{rem:sampling}
@@ -416,7 +421,8 @@ identifying the wire format. This paper specifies exactly one format,
 $\mathrm{format\_id}=\texttt{0x01}$ (block mode). The identifier
 $\mathrm{format\_id}=\texttt{0x02}$ is reserved for a streaming-AE
 format that is outside the scope of this paper
-(Section~\ref{sec:caveats}). Domain $\texttt{0x0B}$ takes no nonce and
+(Section~\ref{sec:caveats}); its wire format is specified in
+\texttt{SPEC.md} \S 8.2. Domain $\texttt{0x0B}$ takes no nonce and
 no context beyond the 1-byte identifier; the derivation need only be
 invoked once per key install, not per message (an implementation may
 equally recompute it per call, with identical output).
@@ -938,7 +944,10 @@ entire message space.
 \begin{remark}[Implementation domains]\label{rem:impl-domain}
 The Python and Rust reference implementations realise $\mathcal{M}$ as
 specified: Rust's \texttt{\&str} excludes surrogates by construction, and
-the Python port rejects them explicitly. The C port
+the Python port rejects them explicitly. (This holds for Rust's v8 entry
+points; its legacy v7 byte pair \texttt{encrypt\_raw}/\texttt{decrypt\_raw}
+maps each byte to one codepoint, as the C port does, and is outside
+$\Pi$.) The C port
 (\texttt{C/napqes.c}) takes a NUL-terminated \texttt{char\,*} and maps each
 \emph{byte} to one codepoint, so it realises $\mathcal{M}$ only for
 codepoints up to U+00FF (it hashes the UTF-8 encoding of those codepoints
@@ -2272,17 +2281,23 @@ $p$-value was $0.016$. Results are reproducible with
 % ─────────────────────────────────────────────────────────────────────────────
 
 The corpus for the scheme specified in this paper is
-\texttt{tests/kat/v8\_vectors.json}. It contains 30 vectors: 19 positive
-(ids \texttt{W001}--\texttt{W019}) covering the empty message, a single
+\texttt{tests/kat/v8\_vectors.json}. It contains 35 vectors: 22 positive
+(ids \texttt{W001}--\texttt{W022}) covering the empty message, a single
 character, the block boundaries at 15, 16 and 32 codepoints, 1-element and
 10-element prime tuples $\mathbf{k}$, empty, binary and 64-byte associated
 data (the last pinning the 8-byte $\mathrm{be8}$ AAD length prefix of
 Definition~\ref{def:taginput}), mixed-case punctuation, the
 $\mathrm{coarse}(3)$, $\mathrm{coarse}(12)$ and $\mathrm{frame}(1024)$
-padding profiles (\texttt{W013}--\texttt{W015}), and non-ASCII messages
-spanning U+0080--U+00FF, the BMP either side of the surrogate block, and the
-supplementary planes up to U+10FFFF (\texttt{W016}--\texttt{W019}); and 11
-negative.
+padding profiles (\texttt{W013}--\texttt{W015}, the last at the largest
+admissible $n=F-1$), $\mathrm{coarse}(3)$ on both sides of its first
+stride boundary ($n=15\mapsto B=16$ and $n=16\mapsto B=128$,
+\texttt{W020}--\texttt{W021}), and non-ASCII messages
+spanning U+0080--U+00FF, the BMP either side of the surrogate block, the
+supplementary planes up to U+10FFFF (\texttt{W016}--\texttt{W019}) and the
+top of the BMP, U+FFFE and U+FFFF (\texttt{W022}); 12
+negative; and one encryption-side negative, \texttt{W-E01}:
+$\mathrm{frame}(1024)$ at $n=1024$, which every port must refuse to
+encrypt, pinning the strict inequality $n<F$.
 Of the negative vectors, \texttt{W-N01}--\texttt{W-N05} exercise
 authentication (flipped tag byte, flipped masked-blob byte, wrong $A$,
 wrong $\mathsf{sk}$) and the 48-byte parse floor; \texttt{W-N06} has an
@@ -2294,26 +2309,38 @@ a real-token count that is a multiple of $\mathrm{MAX\_NOISE\_RUN}+1$ but
 is not $B+2$ for any reachable bucket $B$; a padded length prefix
 claiming more codepoints than the padded buffer holds; a real token with
 $t < a$ (\texttt{W-N09}) and one with $(t-a) \bmod k \ne 0$
-(\texttt{W-N10}); and a non-canonical length prefix $(0, 300)$ in place of
-$(1, 44)$ (\texttt{W-N11}). Each positive vector
+(\texttt{W-N10}); a non-canonical length prefix $(0, 300)$ in place of
+$(1, 44)$ (\texttt{W-N11}); and a first real codepoint that decodes to the
+surrogate U+D800 (\texttt{W-N12}). Each positive vector
 fixes $(\mathbf{k},\mathsf{sk},A,M)$ and the expected
 ciphertext; because $\mathsf{Enc}$ is a pure function of its inputs
 (Definition~\ref{def:aead-triple}), no nonce field appears and none is
 needed. Conforming implementations must produce byte-identical ciphertext
-for every positive vector and reject every negative vector. The generator
+for every positive vector and reject every negative vector. Each vector
+carries $\mathbf{k}$ as a JSON array of its prime elements in decimal, in
+tuple order (\texttt{key}), and $\mathsf{sk}$, $A$ and every ciphertext as
+lowercase hex (\texttt{sk\_hex}, \texttt{aad\_hex}, \texttt{ciphertext\_hex},
+\texttt{tampered\_hex}). The SHA-256 of the file as committed (LF line
+endings) is \texttt{2eafeb4d98f87419a11031a194c8b2c2}\allowbreak
+\texttt{5acbf8c57997f058cd26724635edfc0b}. The generator
 \texttt{tests/gen\_kats\_v8.py} regenerates the file and checks that every
-negative vector fails in the reference for its stated reason;
+negative vector fails in the reference for its stated reason; its
+\texttt{-{}-check} mode establishes only that the Python output is
+reproducible. Cross-port agreement is established by the consumers
 \texttt{tests/test\_kats.py}, \texttt{rust/src/kat\_cross\_check.rs} and
-\texttt{C/test\_kats.c} consume it from Python, Rust and C (the C byte API
+\texttt{C/test\_kats.c}, which reproduce every positive ciphertext byte for
+byte, check every rejection reason, and pin the corpus size (the C byte API
 covers codepoints up to U+00FF). The streaming corpus
 \texttt{tests/kat/v8\_stream\_vectors.json} (11 positive, 3 negative with
 re-tagged non-canonical sentinels) is produced by
 \texttt{tests/gen\_kats\_v8\_stream.py}.
 
 A second corpus, \texttt{tests/kat/v6\_vectors.json} (37 vectors), is
-retained in the repository for the earlier v7 wire format, whose vectors
+retained in the repository for the earlier v7 wire format, which keys its
+derivations by $\mathsf{key\_bytes}(\mathbf{k})$ rather than by
+$\mathsf{sk}$ and whose vectors
 fix a per-vector nonce (the public v7 encryptors draw it from a CSPRNG; the
-fixed-nonce entry is a test-only helper) and which is \emph{not} the scheme analysed here; its
+fixed-nonce entry is a test-only helper); it is \emph{not} the scheme analysed here; its
 vectors are outside the scope of this paper and none of the results of
 Section~\ref{sec:security} are asserted of them.
 
@@ -2417,6 +2444,14 @@ current targets has not yet been recorded.
         Section~\ref{sec:security}, which assume the entire key material
         is secret from the adversary, exactly as for any symmetric AEAD
         scheme (a leaked AES-256 key is likewise a full break of AES-GCM).
+
+  \item[Key lifetime.] $\mathbf{k}$, $\mathsf{sk}$ and the derived
+        $\mathsf{sk}_{\mathrm{fmt}}$ should be erased as soon as they are no
+        longer needed, with writes the compiler cannot elide. The Rust port
+        wipes $\mathsf{sk}_{\mathrm{fmt}}$ on every exit path of each entry
+        point, and its \texttt{NapqesKey} wrapper wipes $\mathbf{k}$ and
+        $\mathsf{sk}$ on drop. This paper makes no side-channel or
+        memory-disclosure claim.
 
   \item[Message domain and the C port.] The message space $\mathcal{M}$
         excludes the surrogate range $[\mathtt{U+D800},\mathtt{U+DFFF}]$,

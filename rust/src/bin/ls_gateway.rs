@@ -60,7 +60,7 @@ use tokio::time::{sleep, Duration};
 use napqes::kem_exchange;
 use napqes::ot_frame::{
     wrap_pdu, unwrap_pdu, OtAad, ProtocolId, SequenceCounter,
-    FileKeyStore, KeyStore, SessionKeyStore, WILDCARD_DEVICE_ID,
+    FileKeyStore, KeyStore, SessionKeyStore,
 };
 use napqes::protocols::{modbus, dnp3};
 
