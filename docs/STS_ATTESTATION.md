@@ -1,10 +1,11 @@
-# NIST SP 800-22 Rev 1a Attestation — NAPQES v6 Ciphertext Bitstream
+# NIST SP 800-22 Rev 1a Attestation — NAPQES v8 Ciphertext Bitstream
 
-**Date:** 2026-05-28
+**Date:** 2026-09-25 (supersedes the 2026-05-28 v6 run)
 **Tool:** Custom Rust implementation — `rust/src/bin/sts.rs`
-**Bitstream source:** `napqes::encrypt_bytes` ciphertext output (raw bytes), key `STS_KEY` (10-element, [1M, 15M] default range)
-**Bits tested:** 10 000 000
-**Elapsed:** 10 595 ms
+**Bitstream source:** `napqes::encrypt_bytes_v8` ciphertext output (raw bytes), key `STS_KEY` (10 elements) + pinned `STS_SK`, per-chunk AAD `be8(chunk_index)`
+**Bits tested:** 50 000 000
+**Elapsed:** 150 650 ms
+**Commit:** 6db914e + working-tree changes of 2026-09-25
 **Verdict:** **PASS — 40/40 scored tests passed, 0 failed, 0 skipped**
 
 ---
@@ -35,72 +36,86 @@ fraction, erfc via complementary error function). No external math library is us
 
 | Test | p-value | Result |
 |---|---|---|
-| Monobit | 0.244795 | PASS |
-| Frequency Within Block | 0.581273 | PASS |
-| Runs | 0.157809 | PASS |
-| Longest Run Ones In A Block | 0.856265 | PASS |
-| Binary Matrix Rank | 0.101115 | PASS |
-| Discrete Fourier Transform | 0.070624 | PASS |
+| Monobit | 0.849476 | PASS |
+| Frequency Within Block | 0.104701 | PASS |
+| Runs | 0.279437 | PASS |
+| Longest Run Ones In A Block | 0.877425 | PASS |
+| Binary Matrix Rank | 0.932195 | PASS |
+| Discrete Fourier Transform | 0.145724 | PASS |
 | Non Overlapping Template Matching ¹ | 1.000000 | PASS |
-| Maurer's Universal | 0.268581 | PASS |
-| Linear Complexity | 0.937859 | PASS |
-| Serial (del1) | 0.268556 | PASS |
-| Serial (del2) | 0.359956 | PASS |
-| Approximate Entropy | 0.242526 | PASS |
-| Cumulative Sums (fwd) | 0.314951 | PASS |
-| Cumulative Sums (bwd) | 0.268268 | PASS |
-| Random Excursion (x=−4) | 0.502106 | PASS |
-| Random Excursion (x=−3) | 0.517534 | PASS |
-| Random Excursion (x=−2) | 0.860660 | PASS |
-| Random Excursion (x=−1) | 0.906870 | PASS |
-| Random Excursion (x=+1) | 0.610362 | PASS |
-| Random Excursion (x=+2) | 0.692107 | PASS |
-| Random Excursion (x=+3) | 0.244603 | PASS |
-| Random Excursion (x=+4) | 0.623593 | PASS |
-| Random Excursion Variant (x=−9) | 0.784316 | PASS |
-| Random Excursion Variant (x=−8) | 0.690649 | PASS |
-| Random Excursion Variant (x=−7) | 0.574740 | PASS |
-| Random Excursion Variant (x=−6) | 0.435338 | PASS |
-| Random Excursion Variant (x=−5) | 0.477060 | PASS |
-| Random Excursion Variant (x=−4) | 0.577823 | PASS |
-| Random Excursion Variant (x=−3) | 0.644373 | PASS |
-| Random Excursion Variant (x=−2) | 0.583526 | PASS |
-| Random Excursion Variant (x=−1) | 0.465764 | PASS |
-| Random Excursion Variant (x=+1) | 0.449102 | PASS |
-| Random Excursion Variant (x=+2) | 0.627906 | PASS |
-| Random Excursion Variant (x=+3) | 0.502317 | PASS |
-| Random Excursion Variant (x=+4) | 0.438320 | PASS |
-| Random Excursion Variant (x=+5) | 0.526698 | PASS |
-| Random Excursion Variant (x=+6) | 0.586735 | PASS |
-| Random Excursion Variant (x=+7) | 0.606356 | PASS |
-| Random Excursion Variant (x=+8) | 0.654354 | PASS |
-| Random Excursion Variant (x=+9) | 0.676515 | PASS |
+| Maurer's Universal | 0.800849 | PASS |
+| Linear Complexity | 0.937103 | PASS |
+| Serial (del1) | 0.167920 | PASS |
+| Serial (del2) | 0.369709 | PASS |
+| Approximate Entropy | 0.154327 | PASS |
+| Cumulative Sums (fwd) | 0.336417 | PASS |
+| Cumulative Sums (bwd) | 0.468873 | PASS |
+| Random Excursion (x=−4) | 0.485088 | PASS |
+| Random Excursion (x=−3) | 0.500283 | PASS |
+| Random Excursion (x=−2) | 0.635162 | PASS |
+| Random Excursion (x=−1) | 0.016275 | PASS |
+| Random Excursion (x=+1) | 0.109476 | PASS |
+| Random Excursion (x=+2) | 0.925194 | PASS |
+| Random Excursion (x=+3) | 0.968551 | PASS |
+| Random Excursion (x=+4) | 0.434701 | PASS |
+| Random Excursion Variant (x=−9) | 0.421338 | PASS |
+| Random Excursion Variant (x=−8) | 0.411501 | PASS |
+| Random Excursion Variant (x=−7) | 0.299578 | PASS |
+| Random Excursion Variant (x=−6) | 0.364981 | PASS |
+| Random Excursion Variant (x=−5) | 0.433068 | PASS |
+| Random Excursion Variant (x=−4) | 0.456859 | PASS |
+| Random Excursion Variant (x=−3) | 0.724734 | PASS |
+| Random Excursion Variant (x=−2) | 0.909513 | PASS |
+| Random Excursion Variant (x=−1) | 0.455689 | PASS |
+| Random Excursion Variant (x=+1) | 0.285907 | PASS |
+| Random Excursion Variant (x=+2) | 0.502889 | PASS |
+| Random Excursion Variant (x=+3) | 0.492875 | PASS |
+| Random Excursion Variant (x=+4) | 0.663802 | PASS |
+| Random Excursion Variant (x=+5) | 0.983468 | PASS |
+| Random Excursion Variant (x=+6) | 0.550739 | PASS |
+| Random Excursion Variant (x=+7) | 0.231938 | PASS |
+| Random Excursion Variant (x=+8) | 0.147086 | PASS |
+| Random Excursion Variant (x=+9) | 0.164654 | PASS |
 
-¹ Bonferroni-corrected composite p-value over 148 aperiodic 9-bit templates. Individual
-template p-values were all well above the per-template threshold (0.01 / 148 ≈ 6.76 × 10⁻⁵).
+¹ Bonferroni-corrected composite p-value over 148 aperiodic 9-bit templates.
 
-**Minimum p-value across all tests: 0.070624 (DFT)** — 7× above the 0.01 threshold.
-No test shows marginal or suspicious behaviour.
+**Minimum p-value across all tests: 0.016275 (Random Excursion, x=−1)**, above the 0.01
+threshold. With 40 sub-results at α = 0.01, about 0.4 false rejections are expected per run.
+
+### Other runs of the same build (2026-09-25)
+
+| Bits | Result | Note |
+|---|---|---|
+| 10 000 000 | 14/14 scored pass | Random Excursion / Variant ineligible (< 500 cycles) |
+| 20 000 000 | 39/40 scored pass | Random Excursion (x=−1) p = 0.0078 — within the expected false-rejection rate |
+| 50 000 000 | 40/40 scored pass | Reported above; committed as `sts_report.json` |
+
+### Harness defect found and fixed
+
+The first v8 runs encrypted every chunk under an empty AAD. The corpus offset
+`(480·i) mod 95` repeats every 19 chunks and v8 is deterministic, so identical
+ciphertexts recurred in the bitstream; at 2·10⁷ bits DFT, Serial and Approximate
+Entropy failed with p ≈ 0. That is a property of the test input, not of the
+keystream: a deterministic AEAD encrypting repeated `(A, M)` pairs must repeat its output.
+Each chunk now carries AAD `be8(chunk_index)`, which makes every `(A, M)` pair distinct.
 
 ---
 
 ## Bitstream Construction
 
-The bitstream is the concatenation of raw `encrypt_bytes` output across independent encrypt
-calls. Each call encrypts a 480-byte slice of printable ASCII characters using a fixed
-10-element production-range key (`STS_KEY`, elements in [1M, 15M]). The key is held constant
-so the bitstream exercises the full ciphertext surface under a single key:
+The bitstream is the concatenation of raw `encrypt_bytes_v8` output across independent
+encrypt calls. Each call encrypts a 480-codepoint slice of printable ASCII (bucket B = 512,
+82 288 bytes of ciphertext) under the fixed 10-element key `STS_KEY` and pinned `STS_SK`,
+with AAD `be8(chunk_index)`:
 
-- **Nonce bytes** (16 B per message): drawn from the CSPRNG — uniformly random.
-- **Masked varint blob**: LEB128-encoded tokens XOR-masked with the domain-0x07 HMAC-CTR
-  keystream. The masking eliminates the 3:1 MSB continuation-bit bias present in raw varints;
-  the STS results confirm the mask is effective.
-- **HMAC-SHA256 auth tag** (32 B per message): PRF output — expected to be indistinguishable
-  from uniform.
+- **Nonce bytes** (16 B per message): the synthetic nonce, an HMAC-SHA256 output.
+- **Masked token blob**: fixed-width 8-byte tokens XOR-masked with the domain-0x07
+  HMAC-CTR keystream.
+- **HMAC-SHA256 auth tag** (32 B per message): PRF output.
 
-The DFT test (p = 0.070) is the most sensitive probe for periodic structure in the bit
-stream. Its passage confirms that the domain-0x07 keystream masking successfully eliminates
-the LEB128 structural periodicity documented in SPEC.md §3.7.
+The unmasked token blob is highly structured (tokens are about 2^44 at most, so the top
+~20 bits of every 64-bit field are zero); the passing DFT and serial tests confirm the
+keystream hides that structure.
 
 ---
 
@@ -108,7 +123,7 @@ the LEB128 structural periodicity documented in SPEC.md §3.7.
 
 ```bash
 cd rust
-cargo run --release --bin sts -- --bits 10000000 --out ../sts_report.json
+cargo run --release --bin sts -- --bits 50000000 --out ../sts_report.json
 ```
 
 The machine-readable report is committed at [`sts_report.json`](../sts_report.json).

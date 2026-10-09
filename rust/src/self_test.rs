@@ -9,36 +9,32 @@
 //!   KAT-1  v7 encrypt: known plaintext → reference ciphertext (bit-exact).
 //!   KAT-2  v7 decrypt: reference ciphertext → original plaintext.
 //!   KAT-3  v7 tamper: flipped tag byte → authentication failure.
-//!   KAT-4  v8 encrypt round trip: exercises derive_format_subkey (0x0B),
-//!          synthetic_nonce (0x0A), derive_noise_threshold_v8, the capped
-//!          emission loop, the token ceiling, AAD_LEN_WIDTH_V8 and the
-//!          domain-0x03 tag under sk_fmt. Deterministic in (k, sk, A, M),
-//!          so no nonce injection needed (CVF-18 fix).
+//!   KAT-4  v8 encrypt: W002 inputs → SHA-256 of the W002 reference
+//!          ciphertext (bit-exact known answer, CVF-18).
 //!   KAT-5  v8 decrypt round trip: same pipeline in reverse, exercises
 //!          decrypt_core_v8's checked recovery and codepoint range check.
-//!   KAT-6  v8 structural reject: submits a ciphertext with a token count
-//!          that is a multiple of MAX_NOISE_RUN+1 but not `R*(MAX_NOISE_RUN+1)`
-//!          for any reachable bucket. Exercises decrypt_core_v8's post-
-//!          authentication bucket check (Remark 3.13) — the check the CVF-18
-//!          finding notes has no self-test coverage.
+//!   KAT-6  v8 structural reject: a validly re-tagged ciphertext one real
+//!          token short (R = 17) must pass the tag and be refused by
+//!          decrypt_core_v8's post-authentication bucket check.
 //!   INT-1  Software build-provenance check — a self-declared build-metadata
 //!          comparator, renamed from "integrity" per CVF-18: comparing
 //!          CARGO_PKG_VERSION to a literal is a version-string tautology, not
 //!          a binary integrity check. The full binary HMAC is a Phase 4 item
 //!          (see comment on `build_provenance_check` below).
 //!
-//! v7 KAT vectors are derived from the retired v6 vector V002
-//! (`tests/kat/v6_vectors.json`) under the post-CVF1 fixed-width token
-//! encoding. v8 KAT constants are the same key/message as W002 in
-//! `tests/kat/v8_vectors.json` with a fixed sk; the reference ciphertext is
-//! reconstructed at test time by calling the public API (v8 is deterministic
-//! in `(k, sk, A, M)`), which lets the self-test exercise every v8 code path
-//! without embedding a 2,928-byte hex literal.
+//! v7 KAT vectors are vector V002 of the live v7 corpus
+//! (`tests/kat/v6_vectors.json`; the filename keeps its v6 label) under the
+//! post-CVF1 fixed-width token encoding. v8 KAT constants are vector W002
+//! of `tests/kat/v8_vectors.json`; KAT-4 compares against the SHA-256 of its
+//! 2,928-byte ciphertext.
 //!
 //! Reference: NIST SP 800-140B §4.9.1 (power-on self-tests).
 
+use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 // ─── POST state (CVF-47: FIPS self-test outcome latching) ────────────────────
 //
@@ -60,30 +56,72 @@ const POST_FAILED: u8 = 3;
 
 static POST_STATE: AtomicU8 = AtomicU8::new(POST_NOT_RUN);
 
-/// Crate-visible gate. Returns `Ok(())` iff the power-on self-tests have run
-/// and passed; otherwise returns `SelfTestError::BuildProvenanceMismatch`
-/// (repurposed as the "POST not passed" signal — see CVF-47).
-///
-/// Called from every public v8 entry point under `#[cfg(feature = "fips_gate")]`.
-/// With the feature disabled (the default) this function is unused and
-/// consumers see no behaviour change.
-#[allow(dead_code)]
-pub(crate) fn require_post() -> Result<(), SelfTestError> {
-    match POST_STATE.load(Ordering::Acquire) {
-        // POST_RUNNING permits the crypto operations that ARE the self-test:
-        // `kat_v8_encrypt` etc. call the public v8 API, and refusing those
-        // would prevent the self-test from ever succeeding.
-        POST_PASSED | POST_RUNNING => Ok(()),
-        _ => Err(SelfTestError::BuildProvenanceMismatch),
+/// Held for the whole POST run; every POST_STATE transition happens under it.
+static POST_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// True only on the thread currently executing `run_power_on_self_tests`.
+    static IN_POST: Cell<bool> = Cell::new(false);
+}
+
+struct InPostFlag;
+
+impl InPostFlag {
+    fn set() -> Self {
+        IN_POST.with(|f| f.set(true));
+        InPostFlag
     }
 }
 
-/// Test-only helper to reset the POST state, so a single test can rerun the
-/// self-test suite from a clean slate. Not intended for production use.
-#[cfg(test)]
-pub(crate) fn __reset_post_state_for_tests() {
-    POST_STATE.store(POST_NOT_RUN, Ordering::Release);
+impl Drop for InPostFlag {
+    fn drop(&mut self) {
+        IN_POST.with(|f| f.set(false));
+    }
 }
+
+fn lock_post() -> MutexGuard<'static, ()> {
+    POST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Gate decision: POST_RUNNING admits only the KATs on the POST thread itself.
+fn admit(state: u8, in_post: bool) -> Result<(), SelfTestError> {
+    match state {
+        POST_PASSED => Ok(()),
+        POST_RUNNING if in_post => Ok(()),
+        _ => Err(SelfTestError::NotOperational),
+    }
+}
+
+/// Crate-visible gate (CVF-47). Returns `Ok(())` iff the power-on self-tests
+/// have passed. A caller arriving while POST is running on another thread
+/// blocks until it finishes, then sees the final outcome.
+///
+/// Called from every public v8 entry point under `#[cfg(feature = "fips_gate")]`.
+#[allow(dead_code)]
+pub(crate) fn require_post() -> Result<(), SelfTestError> {
+    if IN_POST.with(|f| f.get()) {
+        return admit(POST_STATE.load(Ordering::Acquire), true);
+    }
+    ensure_post_for_unit_tests();
+    if POST_STATE.load(Ordering::Acquire) == POST_RUNNING {
+        let _guard = lock_post();
+        return admit(POST_STATE.load(Ordering::Acquire), false);
+    }
+    admit(POST_STATE.load(Ordering::Acquire), false)
+}
+
+/// Unit tests share one process-global POST_STATE, so run POST on first use
+/// instead of letting tests race to reset and re-run it.
+#[cfg(test)]
+fn ensure_post_for_unit_tests() {
+    if POST_STATE.load(Ordering::Acquire) == POST_NOT_RUN {
+        let _ = run_power_on_self_tests();
+    }
+}
+
+#[cfg(not(test))]
+#[allow(dead_code)]
+fn ensure_post_for_unit_tests() {}
 
 // ─── KAT constants ───────────────────────────────────────────────────────────
 
@@ -405,15 +443,7 @@ const KAT_CIPHERTEXT_HEX: &str = concat!(
 
 // ─── v8 KAT constants (CVF-18 fix) ───────────────────────────────────────────
 //
-// Match `tests/kat/v8_vectors.json` vector W002 in key and message. `sk` is
-// pinned here; the reference ciphertext is reproduced deterministically at
-// test time by the public v8 API (v8 is a pure function of `(k, sk, A, M)`,
-// so no external nonce is needed and no huge hex literal has to travel with
-// the source). The round-trip suffices to exercise every v8 derivation
-// (0x0B format subkey, 0x0A synthetic nonce, 0x02 noise threshold, 0x00 noise
-// oracle, 0x01/0x05 addends, 0x07 keystream, 0x03 tag) and the checked
-// recovery in decrypt_core_v8. Any drift in any of those functions breaks
-// KAT-4/KAT-5 immediately.
+// Vector W002 of `tests/kat/v8_vectors.json` (key, sk, message, empty AAD).
 const KAT_V8_PRIMES: &[u64] = &[1_000_003, 1_000_033, 1_000_037, 1_000_039];
 const KAT_V8_SK: [u8; crate::SK_SIZE] = [
     0x4e, 0x1b, 0x30, 0xf2, 0xd4, 0x07, 0xea, 0xce,
@@ -428,6 +458,13 @@ const KAT_V8_AAD: &[u8] = b"";
 /// where R = B + 2 = 18 for B = 16. The self-test asserts this to catch a
 /// regression that changes ciphertext size independent of the tag pipeline.
 const KAT_V8_EXPECTED_LEN: usize = 2928;
+/// SHA-256 of W002's `ciphertext_hex`.
+const KAT_V8_EXPECTED_SHA256: [u8; 32] = [
+    0xba, 0x1c, 0x3f, 0x66, 0x4c, 0x62, 0xe9, 0x34,
+    0x56, 0x83, 0x32, 0x74, 0xb5, 0x5f, 0x70, 0x3e,
+    0xa8, 0x26, 0xf1, 0x28, 0x24, 0xa3, 0x90, 0x88,
+    0x5d, 0x8e, 0x7f, 0x1e, 0xb3, 0x99, 0x4c, 0xed,
+];
 
 // ─── Error type ──────────────────────────────────────────────────────────────
 
@@ -451,6 +488,9 @@ pub enum SelfTestError {
     /// supplied `NAPQES_ATTESTED_VERSION`; it is not a binary HMAC integrity
     /// check (full binary HMAC deferred to a `build.rs` follow-up).
     BuildProvenanceMismatch,
+    /// `fips_gate`: power-on self-tests have not passed (not run, running on
+    /// another thread that is being waited on, or failed).
+    NotOperational,
     /// Internal error (bad hex in constant, etc.).
     InternalError(&'static str),
 }
@@ -465,6 +505,7 @@ impl fmt::Display for SelfTestError {
             Self::KatV8DecryptFailed     => write!(f, "KAT-5 FAIL: v8 decrypt round-trip failed"),
             Self::KatV8StructuralAccept  => write!(f, "KAT-6 FAIL: v8 structural-reject accepted malformed ciphertext"),
             Self::BuildProvenanceMismatch => write!(f, "INT-1 FAIL: build-provenance check mismatch"),
+            Self::NotOperational         => write!(f, "module not operational: power-on self-tests have not passed"),
             Self::InternalError(s)       => write!(f, "SELF-TEST INTERNAL ERROR: {}", s),
         }
     }
@@ -492,10 +533,10 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, SelfTestError> {
 /// This function MUST be called by the Crypto Officer before any cryptographic
 /// operations are performed in a production deployment.
 pub fn run_power_on_self_tests() -> Result<(), SelfTestError> {
-    // CVF-47: transition POST_STATE explicitly so `require_post()` reflects
-    // the actual outcome. Any early ? unwind leaves POST_STATE = POST_FAILED
-    // and the module is inhibited under `fips_gate`.
+    // CVF-47: a panicking KAT leaves POST_RUNNING, which refuses all callers.
+    let _lock = lock_post();
     POST_STATE.store(POST_RUNNING, Ordering::Release);
+    let _in_post = InPostFlag::set();
     let result = (|| -> Result<(), SelfTestError> {
         kat_encrypt()?;
         kat_decrypt()?;
@@ -549,20 +590,16 @@ fn kat_tamper_rejection() -> Result<(), SelfTestError> {
     }
 }
 
-// ─── KAT-4: v8 encrypt round trip (CVF-18) ──────────────────────────────────
+// ─── KAT-4: v8 encrypt known answer (CVF-18) ────────────────────────────────
 
 fn kat_v8_encrypt() -> Result<(), SelfTestError> {
     let ct = crate::encrypt_bytes_v8(KAT_V8_MESSAGE, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD)
         .map_err(|_| SelfTestError::KatV8EncryptFailed)?;
-    // Length is fixed by (bucket, MAX_NOISE_RUN, token width). A regression
-    // that changes any of those without updating the constant is caught here.
     if ct.len() != KAT_V8_EXPECTED_LEN {
         return Err(SelfTestError::KatV8EncryptFailed);
     }
-    // Determinism gate — v8 is a pure function of (k, sk, A, M).
-    let ct2 = crate::encrypt_bytes_v8(KAT_V8_MESSAGE, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD)
-        .map_err(|_| SelfTestError::KatV8EncryptFailed)?;
-    if ct != ct2 {
+    let digest: [u8; 32] = Sha256::digest(&ct).into();
+    if !crate::ct_eq_bytes(&digest, &KAT_V8_EXPECTED_SHA256) {
         return Err(SelfTestError::KatV8EncryptFailed);
     }
     Ok(())
@@ -581,27 +618,18 @@ fn kat_v8_decrypt() -> Result<(), SelfTestError> {
 
 // ─── KAT-6: v8 structural-reject (CVF-18) ───────────────────────────────────
 //
-// Produces a validly-tagged v8 ciphertext, then re-tags a *truncated* blob
-// so tag verification passes for the truncated form and decrypt_core_v8's
-// post-authentication bucket check (`R \in {B+2 : B in reachable buckets}`,
-// Remark 3.13) is the first line of defence. This mirrors W-N07 in
-// tests/kat/v8_vectors.json without needing to embed its 3,248-byte hex
-// literal.
+// Drops one real token's worth of tokens (R = 18 -> 17) and re-tags, so the
+// tag verifies and only the post-authentication bucket check can refuse it.
 fn kat_v8_structural_reject() -> Result<(), SelfTestError> {
-    // Encrypt normally to get a well-formed v8 ciphertext (2,928 bytes).
     let ct = crate::encrypt_bytes_v8(KAT_V8_MESSAGE, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD)
         .map_err(|_| SelfTestError::KatV8StructuralAccept)?;
-    // Flip a byte in the blob region (post-nonce, pre-tag). Any single-byte
-    // mutation must be rejected by the tag comparator — this exercises the
-    // authentication path even though the target of the recommendation is
-    // the structural-check path. If authentication ever silently passes on a
-    // mutated blob, this KAT catches it.
-    let mut tampered = ct.clone();
-    let mut_idx = crate::NONCE_SIZE + 100; // mid-blob
-    tampered[mut_idx] ^= 0xAA;
-    match crate::decrypt_bytes_v8(&tampered, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD) {
-        Err(_) => Ok(()),
-        Ok(_) => Err(SelfTestError::KatV8StructuralAccept),
+    let drop = crate::TOKEN_WIDTH * (crate::MAX_NOISE_RUN as usize + 1);
+    let mut forged = ct[..ct.len() - crate::TAG_SIZE - drop].to_vec();
+    let tag = crate::retag_block_v8(&forged, &KAT_V8_SK, KAT_V8_AAD);
+    forged.extend_from_slice(&tag);
+    match crate::decrypt_bytes_v8(&forged, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD) {
+        Err(e) if e.contains("is not B + 2") => Ok(()),
+        _ => Err(SelfTestError::KatV8StructuralAccept),
     }
 }
 
@@ -685,25 +713,36 @@ mod tests {
         kat_v8_structural_reject().expect("KAT-6 (v8 structural reject) failed");
     }
 
-    // CVF-47: latch transitions from NOT_RUN → PASSED on success.
+    // CVF-47: latch transitions to PASSED on success and stays there on rerun.
     #[test]
     fn cvf47_post_state_transitions_to_passed() {
-        __reset_post_state_for_tests();
-        assert_eq!(POST_STATE.load(Ordering::Acquire), POST_NOT_RUN);
         run_power_on_self_tests().expect("POST failed unexpectedly");
-        assert_eq!(POST_STATE.load(Ordering::Acquire), POST_PASSED);
-        // Second call must remain passed and be idempotent.
         run_power_on_self_tests().expect("POST failed unexpectedly on rerun");
+        let _guard = lock_post();
         assert_eq!(POST_STATE.load(Ordering::Acquire), POST_PASSED);
     }
 
-    // CVF-47: require_post() returns Ok only after POST_PASSED.
+    // CVF-47: only PASSED admits other threads; RUNNING admits only the POST thread.
     #[test]
-    fn cvf47_require_post_gates_correctly() {
-        __reset_post_state_for_tests();
-        assert!(matches!(require_post(), Err(SelfTestError::BuildProvenanceMismatch)));
-        run_power_on_self_tests().unwrap();
-        assert!(require_post().is_ok());
+    fn cvf47_gate_decision_table() {
+        assert_eq!(admit(POST_NOT_RUN, false), Err(SelfTestError::NotOperational));
+        assert_eq!(admit(POST_NOT_RUN, true), Err(SelfTestError::NotOperational));
+        assert_eq!(admit(POST_RUNNING, false), Err(SelfTestError::NotOperational));
+        assert_eq!(admit(POST_RUNNING, true), Ok(()));
+        assert_eq!(admit(POST_PASSED, false), Ok(()));
+        assert_eq!(admit(POST_FAILED, false), Err(SelfTestError::NotOperational));
+        assert_eq!(admit(POST_FAILED, true), Err(SelfTestError::NotOperational));
+    }
+
+    // KAT-6 must fail on the structural check, not the tag.
+    #[test]
+    fn kat6_forgery_passes_the_tag() {
+        let ct = crate::encrypt_bytes_v8(KAT_V8_MESSAGE, KAT_V8_PRIMES, &KAT_V8_SK, KAT_V8_AAD).unwrap();
+        let body = &ct[..ct.len() - crate::TAG_SIZE];
+        assert_eq!(
+            crate::retag_block_v8(body, &KAT_V8_SK, KAT_V8_AAD)[..],
+            ct[ct.len() - crate::TAG_SIZE..]
+        );
     }
 }
 
@@ -719,25 +758,33 @@ mod fips_gate_tests {
     use super::*;
 
     #[test]
-    fn v8_entry_refuses_before_post_and_admits_after() {
-        // Under the fips_gate feature we can only run one test that clears
-        // state, since the POST_STATE atomic is process-global. This test
-        // therefore covers both cases in sequence.
-        __reset_post_state_for_tests();
-        // Before POST: v8 encrypt must fail with the BuildProvenanceMismatch
-        // error message (mapped to a String at the call site).
-        let key = crate::NapqesKey::generate().unwrap();
-        let pre = crate::encrypt_bytes_v8_key("hi", &key, b"");
-        assert!(pre.is_err(), "v8 entry admitted crypto with POST_NOT_RUN");
-        let err = pre.unwrap_err();
-        assert!(
-            err.contains("build-provenance") || err.contains("INT-1"),
-            "expected fips_gate rejection, got: {}", err
-        );
-
-        // After POST: crypto works.
+    fn v8_entry_admits_after_post() {
         run_power_on_self_tests().unwrap();
+        let key = crate::NapqesKey::generate().unwrap();
         let ct = crate::encrypt_bytes_v8_key("hi", &key, b"").unwrap();
-        assert!(!ct.is_empty());
+        assert_eq!(crate::decrypt_bytes_v8_key(&ct, &key, b"").unwrap(), "hi");
+    }
+
+    // A second thread must wait for an in-flight POST instead of being
+    // admitted mid-run (the pre-fix behaviour) or spuriously refused.
+    #[test]
+    fn concurrent_callers_wait_for_post() {
+        let key = std::sync::Arc::new(crate::NapqesKey::generate().unwrap());
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let key = key.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..8 {
+                        crate::encrypt_bytes_v8_key("hi", &key, b"").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..4 {
+            run_power_on_self_tests().unwrap();
+        }
+        for w in workers {
+            w.join().unwrap();
+        }
     }
 }

@@ -7,6 +7,7 @@
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
+\usepackage{array}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{hyperref}
@@ -145,7 +146,7 @@ remaining far above all recommended thresholds.
         independent HMAC-domain-derivation secret $\mathsf{sk}$ and
         arithmetic-layer key $\mathbf{k}$, sampled independently, together
         with a synthetic, message-bound nonce
-        $N=\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)$
+        $N=\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)[0{:}16]$
         (Definition~\ref{def:synthnonce}) and a fixed-width, per-bucket-ceiling
         wire format (Section~\ref{sec:wire-format}) under which ciphertext
         length depends only on the padded-length bucket.
@@ -162,9 +163,11 @@ remaining far above all recommended thresholds.
         PRF assumption on HMAC-SHA256, with no key-entropy term: because
         $\mathsf{sk}$ is sampled uniformly and independently of
         $\mathbf{k}$, every reduction below may sample $\mathbf{k}$ on its
-        own to run the arithmetic layer while forwarding every HMAC call to
-        an external PRF oracle keyed by $\mathsf{sk}$, with no simulation
-        gap of any kind.
+        own to run the arithmetic layer while answering every HMAC call
+        through external PRF oracles — one keyed by $\mathsf{sk}$ for the
+        format-subkey derivation, then one keyed by the resulting
+        $\mathsf{sk}_{\mathrm{fmt}}$ for every other domain — with no
+        simulation gap of any kind.
   \item We prove ciphertext length is a deterministic function of the
         padded-length bucket alone (Lemma~\ref{lem:length-det}) — never of
         message content within a bucket, the nonce, or the associated data.
@@ -261,7 +264,11 @@ Throughout this paper:
   \item $\mathrm{HMAC}(K, M)$ denotes HMAC-SHA256 keyed with $K$ over message $M$.
   \item $\mathrm{be4}(x)$, $\mathrm{be5}(x)$, $\mathrm{be8}(x)$ denote the
         4-, 5-, and 8-byte big-endian encodings of the non-negative integer
-        $x$ (each field is fixed-width; $x$ is assumed to fit).
+        $x$ (each field is fixed-width; $x$ is assumed to fit). In
+        particular $\mathrm{be5}$ requires $x<2^{40}$; the counters
+        $ct\_pos$ and $real\_idx$ it encodes stay far below that, since
+        $\mathrm{MAX\_PLAINTEXT\_CODEPOINTS}$ and the per-bucket token
+        ceiling cap $ct\_pos$ at $20(2^{16}+2)=1{,}310{,}760$.
   \item $[0{:}n]_{\mathrm{be}k}$ denotes the first $n$ bytes of a 32-byte
         HMAC-SHA256 digest, interpreted as an unsigned big-endian integer
         in $[0,2^{k})$ where $k=8n$.
@@ -310,7 +317,11 @@ repeatedly invoking $\textsc{SampleIndex}()$ and rejecting (redrawing) any
 result equal to an already-chosen $k_1,\ldots,k_{j-1}$, until a fresh
 value is obtained. This realises exactly the uniform distribution over
 ordered tuples of $K$ distinct elements of $\mathcal{P}$ assumed by the
-$H_\infty(\mathbf{k})$ computation below.
+$H_\infty(\mathbf{k})$ computation below. Implementations may instead
+sample uniformly from the integer interval $[10^6,14{,}999{,}999]$ by
+unbiased rejection, discarding composites and repeats; this is
+distributionally identical, does not require the canonical enumeration,
+and is what the reference implementations do.
 \end{remark}
 
 The min-entropy of $\mathbf{k}$ as sampled above is
@@ -334,10 +345,12 @@ contribution to $19.7670$ bits and clears the target at the same $K=13$,
 while simultaneously unifying $\mathcal{P}$ with the interval already used
 by the key-establishment layer. Since $K$ affects neither the wire format
 nor the ciphertext length (Proposition~\ref{prop:expansion-neutral}), the
-only cost is stored key material, which grows from $5K+32=82$ to $97$
-bytes. Validation deliberately retains no upper bound on key elements
-beyond the $2^{40}$ serialisation limit, so keys provisioned under the
-earlier interval remain usable.
+only cost of moving the default from $K=10$ to $K=13$ is stored key
+material, which grows from $5K+32=82$ to $97$ bytes; widening the interval
+changes no serialised size. Validation enforces the same interval: every reference
+implementation rejects a key element outside $\mathcal{P}$ and a tuple of
+more than $128$ elements. Keys provisioned under the earlier interval lie
+inside $\mathcal{P}$ and remain usable.
 \end{remark}
 
 \begin{remark}[The role of $\mathbf{k}$ and $\mathsf{sk}$ are not symmetric]
@@ -361,14 +374,23 @@ traffic-analysis resistance anywhere in this paper rests on $K$, on
 $H_\infty(\mathbf{k})$, or on the multi-prime structure
 (Remark~\ref{rem:coarsening-not-inflation}). $K=13$ is an interoperability
 default, not a security parameter: any $K\ge1$ is permitted by the
-construction, and both parties must agree on it out of band exactly as they
-agree on $\mathbf{k}$ itself.\footnote{CVF-36: an earlier revision of this
+construction (the reference implementations cap $K\le128$ to bound the
+per-call cost of key validation), and both parties must agree on it out of band exactly as they
+agree on $\mathbf{k}$ itself. A receiver configured with a different tuple
+(including a different $K$) still verifies the tag, which is keyed by
+$\mathsf{sk}$ alone, and then fails the structural checks of
+$\mathsf{Dec}$ step (7) with overwhelming probability as soon as a real
+token uses a differing element; a mismatch therefore surfaces as a
+decryption error, never (except with that negligible probability) as a
+wrong plaintext.\footnote{CVF-36: an earlier revision of this
 remark stated that ``the reference implementations emit a warning below
-$K=7$''. No delivered port implements such a warning, and the threshold was
-inherited from the earlier single-secret schedule (where
-$H_\infty(\mathbf{k})$ entered the bound); the sentence has been removed as
-Remark~\ref{rem:key-roles} already establishes that $K$ carries no
-security requirement in the v8 construction.} What the arithmetic layer is retained
+$K=7$''. The Rust port emits no such warning; the Python and C ports keep
+an advisory warning at key generation, labelled as relevant to the legacy
+v7 schedule only. The threshold was inherited from that earlier
+single-secret schedule (where $H_\infty(\mathbf{k})$ entered the bound);
+the sentence has been removed as Remark~\ref{rem:key-roles} already
+establishes that $K$ carries no security requirement in the v8
+construction.} What the arithmetic layer is retained
 for instead is analysed in Section~\ref{sec:arith-layer-value}.
 Section~\ref{sec:caveats} discusses,
 conversely, what protecting $\mathbf{k}$ actually buys once $\mathsf{sk}$
@@ -395,8 +417,9 @@ $\mathrm{format\_id}=\texttt{0x01}$ (block mode). The identifier
 $\mathrm{format\_id}=\texttt{0x02}$ is reserved for a streaming-AE
 format that is outside the scope of this paper
 (Section~\ref{sec:caveats}). Domain $\texttt{0x0B}$ takes no nonce and
-no context beyond the 1-byte identifier; the derivation is invoked once
-per key install, not per message.
+no context beyond the 1-byte identifier; the derivation need only be
+invoked once per key install, not per message (an implementation may
+equally recompute it per call, with identical output).
 \end{definition}
 The purpose of this layer is \emph{cross-format tag separation}: because
 every subsequent HMAC call is keyed by $\mathsf{sk}_{\mathrm{fmt}}$
@@ -417,8 +440,9 @@ All \emph{other} internal values are computed as
   \qquad (d \neq \texttt{0x0B}),
 \]
 where $d$ is a 1-byte domain separator and every variable-width field
-inside $\mathsf{ctx}$ is length-prefixed (e.g.\ $\mathrm{be8}(|A|) \| A$
-for AAD $A$). Domain $\texttt{0x0A}$ is the single further exception: it
+inside $\mathsf{ctx}$ is either length-prefixed (e.g.\ $\mathrm{be8}(|A|) \| A$
+for AAD $A$) or terminal ($\widetilde{B}$ in domain $\texttt{0x03}$, $M$
+in domain $\texttt{0x0A}$), exactly as Lemma~\ref{lem:domsep} uses. Domain $\texttt{0x0A}$ is the single further exception: it
 does not take a nonce as input, since it is the derivation that
 \emph{produces} the nonce (Definition~\ref{def:synthnonce}); its input
 shape is instead $\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M$.
@@ -444,11 +468,11 @@ decryptor cannot diverge in the width of the length prefix.
 Domain & Function & Context & Output \\
 \midrule
 \texttt{0x00} & Noise position & $\mathrm{be5}(ct\_pos)$ & Boolean \\
-\texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k_i - 1]$ \\
-\texttt{0x02} & Noise probability & (none) & $[0.75, 0.99]$ \\
+\texttt{0x01} & Real-token addend & $\mathrm{be5}(real\_idx)$ & $[1, k - 1]$ \\
+\texttt{0x02} & Noise probability & (none) & $[0.75, 0.99)$ \\
 \texttt{0x03} & Auth tag & $\mathrm{TagIn}(aad, \widetilde{B})$ (Def.~\ref{def:taginput}) & 32 bytes \\
 \texttt{0x04} & Noise character & $\mathrm{be5}(ct\_pos)$ & $[32, 127]$ \\
-\texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k_i - 1]$ \\
+\texttt{0x05} & Noise-token addend & $\mathrm{be5}(ct\_pos)$ & $[1, k - 1]$ \\
 \texttt{0x06} & Padding codepoint & $\mathrm{be4}(pad\_idx)$ & $[32, 126]$ \\
 \texttt{0x07} & Keystream block & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
 \texttt{0x0A} & Synthetic nonce & $\mathrm{be8}(|A|) \| A \| M$ & 16 bytes \\
@@ -461,7 +485,11 @@ $\mathsf{sk}_{\mathrm{fmt}}$ (Definition~\ref{def:fmtkey}); every other
 domain is keyed by $\mathsf{sk}_{\mathrm{fmt}}$, not by $\mathsf{sk}$
 directly. The nonce $N$ is applied uniformly by $\mathrm{Derive}_d$ for
 $d\notin\{\texttt{0x0A},\texttt{0x0B}\}$ and is therefore omitted from
-the Context column above.}
+the Context column above. In rows $\texttt{0x01}$ and $\texttt{0x05}$,
+$k=k_{(real\_idx \bmod K)+1}$ is the key element selected by the
+real-token counter; for $\texttt{0x05}$ this holds even though the context
+is $\mathrm{be5}(ct\_pos)$, so the noise tokens of a run use the key
+element of the real token they precede.}
 \label{tab:domains}
 \end{table}
 
@@ -590,8 +618,10 @@ computed with a single 128-bit intermediate product and one integer
 division, so that $\theta(N)$ is bit-identical across all conforming
 implementations regardless of platform or language. Every informal
 reference elsewhere in this paper to a ``noise probability $p \in
-[0.75, 0.99]$'' (e.g.\ Table~\ref{tab:domains}) denotes this integer
-threshold, i.e.\ $p = \theta(N)/2^{64}$.
+[0.75, 0.99)$'' (e.g.\ Table~\ref{tab:domains}) denotes this integer
+threshold, i.e.\ $p = \theta(N)/2^{64}$. The interval is half-open in fact:
+the largest attainable value is $\theta_{\min}+(\theta_{\max}-\theta_{\min})-1$,
+so $\theta_{\max}$ itself is never reached.
 
 \subsection{Plaintext Padding}
 \label{sec:padding}
@@ -643,9 +673,10 @@ lengths — is identical for all of them. A decryptor consequently needs
 count (Section~\ref{sec:wire-format}) and the true length $n$ from the
 2-codepoint length prefix, so any conforming decryptor accepts any
 profile's output unchanged, and any well-formedness check on $R$ remains a
-check against the same fixed set. The profile is a deployment parameter
-agreed out of band, exactly like $\mathbf{k}$ and $K$; it is never
-transmitted and does not appear in the wire format.
+check against the same fixed set. The profile is a sender-side parameter
+that, unlike $\mathbf{k}$ and $K$, need not be agreed: it is never
+transmitted, does not appear in the wire format, and a mismatch is
+undetectable and harmless to correctness.
 
 Corollary~\ref{cor:length-leak} is stated over an arbitrary profile: length
 leakage is at most $\log_2$(number of reachable values) bits — about $3.70$
@@ -707,10 +738,10 @@ $2^{64}$ equally likely draws of $\tau$ onto approximately
 $0.24\cdot2^{64}$ outputs, i.e.\ about $4.17$ preimages per output. Since
 each output receives either $4$ or $5$ preimages, individual outputs
 deviate from uniform on the range by up to $+20\%$ in relative terms, and
-the total variation distance from the uniform distribution on
-$[\theta_{\min},\theta_{\max}]$ is $\approx0.033$. This is harmless — the
+the total variation distance from the uniform distribution on the image of
+the map is $\approx0.033$. This is harmless — the
 only property required of $\theta(N)$ is that it land in the public
-interval $[\theta_{\min},\theta_{\max}]$, which it does by construction,
+interval $[\theta_{\min},\theta_{\max})$, which it does by construction,
 and that $\mathsf{Dec}$ recompute it identically, which it does — but it
 should not be described as exempt. The prime-index sampling of
 Remark~\ref{rem:sampling} is genuinely bias-free, by rejection.
@@ -726,7 +757,9 @@ isolation.
 \end{remark}
 
 Real and noise tokens are integers $c\cdot k + a$ for codepoint $c$
-(or a noise character), key element $k=\mathbf{k}[i \bmod K]$, and addend
+(or a noise character), key element $k=k_{(real\_idx \bmod K)+1}$ of the
+tuple $(k_1,\ldots,k_K)$ (selected by the real-token counter for noise
+tokens too, matching $\mathsf{Dec}$ step (7) and Listing~\ref{lst:enc}), and addend
 $a$ from Definition~\ref{def:token-prims}. Because $k$ is prime and every
 addend lies in $[1,k-1]$, $\gcd(a,k)=1$ and hence $\gcd(\text{token},k)=1$
 for every token, real or noise.
@@ -739,7 +772,7 @@ count is padded, with additional filler tokens structurally identical to
 genuine noise tokens, up to a fixed ceiling of exactly
 $R\cdot(\mathrm{MAX\_NOISE\_RUN}+1)$ tokens per message:
 
-\begin{lstlisting}[language=Python, caption={Token emission (encoding)}]
+\begin{lstlisting}[language=Python, caption={Token emission (encoding)}, label={lst:enc}]
 for c in padded:                     # R codepoints total
     noise_run = 0
     while noise_run < MAX_NOISE_RUN and is_noise(ct_pos):
@@ -893,10 +926,10 @@ $k_j\in\mathcal{P}$ and $a\in[1,k_j-1]$
 (Section~\ref{sec:token-construction}), so
 $c\cdot k_j+a\le(c+1)k_j-1$. Taking the extreme values admitted by
 $\mathcal{M}$ and $\mathcal{P}$ — $c=\mathtt{0x10FFFF}$ and
-$k_j=9{,}899{,}999$, the largest prime in $\mathcal{P}$ — gives a maximum
-token of $11{,}029{,}707{,}685{,}887\approx2^{43.33}$. The fixed 8-byte
+$k_j=14{,}999{,}981$, the largest prime in $\mathcal{P}$ — gives a maximum
+token of $16{,}711{,}658{,}831{,}871\approx2^{43.93}$. The fixed 8-byte
 big-endian token field therefore never overflows, with a margin of a factor
-of over $1.6\times10^6$. This bound is unconditional: it holds for every
+of over $1.1\times10^6$. This bound is unconditional: it holds for every
 $M\in\mathcal{M}$, every $\mathbf{k}$, and every noise realisation, so
 Lemma~\ref{lem:length-det} and the serialisation are well-defined on the
 entire message space.
@@ -907,9 +940,11 @@ The Python and Rust reference implementations realise $\mathcal{M}$ as
 specified: Rust's \texttt{\&str} excludes surrogates by construction, and
 the Python port rejects them explicitly. The C port
 (\texttt{C/napqes.c}) takes a NUL-terminated \texttt{char\,*} and maps each
-\emph{byte} to one codepoint, so it realises $\mathcal{M}$ faithfully only
-for ASCII input; on non-ASCII input it produces a different, self-consistent
-ciphertext that the other two ports will not reproduce. This is an
+\emph{byte} to one codepoint, so it realises $\mathcal{M}$ only for
+codepoints up to U+00FF (it hashes the UTF-8 encoding of those codepoints
+for the synthetic nonce, so its ciphertexts match the other two ports on
+that range, including vector \texttt{W016}); it cannot represent wider
+codepoints or an embedded NUL. This is an
 implementation limitation of that port, not a property of the scheme, and
 it is recorded in Section~\ref{sec:caveats}.
 \end{remark}
@@ -919,8 +954,7 @@ As in Definition~\ref{def:keygen}.
 
 \paragraph{$\mathsf{Enc}(\mathbf{k}, \mathsf{sk}, A, M) \to C$.}
 (0) derive $\mathsf{sk}_{\mathrm{fmt}}$
-(Definition~\ref{def:fmtkey}, once per key install rather than per
-message); (1) compute $N=N(\mathsf{sk}_{\mathrm{fmt}},A,M)$
+(Definition~\ref{def:fmtkey}; it may be cached per key install); (1) compute $N=N(\mathsf{sk}_{\mathrm{fmt}},A,M)$
 (Definition~\ref{def:synthnonce}); (2) pad $M$ to $P_d$
 (Section~\ref{sec:padding}); (3) run the token-emission loop of
 Section~\ref{sec:token-construction} over $P_d$ using
@@ -962,13 +996,19 @@ $\mathrm{Derive}_{0x01}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{real\_idx})$ and
 $\mathrm{real\_idx}$ counts real tokens from $0$ — exactly the prime and
 addend $\mathsf{Enc}$ used at that index; stop once $R$ real tokens have
 been extracted, discarding any trailing filler; (8) read the 2-codepoint
-big-endian length prefix $n$ and, if $n>R-2$, output $\bot$
+big-endian length prefix $(p_0,p_1)$; if $p_0>255$ or $p_1>255$ output
+$\bot$ (CVF-43: canonical, byte-valued prefix), else set $n=256p_0+p_1$
+and, if $n>R-2$, output $\bot$
 (Remark~\ref{rem:dec-structural}); (9) output the $n$ codepoints following
 the prefix.
 \end{definition}
 
 \begin{remark}[The post-authentication structural checks]
 \label{rem:dec-structural}
+Step (3) depends only on $|C|$, a public quantity, and is performed
+\emph{before} the tag is computed, so a ciphertext of illegal length is
+rejected without an HMAC evaluation and the rejection reveals nothing the
+adversary did not already know.
 Steps (6) and (8) are performed \emph{after} the tag comparison of step (5),
 so they are never reachable on an input an adversary without $\mathsf{sk}$
 could construct, and they play no part in the INT-CTXT argument. They are
@@ -978,8 +1018,10 @@ correctly tagged ciphertext — which a key holder can trivially produce —
 would otherwise drive an out-of-range read or an allocation sized by a field
 the caller did not choose. Divisibility by $\mathrm{MAX\_NOISE\_RUN}+1$
 alone does not imply step (6): $R=20$ passes step (3) and fails step (6).
-All three reference implementations enforce both checks, and vectors
-\texttt{W-N06}--\texttt{W-N08} of Section~\ref{sec:kats} pin them.
+All three reference implementations enforce these checks in this order;
+vector \texttt{W-N06} of Section~\ref{sec:kats} pins step (3),
+\texttt{W-N07} step (6), \texttt{W-N09}--\texttt{W-N10} the per-token
+checks of step (7), and \texttt{W-N08} and \texttt{W-N11} step (8).
 \end{remark}
 
 \begin{proposition}[Correctness]\label{prop:correctness}
@@ -1050,9 +1092,9 @@ recover, and it is not done.
 
 \begin{remark}[Authentication-failure output $\bot$]
 The formal $\bot$ output of $\mathsf{Dec}$ is realised in all three
-reference implementations as a raised exception (\texttt{ValueError} in
-Python/Rust, an equivalent error code in C) rather than a sentinel return
-value — a standard, semantically equivalent realisation of $\bot$ (cf.\
+reference implementations as an error rather than a sentinel plaintext
+(\texttt{ValueError} in Python, \texttt{Err} in Rust, a \texttt{NULL}
+return in C) — a standard, semantically equivalent realisation of $\bot$ (cf.\
 most software AEAD APIs, e.g.\ \texttt{cryptography.hazmat}).
 \end{remark}
 
@@ -1558,9 +1600,12 @@ because a bounded length prior reaches only some of the buckets. Second, and
 more importantly, a \emph{small} $I(n;|C|)$ does not imply resistance to a
 \emph{specific} distinguisher. Under both $\mathsf{bucket}$ and
 $\mathsf{coarse}(3)$ the two-class adversary succeeds with certainty, since
-the two classes fall in different buckets ($16$ and $512$) whatever the
+the two classes occupy disjoint bucket sets — $\{16,32\}$ against
+$\{512\}$ under $\mathsf{bucket}$, $\{16,128\}$ against $\{1024\}$ under
+$\mathsf{coarse}(3)$ — whatever the
 expansion factor; only $\mathsf{frame}(F)$ with $F$ above the longer class
-reduces it to a coin flip. Deployments that need a particular pair of
+reduces it to a coin flip (the $50\%$ for $\mathsf{frame}(1024)$ follows
+from $1024$ exceeding both classes). Deployments that need a particular pair of
 message populations to be indistinguishable must therefore choose $F$
 larger than both, and must not infer that result from the average-case
 bound.
@@ -2026,7 +2071,8 @@ beyond-model margin described above, and should do so deliberately.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{@{}lcccc@{}}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{3.8cm}ccc@{}}
 \toprule
 Property & NAPQES & AES-GCM & ChaCha20-Poly1305 & Ascon \\
 \midrule
@@ -2036,11 +2082,11 @@ Approved as a mode/algorithm & No & Yes & No & Yes~\cite{sp800-232} \\
 Shor-applicable structure & No & No & No & No \\
 Forbidden Attack risk & \textbf{No} & Yes (nonce reuse) & Yes (nonce reuse) & No \\
 Nonce-reuse key recovery & \textbf{No} (Definition~\ref{def:synthnonce}, disclosed message-equality only) & Yes (GCM key) & Yes (Poly1305 key) & Partial \\
-Ciphertext expansion & $160\times$ (fixed) & $1\times$ & $1\times$ & $1\times$ \\
+Ciphertext expansion & $160$ B per padded codepoint & $1\times$ & $1\times$ & $1\times$ \\
 Length leakage per message & $\le3.70$ bits ($0$ with $\mathsf{frame}$) & $=H(n)$ & $=H(n)$ & $=H(n)$ \\
 Key size & $5K+32$ bytes ($\mathbf{k}$+$\mathsf{sk}$; $97$ at $K=13$) & 32 bytes & 32 bytes & 16 bytes \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \caption{Comparison of NAPQES with established AEAD schemes. The two FIPS
 rows are distinct and must not be conflated: NAPQES uses only an approved
 primitive (HMAC-SHA256, FIPS 198-1/180-4), but NAPQES \emph{itself} is not
@@ -2112,7 +2158,17 @@ A Rust port (\texttt{rust/src/lib.rs}) mirrors the Python implementation
 tamper/AAD-mismatch rejection, same-message determinism (the disclosed
 MRAE trade-off), distinct-message nonce distinctness, and
 ciphertext-length determinism across varied AAD and keys
-(Lemma~\ref{lem:length-det}).
+(Lemma~\ref{lem:length-det}). A validated key wrapper
+(\texttt{NapqesKey}) runs key validation once at construction and wipes
+the key on drop.
+
+The crate additionally exports the legacy v7 format: decryptors kept for
+archived ciphertexts, and \texttt{\#[deprecated]} encryptors that draw a
+CSPRNG nonce, use an uncapped noise loop (so ciphertext length varies with
+the nonce) and an IEEE-754 \texttt{f64} noise threshold. None of the
+results of Section~\ref{sec:security} apply to v7. The crate's OT-frame
+wrapper (\texttt{rust/src/ot\_frame.rs}) still encrypts with the v7
+\texttt{encrypt\_raw}.
 
 \subsection{C Implementation}
 
@@ -2134,7 +2190,7 @@ not do; it is not a claim of side-channel resistance, and the phrase
 operation, not the algorithm as a whole.
 
 \paragraph{What is constant-time.} Authentication tag comparison uses
-\texttt{hmac.compare\_digest} (Python), \texttt{constant\_time\_eq} from
+\texttt{hmac.compare\_digest} (Python), \texttt{ConstantTimeEq} from
 the \texttt{subtle} crate (Rust), and an OR-accumulator byte-difference
 loop (C), so that comparison timing does not depend on the position of the
 first differing tag byte. This is the property that matters for forgery
@@ -2153,8 +2209,18 @@ the usual caveat for hand-rolled constant-time C and is not addressed here.
         \emph{time} to produce or consume it varies with the number of
         noise tokens actually emitted before the run cap engages.
   \item Both directions use arbitrary-precision or 64-bit integer
-        multiplication and division by a key element $k$. Division latency
+        multiplication and division by a key element $k$, and add or
+        subtract the secret-derived addend $a$; both $k$ (selected by
+        $real\_idx \bmod K$) and $a$ are secret. Division latency
         is data-dependent on many microarchitectures.
+  \item Key validation (primality by trial division, range and
+        distinctness checks) runs in time that depends on the secret key
+        elements. The bare-slice entry points of all three ports repeat it
+        on every call; the Rust \texttt{NapqesKey} wrapper performs it once,
+        at construction.
+  \item The retained v7 encryptors (Section~\ref{sec:implementation})
+        compute their noise threshold in IEEE-754 \texttt{f64}; they are
+        outside $\Pi$ and carry no timing or reproducibility claim.
   \item The padding loop of Section~\ref{sec:padding} performs $B-n$
         derivations, so encryption time depends on the \emph{exact}
         codepoint count $n$, not merely on its padding bucket $B$. The
@@ -2174,9 +2240,12 @@ An attacker with a precise timing channel against a decrypting party may
 therefore learn something about the noise realisation, and hence about
 $\theta(N)$ and indirectly about $N$; $N$ is transmitted in the clear in
 any case, so this particular leak is not by itself a break, but no bound is
-offered on what else such a channel exposes. A dudect-style timing study of
-the C port is reported in \texttt{docs/DUDECT\_ATTESTATION.md}; it covers
-the tag comparison only. Deployments in which the adversary can measure
+offered on what else such a channel exposes. A dudect timing study of the
+Rust port (\texttt{rust/examples/dudect\_harness.rs}) is reported in
+\texttt{docs/DUDECT\_ATTESTATION.md}: it times the whole
+\texttt{decrypt\_bytes\_v8\_key} call on ciphertexts whose first versus last
+tag byte is corrupted, and observed $|t|=1.11$ after $2.97\times10^7$
+samples, below the TVLA threshold of $4.5$. It covers the tag comparison only. Deployments in which the adversary can measure
 decryption time on attacker-influenced inputs should treat this as an open
 gap and are directed to Section~\ref{sec:caveats}.
 
@@ -2186,12 +2255,16 @@ gap and are directed to Section~\ref{sec:caveats}.
 % ─────────────────────────────────────────────────────────────────────────────
 
 We applied the full NIST SP 800-22 Rev.\ 1a Statistical Test
-Suite~\cite{sp800-22} to $10^7$ bits of NAPQES ciphertext output generated
-by encrypting a cycling corpus of printable-ASCII plaintext with a
-10-element prime key. All 15 eligible SP 800-22 tests passed at the
-$\alpha=0.01$ significance level. Results are reproducible using
-\texttt{tests/sts\_pipeline.py} in the reference implementation
-repository.
+Suite~\cite{sp800-22} to $5\times10^7$ bits of NAPQES ciphertext produced by
+$\mathsf{Enc}$ as specified here, encrypting 480-codepoint slices of a
+cycling printable-ASCII corpus under a 10-element prime key, a fixed
+$\mathsf{sk}$, and a distinct per-slice AAD (without it the deterministic
+$\mathsf{Enc}$ repeats its output whenever the corpus slice repeats, and the
+suite correctly rejects the repetition). All 15 tests, 40 scored
+sub-results, passed at the $\alpha=0.01$ significance level; the smallest
+$p$-value was $0.016$. Results are reproducible with
+\texttt{rust/src/bin/sts.rs} and recorded in \texttt{sts\_report.json} and
+\texttt{docs/STS\_ATTESTATION.md}.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Known-Answer Tests}
@@ -2199,34 +2272,48 @@ repository.
 % ─────────────────────────────────────────────────────────────────────────────
 
 The corpus for the scheme specified in this paper is
-\texttt{tests/kat/v8\_vectors.json}. It contains 20 vectors: 12 positive
-(ids \texttt{W001}--\texttt{W012}) covering the empty message, a single
+\texttt{tests/kat/v8\_vectors.json}. It contains 30 vectors: 19 positive
+(ids \texttt{W001}--\texttt{W019}) covering the empty message, a single
 character, the block boundaries at 15, 16 and 32 codepoints, 1-element and
 10-element prime tuples $\mathbf{k}$, empty, binary and 64-byte associated
 data (the last pinning the 8-byte $\mathrm{be8}$ AAD length prefix of
-Definition~\ref{def:taginput}), and mixed-case punctuation; and 8 negative.
+Definition~\ref{def:taginput}), mixed-case punctuation, the
+$\mathrm{coarse}(3)$, $\mathrm{coarse}(12)$ and $\mathrm{frame}(1024)$
+padding profiles (\texttt{W013}--\texttt{W015}), and non-ASCII messages
+spanning U+0080--U+00FF, the BMP either side of the surrogate block, and the
+supplementary planes up to U+10FFFF (\texttt{W016}--\texttt{W019}); and 11
+negative.
 Of the negative vectors, \texttt{W-N01}--\texttt{W-N05} exercise
 authentication (flipped tag byte, flipped masked-blob byte, wrong $A$,
-wrong $\mathsf{sk}$) and the 48-byte parse floor, while
-\texttt{W-N06}--\texttt{W-N08} are \emph{validly tagged} but structurally
-malformed and therefore reach the post-authentication checks of
-$\mathsf{Dec}$ step (3): a token count that is not a multiple of
-$\mathrm{MAX\_NOISE\_RUN}+1$; a real-token count that is such a multiple but
-is not $B+2$ for any reachable bucket $B$; and a padded length prefix
-claiming more codepoints than the padded buffer holds. Each positive vector
+wrong $\mathsf{sk}$) and the 48-byte parse floor; \texttt{W-N06} has an
+illegal token count and is rejected at $\mathsf{Dec}$ step (3) before the
+tag is computed; and \texttt{W-N07}--\texttt{W-N11} are \emph{validly
+tagged} but structurally malformed and therefore reach the
+post-authentication checks of $\mathsf{Dec}$:
+a real-token count that is a multiple of $\mathrm{MAX\_NOISE\_RUN}+1$ but
+is not $B+2$ for any reachable bucket $B$; a padded length prefix
+claiming more codepoints than the padded buffer holds; a real token with
+$t < a$ (\texttt{W-N09}) and one with $(t-a) \bmod k \ne 0$
+(\texttt{W-N10}); and a non-canonical length prefix $(0, 300)$ in place of
+$(1, 44)$ (\texttt{W-N11}). Each positive vector
 fixes $(\mathbf{k},\mathsf{sk},A,M)$ and the expected
 ciphertext; because $\mathsf{Enc}$ is a pure function of its inputs
 (Definition~\ref{def:aead-triple}), no nonce field appears and none is
 needed. Conforming implementations must produce byte-identical ciphertext
 for every positive vector and reject every negative vector. The generator
-\texttt{tests/gen\_kats\_v8.py} regenerates the file and verifies parity on
-any port; \texttt{tests/test\_kats.py} and
-\texttt{rust/src/kat\_cross\_check.rs} consume it from Python and Rust
-respectively.
+\texttt{tests/gen\_kats\_v8.py} regenerates the file and checks that every
+negative vector fails in the reference for its stated reason;
+\texttt{tests/test\_kats.py}, \texttt{rust/src/kat\_cross\_check.rs} and
+\texttt{C/test\_kats.c} consume it from Python, Rust and C (the C byte API
+covers codepoints up to U+00FF). The streaming corpus
+\texttt{tests/kat/v8\_stream\_vectors.json} (11 positive, 3 negative with
+re-tagged non-canonical sentinels) is produced by
+\texttt{tests/gen\_kats\_v8\_stream.py}.
 
 A second corpus, \texttt{tests/kat/v6\_vectors.json} (37 vectors), is
-retained in the repository for the earlier v7 wire format, which takes an
-externally supplied nonce and is \emph{not} the scheme analysed here; its
+retained in the repository for the earlier v7 wire format, whose vectors
+fix a per-vector nonce (the public v7 encryptors draw it from a CSPRNG; the
+fixed-nonce entry is a test-only helper) and which is \emph{not} the scheme analysed here; its
 vectors are outside the scope of this paper and none of the results of
 Section~\ref{sec:security} are asserted of them.
 
@@ -2245,10 +2332,16 @@ Two fuzz harnesses are provided. The Python harness
 (\texttt{tests/fuzz\_atheris.py}, using \texttt{atheris}) targets
 \texttt{decrypt\_bytes\_v8} and the fixed-width token decoder, verifying
 that no exception other than \texttt{ValueError} escapes the public API.
-The Rust harness (\texttt{rust/fuzz/fuzz\_targets/decode\_bytes.rs}, using
-\texttt{cargo-fuzz}) targets the Rust \texttt{decrypt\_bytes\_v8} entry
-point with multiple key sizes and AAD values. No panics were observed
-across $10^6$ corpus entries in either harness.
+The Rust harness (\texttt{rust/fuzz/}, using \texttt{cargo-fuzz}) has three
+targets: \texttt{decode\_bytes} derives a valid ciphertext from the fuzzer
+input, mutates it and \emph{re-tags} it, so mutated inputs pass
+authentication and reach the post-authentication checks of
+$\mathsf{Dec}$; \texttt{validate\_key} feeds arbitrary key tuples to every
+entry point; and \texttt{unauth\_decode} covers the unauthenticated
+token-slice decoder. The ``no panics across $10^6$ corpus entries'' figure
+recorded in \texttt{docs/FUZZ\_ATTESTATION.md} predates the re-tagging
+target and therefore covers only inputs rejected at the tag; a run of the
+current targets has not yet been recorded.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Known Caveats}
@@ -2257,9 +2350,11 @@ across $10^6$ corpus entries in either harness.
 
 \begin{description}
   \item[Plaintext length cap.] The block padding scheme stores the
-        plaintext length as a 2-byte big-endian integer, capping messages
+        plaintext length as a 2-codepoint big-endian prefix (two real
+        tokens, occupying up to $320$ bytes on the wire), capping messages
         at 65{,}535 codepoints. Exceeding the cap raises an error
-        immediately; there is no silent truncation. Callers requiring
+        immediately in every v8 entry point; there is no silent truncation.
+        Callers requiring
         larger messages must split at the application layer.
 
   \item[Ciphertext expansion.] Fixed at exactly $20$ tokens, i.e.\ $160$
@@ -2331,11 +2426,12 @@ across $10^6$ corpus entries in either harness.
         (\texttt{C/napqes.c}) instead maps each \emph{byte} of a
         NUL-terminated \texttt{char\,*} to one codepoint
         (Remark~\ref{rem:impl-domain}), so it agrees with the other two
-        ports on ASCII input only; on non-ASCII input it produces a
-        different, self-consistent ciphertext, and it cannot represent an
-        embedded NUL at all. Cross-implementation interoperability is
-        therefore claimed for ASCII plaintexts only, which is the domain the
-        KAT corpus of Section~\ref{sec:kats} covers. Fixing the C port to be
+        ports on codepoints up to U+00FF only and cannot represent wider
+        codepoints or an embedded NUL. Cross-implementation interoperability
+        is therefore claimed for all of $\mathcal{M}$ between Python and
+        Rust, and for the U+0000--U+00FF subset with C; the KAT corpus of
+        Section~\ref{sec:kats} covers both (\texttt{W016}--\texttt{W019}).
+        Fixing the C port to be
         codepoint-oriented would change no wire format but is not done here.
 
   \item[Per-key data limit.] The $q^2/2^{128}$ term in
@@ -2398,10 +2494,11 @@ nothing to it (Proposition~\ref{prop:expansion-neutral}), and removing that
 layer changes no theorem in this paper
 (Proposition~\ref{prop:lean-theorems}). Separately from the proofs, the
 Python, Rust and C implementations agree on the cross-implementation KAT
-corpora of Section~\ref{sec:kats}, the keystream passes the NIST SP 800-22
-Rev.\ 1a suite (Section~\ref{sec:sts}), and the decoders survive the fuzz
-harnesses of Section~\ref{sec:fuzz}; these are evidence of implementation
-agreement, statistical quality and decoder robustness respectively, and
+corpora of Section~\ref{sec:kats}, the ciphertext output passes the NIST SP 800-22
+Rev.\ 1a suite (Section~\ref{sec:sts}), and fuzz harnesses for the
+decoders are provided (Section~\ref{sec:fuzz}); these are evidence of
+implementation agreement, statistical quality and decoder robustness
+respectively, and
 none of them is evidence for a security claim, all of which rest on the
 theorems alone.
 
@@ -2411,8 +2508,9 @@ noise-injection design, which buys no theorem and is retained for the
 beyond-model reasons set out in Section~\ref{sec:arith-layer-value}, the
 16-bit plaintext length cap, the residual padding length-bucket leak, and
 the scope of what $\mathsf{sk}$ and $\mathbf{k}$ compromise each imply.
-Future work includes a TVLA side-channel analysis of the constant-time
-Rust implementation, a FIPS 140-3 module boundary definition, and a
+Future work includes a TVLA side-channel analysis of the Rust
+implementation's full encode/decode path (only its tag comparison is
+constant-time today), a FIPS 140-3 module boundary definition, and a
 performance evaluation on embedded ARM Cortex-M4 and RISC-V targets.
 
 % ─────────────────────────────────────────────────────────────────────────────

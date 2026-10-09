@@ -36,6 +36,7 @@ import hashlib
 import hmac as hmac_mod
 import json
 import os
+import re
 import sys
 
 # Make napqes importable from repo root
@@ -119,6 +120,14 @@ def _build_negative(
     aad: bytes = b"",
     expected_exception: str = "Authentication failed",
 ) -> dict:
+    # Verify rather than assert: the vector must fail in the reference for the stated reason.
+    try:
+        napqes.decrypt_bytes_v8(tampered, key, sk, aad=aad)
+    except ValueError as exc:
+        assert re.search(expected_exception, str(exc)), (
+            f"{vec_id}: expected /{expected_exception}/, got: {exc}")
+    else:
+        raise AssertionError(f"{vec_id}: negative vector decrypted successfully")
     return {
         "id": vec_id,
         "kind": "negative",
@@ -146,6 +155,43 @@ def _retag(original_ct: bytes, sk: bytes, aad: bytes, new_masked_blob: bytes) ->
     return payload + tag
 
 
+def _retag_tokens(original_ct: bytes, sk: bytes, aad: bytes, transform) -> bytes:
+    """Apply *transform* to every unmasked token, re-mask and re-tag.
+
+    The nonce (hence the noise schedule and addends) is unchanged, so the
+    decryptor reaches its per-token arithmetic checks.
+    """
+    nonce = original_ct[:napqes._NONCE_SIZE]
+    masked = original_ct[napqes._NONCE_SIZE:-napqes._TAG_SIZE]
+    sk_fmt = napqes._derive_format_subkey(sk, napqes.FORMAT_BLOCK_V8)
+    ks = napqes._varint_keystream(sk_fmt, nonce, len(masked))
+    tokens = napqes._fixed_decode_tokens(bytes(a ^ b for a, b in zip(masked, ks)))
+
+    def remask(toks: list[int]) -> bytes:
+        blob = napqes._fixed_encode_tokens(toks)
+        return bytes(a ^ b for a, b in zip(blob, ks))
+
+    assert _retag(original_ct, sk, aad, remask(tokens)) == original_ct
+    return _retag(original_ct, sk, aad, remask([transform(t) for t in tokens]))
+
+
+def _patched_prefix_ct(key: list[int], sk: bytes, message: str, rewrite) -> bytes:
+    """Encrypt *message* with its 2-codepoint length prefix replaced by
+    ``rewrite(padded)``; the result is validly tagged."""
+    real_pad = napqes._pad_message
+
+    def _bogus_pad(msg, kb, nonce, pad_profile=napqes.PAD_BUCKET):
+        padded = real_pad(msg, kb, nonce, pad_profile)
+        padded[0], padded[1] = rewrite(padded)
+        return padded
+
+    napqes._pad_message = _bogus_pad
+    try:
+        return napqes.encrypt_bytes_v8(message, key, sk, aad=b"")
+    finally:
+        napqes._pad_message = real_pad
+
+
 def _oversized_length_prefix_ct(key: list[int], sk: bytes) -> bytes:
     """Encrypt with a deliberately inflated 2-codepoint length prefix.
 
@@ -153,20 +199,22 @@ def _oversized_length_prefix_ct(key: list[int], sk: bytes) -> bytes:
     claims more codepoints than it holds, exercising the ``2 + n <= R``
     guard in every port (V3-CVF8).
     """
-    real_pad = napqes._pad_message
+    return _patched_prefix_ct(
+        key, sk, "prefix-overflow",
+        lambda padded: (len(padded) >> 8, len(padded) & 0xFF),
+    )
 
-    def _bogus_pad(msg, kb, nonce, pad_profile=napqes.PAD_BUCKET):
-        padded = real_pad(msg, kb, nonce, pad_profile)
-        inflated = len(padded)  # > len(padded) - 2, so 2 + n > len(padded)
-        padded[0] = inflated >> 8
-        padded[1] = inflated & 0xFF
-        return padded
 
-    napqes._pad_message = _bogus_pad
-    try:
-        return napqes.encrypt_bytes_v8("prefix-overflow", key, sk, aad=b"")
-    finally:
-        napqes._pad_message = real_pad
+def _noncanonical_length_prefix_ct(key: list[int], sk: bytes) -> bytes:
+    """A 300-codepoint message whose prefix is (0, 300) instead of (1, 44).
+
+    ``(hi << 8) | lo`` still yields 300, so a decoder without the CVF-43
+    byte-valued check silently accepts it.
+    """
+    return _patched_prefix_ct(
+        key, sk, "n" * 300,
+        lambda padded: (0, (padded[0] << 8) | padded[1]),
+    )
 
 
 def generate() -> list[dict]:
@@ -336,6 +384,58 @@ def generate() -> list[dict]:
         KEY_4, sk_n8,
         _oversized_length_prefix_ct(KEY_4, sk_n8),
         expected_exception="exceeds available data",
+    ))
+
+    # ── Positive: non-ASCII cross-port parity (CVF-25) ──────────────────────
+    # Appended after the negatives so earlier vectors keep their sk indices.
+    vectors.append(_build_positive(
+        "W016", "Latin-1 range only (U+0080..U+00FF), testable by byte-API ports",
+        KEY_4, idx := idx + 1, "caf\u00e9 na\u00efve d\u00e9j\u00e0 vu \u00ff\u0080",
+    ))
+    vectors.append(_build_positive(
+        "W017", "BMP above U+00FF incl. U+0100, U+D7FF, U+E000, U+FFFD",
+        KEY_4, idx := idx + 1,
+        "\u03a9\u03bc\u03ad\u03b3\u03b1 \u2014 \u65e5\u672c\u8a9e \u20ac \u0100\ud7ff\ue000\ufffd",
+    ))
+    vectors.append(_build_positive(
+        "W018", "Supplementary planes incl. U+10000 and U+10FFFF",
+        KEY_4, idx := idx + 1, "\U0001f600\U0001f510 \U00010000 \U0010ffff",
+    ))
+    vectors.append(_build_positive(
+        "W019", "Mixed-script message, 10-element key, UTF-8 AAD",
+        KEY_10, idx := idx + 1, "Gr\u00fc\u00dfe, \u4e16\u754c! \U0001f680",
+        aad="lang=de,zh".encode("utf-8"),
+    ))
+
+    # ── Negative: per-token arithmetic checks (CVF-27), validly tagged ───
+    sk_n9 = _sk(idx := idx + 1)
+    ct_n9 = napqes.encrypt_bytes_v8("token-arith", KEY_4, sk_n9, aad=b"")
+    vectors.append(_build_negative(
+        "W-N09",
+        "Every token set to 0, so the first real token has t < a; re-tagged",
+        KEY_4, sk_n9,
+        _retag_tokens(ct_n9, sk_n9, b"", lambda t: 0),
+        expected_exception="not of the form codepoint",
+    ))
+
+    sk_n10 = _sk(idx := idx + 1)
+    ct_n10 = napqes.encrypt_bytes_v8("token-arith", KEY_4, sk_n10, aad=b"")
+    vectors.append(_build_negative(
+        "W-N10",
+        "Every token incremented, so t >= a but (t - a) mod k = 1; re-tagged",
+        KEY_4, sk_n10,
+        _retag_tokens(ct_n10, sk_n10, b"", lambda t: t + 1),
+        expected_exception="not of the form codepoint",
+    ))
+
+    # ── Negative: non-canonical length prefix (CVF-43), validly tagged ───
+    sk_n11 = _sk(idx := idx + 1)
+    vectors.append(_build_negative(
+        "W-N11",
+        "Length prefix (0, 300) instead of canonical (1, 44); re-tagged",
+        KEY_4, sk_n11,
+        _noncanonical_length_prefix_ct(KEY_4, sk_n11),
+        expected_exception="are not byte-valued",
     ))
 
     return vectors
