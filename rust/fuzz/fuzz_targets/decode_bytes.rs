@@ -10,14 +10,11 @@
 //!
 //! This target is structure-aware: from fuzzer input we derive a
 //! (primes, sk, aad, plaintext) tuple, produce a valid v8 ciphertext via
-//! `encrypt_bytes_v8`, then flip a byte inside the blob region and hand
-//! the mutated bytes to `decrypt_bytes_v8`. Because the tag is recomputed
-//! implicitly by the mutation-under-a-valid-frame pattern only for the
-//! unmutated bytes, this reaches the tag check for the mutated payload
-//! (which must reject) and — importantly — the tag check succeeds for
-//! unmutated payloads, exercising the post-authentication paths in
-//! `decrypt_core_v8` (bucket check, length-prefix check, codepoint range
-//! check per CVF-14 and Remark 3.13).
+//! `encrypt_bytes_v8`, assert the unmutated round trip, then mutate the
+//! payload (byte flip and optional truncation by whole token groups) and
+//! RE-TAG it with `fuzz_retag_block_v8`. The mutated ciphertext therefore
+//! passes authentication and drives the post-authentication checks in
+//! `decrypt_core_v8` (bucket check, addend/range check, length prefix).
 //!
 //! Build and run (nightly required):
 //! ```
@@ -27,7 +24,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use napqes::{decrypt_bytes_v8, encrypt_bytes_v8, MIN_KEY_PRIME, SK_SIZE};
+use napqes::{
+    decrypt_bytes_v8, encrypt_bytes_v8, fuzz_retag_block_v8, MAX_NOISE_RUN, MIN_KEY_PRIME,
+    NONCE_SIZE, SK_SIZE, TAG_SIZE,
+};
+
+const TOKEN_GROUP: usize = 8 * (MAX_NOISE_RUN as usize + 1);
 
 /// Small prime-key fixtures — three sizes selected by fuzzer byte[0]. All are
 /// validate_key-accepting so the fuzzer reaches beyond the head guard.
@@ -64,8 +66,9 @@ fn sk_for(selector: u8) -> [u8; SK_SIZE] {
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Header: [key_sel, aad_sel, sk_sel, mutate_flag, mutate_index_lo,
+    // Header: [key_sel, aad_sel, sk_sel, flags, mutate_index_lo,
     //          mutate_index_hi, mutate_xor_byte, msg_len, ..msg..]
+    // flags bit0: flip a byte; bits1..3: drop that many token groups.
     if data.len() < 8 {
         return;
     }
@@ -76,7 +79,8 @@ fuzz_target!(|data: &[u8]| {
     }
     let aad = aad_for(data[1]);
     let sk = sk_for(data[2]);
-    let mutate = data[3] & 1 == 1;
+    let flip = data[3] & 1 == 1;
+    let drop_groups = ((data[3] >> 1) & 0x07) as usize;
     let mut_lo = data[4] as usize;
     let mut_hi = data[5] as usize;
     let mut_xor = data[6];
@@ -100,21 +104,21 @@ fuzz_target!(|data: &[u8]| {
 
     // Unmutated round-trip: must succeed and reach every branch of the
     // decrypt pipeline. Any panic here is a bug.
-    let rt = decrypt_bytes_v8(&ct, &key, &sk, aad);
-    let _ = rt;
+    let rt = decrypt_bytes_v8(&ct, &key, &sk, aad).expect("v8 round trip failed");
+    assert_eq!(rt, message);
 
-    // Optional structure-aware mutation: flip one byte inside the blob
-    // region (not the tag) and re-submit. Must return Err from the tag
-    // comparator or, if the tag happens to survive, from a downstream
-    // structural check. Never panic.
-    if mutate && ct.len() > 32 {
-        let blob_len = ct.len() - 32;
-        if blob_len == 0 {
-            return;
-        }
-        let idx = ((mut_hi as usize) << 8 | mut_lo) % blob_len;
-        let mut mutated = ct;
-        mutated[idx] ^= mut_xor;
-        let _ = decrypt_bytes_v8(&mutated, &key, &sk, aad);
+    if !flip && drop_groups == 0 {
+        return;
     }
+    let mut payload = ct[..ct.len() - TAG_SIZE].to_vec();
+    let masked_len = payload.len() - NONCE_SIZE;
+    let drop = (drop_groups * TOKEN_GROUP).min(masked_len);
+    payload.truncate(payload.len() - drop);
+    if flip && payload.len() > NONCE_SIZE {
+        let idx = NONCE_SIZE + ((mut_hi << 8 | mut_lo) % (payload.len() - NONCE_SIZE));
+        payload[idx] ^= mut_xor;
+    }
+    let tag = fuzz_retag_block_v8(&payload, &sk, aad);
+    payload.extend_from_slice(&tag);
+    let _ = decrypt_bytes_v8(&payload, &key, &sk, aad);
 });

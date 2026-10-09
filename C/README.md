@@ -28,12 +28,12 @@ cl /std:c11 /O2 sha256.c base64.c napqes.c main.c bcrypt.lib
 ```c
 #include "napqes.h"
 
-uint64_t key[10];
+uint64_t key[NAPQES_DEFAULT_KEY_COUNT];
 napqes_generate_primes(key, NAPQES_DEFAULT_KEY_COUNT,
                        NAPQES_MIN_KEY_PRIME, NAPQES_MAX_KEY_PRIME);
 
-char *ct = napqes_encrypt_str("hello", key, 10, NULL, 0);
-char *pt = napqes_decrypt_str(ct, key, 10, NULL, 0);
+char *ct = napqes_encrypt_str("hello", key, NAPQES_DEFAULT_KEY_COUNT, NULL, 0);
+char *pt = napqes_decrypt_str(ct, key, NAPQES_DEFAULT_KEY_COUNT, NULL, 0);
 /* pt == "hello" */
 free(ct); free(pt);
 ```
@@ -46,7 +46,7 @@ All returned pointers are heap-allocated; the caller owns them and must
 Byte-compatible with the Python reference:
 
 ```
-nonce(16) || varint_blob || hmac_sha256_tag(32)
+nonce(16) || fixed_width_token_blob || hmac_sha256_tag(32)
 ```
 
 String wrappers base64-encode the binary blob.

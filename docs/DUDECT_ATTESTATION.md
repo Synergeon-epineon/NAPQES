@@ -51,20 +51,22 @@ conclusions; early batches (n < 200,000) are noisy.
 
 ## Reference measurement
 
-Placeholder — populate the values below after the first delivered run of
-the retargeted harness. Recommended fields (per CVF-26 recommendation and
-NIST SP 800-140B §4.9 attestation practice):
-
 | Field | Value |
 |---|---|
-| Platform | (e.g. Windows 11 x86_64, Intel i7-1260P @ 2.10 GHz, 32 GB RAM) |
-| Compiler | (rustc version — `rustc --version`) |
+| Platform | Windows 11 Home x86_64, AMD Ryzen AI 7 350 w/ Radeon 860M |
+| Compiler | rustc 1.93.1 (01f6ddf75 2026-02-11) |
 | Compiler flags | `--release` (Cargo `[profile.release]` per `Cargo.toml`; `overflow-checks = true`, `debug-assertions = false`; opt-level = 3) |
-| Sample count | (`dudect_bencher` reports at each report interval; use ≥ 2M) |
-| Observed \|t\| | (should be < 4.5 for a passing run) |
-| Decision | Pass / Fail |
-| Date | (YYYY-MM-DD of the run) |
-| Commit | (git SHA of the tree the run was against) |
+| Command | `target/release/examples/dudect_harness --continuous bench_tag_comparison` |
+| Sample count | 29.729 M |
+| Observed \|t\| | 1.113 (max over dudect's percentile-cropped tests); max tau = 0.00020 |
+| Decision | **Pass** (\|t\| < 4.5) |
+| Date | 2026-09-25 |
+| Commit | 6db914e + working-tree changes of 2026-09-25 |
+
+\|t\| stayed below 1.2 for the whole run (1.167 at 28.9 M samples, 1.113 at 29.7 M). This
+bounds the leak between the two classes the harness defines (first vs last tag byte
+corrupted) inside a full `decrypt_bytes_v8_key` call. It says nothing about the paths listed
+under "Known limitations".
 
 ## Known limitations
 
@@ -87,3 +89,4 @@ NIST SP 800-140B §4.9 attestation practice):
 | Date | Change |
 |---|---|
 | 2026-09-22 | Document created (CVF-26). Harness retargeted from v7 `decrypt_bytes` to v8 `decrypt_bytes_v8_key`. ROADMAP §5 NF-6 citation replaced with paper Section 8.4. Scope limitations spelled out. |
+| 2026-09-25 | First reference measurement recorded: 29.7 M samples, \|t\| = 1.11, pass. Note: `--continuous` writes a status line per batch; redirecting it to a file produced a 6 GB log in ~5 minutes, so capture only the tail. |

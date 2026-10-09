@@ -11,9 +11,9 @@
 //! zeroization helpers were never called from anywhere in the library.
 //!
 //! The bare-slice entry points (`encrypt_bytes_v8(&[u64], &[u8; SK_SIZE])`
-//! etc.) are retained for backward compatibility but are `#[deprecated]`
-//! since 0.3.0 — new code should construct a `NapqesKey` once and pass it
-//! to the `_key`-suffixed entry points.
+//! etc.) are retained (not deprecated) and still validate on every call;
+//! new code should construct a `NapqesKey` once and pass it to the
+//! `_key`-suffixed entry points.
 
 use std::fmt;
 
@@ -31,6 +31,7 @@ use crate::{
 ///
 /// ```
 /// # use napqes::NapqesKey;
+/// # napqes::self_test::run_power_on_self_tests().unwrap();
 /// let key = NapqesKey::generate().unwrap();
 /// let ct = napqes::encrypt_bytes_v8_key("hello", &key, b"aad").unwrap();
 /// let pt = napqes::decrypt_bytes_v8_key(&ct, &key, b"aad").unwrap();
@@ -96,9 +97,10 @@ impl Drop for NapqesKey {
     }
 }
 
-// Deliberately no Clone, Copy, Debug — accidental duplication or logging of
-// key material must be a compile error. If a caller genuinely needs to
-// duplicate a key, they can construct a new one from the same `(primes, sk)`.
+// Deliberately no Clone or Copy — accidental duplication of key material
+// must be a compile error, and Debug (below) is redacted. If a caller
+// genuinely needs to duplicate a key, they can construct a new one from the
+// same `(primes, sk)`.
 
 /// A stack-allocated 32-byte secret with volatile-write zeroization on drop.
 ///

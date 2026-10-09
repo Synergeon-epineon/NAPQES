@@ -21,16 +21,18 @@ Run:
 
 Output schema per vector:
   id                  unique string identifier
-  kind                "positive" (only kind for now)
+  kind                "positive" or "negative"
   description         human-readable note
   primes              list[int] - prime key elements
   sk_hex              hex of the 32-byte independent HMAC subkey `sk`
   nonce_hex           hex of the 16-byte injected stream nonce
   aad_hex             hex of AAD bytes ("" means empty)
   frame_codepoints    F: real codepoints per chunk
-  message             plaintext string
+  message             plaintext string (positive only)
   ciphertext_hex      expected byte stream produced by
-                      `_encrypt_stream_ae_v8_with_nonce`
+                      `_encrypt_stream_ae_v8_with_nonce` (positive only)
+  tampered_hex        stream that must fail to decrypt (negative only)
+  expected_exception  regex-safe substring of the expected error (negative)
 """
 
 import argparse
@@ -38,6 +40,7 @@ import hashlib
 import hmac as hmac_mod
 import json
 import os
+import re
 import sys
 
 # Make napqes importable from repo root
@@ -111,6 +114,51 @@ def _build_positive(
     }
 
 
+def _forged_sentinel_negative(
+    vec_id: str,
+    description: str,
+    primes: list[int],
+    idx: int,
+    message: str,
+    frame_codepoints: int,
+    forged_total: int,
+    aad: bytes = b"",
+) -> dict:
+    """Replace the sentinel's total_real_codepoints and re-tag it validly."""
+    sk = _sk(idx)
+    nonce = _nonce(idx)
+    stream = b"".join(napqes._encrypt_stream_ae_v8_with_nonce(
+        iter(message), primes, sk, nonce, aad,
+        frame_codepoints=frame_codepoints,
+    ))
+    chunk_count = -(-len(message) // frame_codepoints)
+    sk_fmt = napqes._derive_format_subkey(sk, napqes.FORMAT_STREAM_AE_V8)
+    tag = napqes._compute_stream_v8_sentinel_tag(
+        sk_fmt, nonce, chunk_count, aad, forged_total)
+    body = stream[:-(8 + napqes._TAG_SIZE)]
+    tampered = body + forged_total.to_bytes(8, "big") + tag
+
+    expected = "Malformed v8 stream sentinel"
+    try:
+        "".join(napqes.decrypt_stream_ae_v8([tampered], primes, sk, aad))
+    except ValueError as exc:
+        assert re.search(expected, str(exc)), f"{vec_id}: got: {exc}"
+    else:
+        raise AssertionError(f"{vec_id}: negative vector decrypted successfully")
+    return {
+        "id": vec_id,
+        "kind": "negative",
+        "description": description,
+        "primes": primes,
+        "sk_hex": sk.hex(),
+        "nonce_hex": nonce.hex(),
+        "aad_hex": aad.hex(),
+        "frame_codepoints": frame_codepoints,
+        "tampered_hex": tampered.hex(),
+        "expected_exception": expected,
+    }
+
+
 def generate() -> list[dict]:
     vectors: list[dict] = []
     idx = 0
@@ -178,6 +226,30 @@ def generate() -> list[dict]:
         "S010", "Default F=128 with a 130-char message (2 chunks, filler in 2nd)",
         KEY_13, idx := idx + 1, "z" * 130,
         frame_codepoints=napqes.STREAM_AE_V8_DEFAULT_FRAME,
+    ))
+
+    # S011: non-ASCII, including a supplementary-plane codepoint (CVF-25).
+    vectors.append(_build_positive(
+        "S011", "Non-ASCII message spanning Latin-1, BMP and U+1F600; F=4",
+        KEY_4, idx := idx + 1, "na\u00efve \u2014 \u65e5\u672c \U0001f600",
+        frame_codepoints=4,
+    ))
+
+    # -- Negative: validly re-tagged, non-canonical sentinels --
+    vectors.append(_forged_sentinel_negative(
+        "S-N01",
+        "Sentinel total (1) below the codepoints already delivered (4); re-tagged",
+        KEY_4, idx := idx + 1, "abcdef", frame_codepoints=2, forged_total=1,
+    ))
+    vectors.append(_forged_sentinel_negative(
+        "S-N02",
+        "Sentinel total (4) discards the whole final chunk; re-tagged",
+        KEY_4, idx := idx + 1, "abcdef", frame_codepoints=2, forged_total=4,
+    ))
+    vectors.append(_forged_sentinel_negative(
+        "S-N03",
+        "Sentinel total (7) exceeds the decoded codepoint slots (6); re-tagged",
+        KEY_4, idx := idx + 1, "abcdef", frame_codepoints=2, forged_total=7,
     ))
 
     return vectors

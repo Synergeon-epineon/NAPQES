@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.napqes]
 path = ".."
+features = ["fuzzing"]
 
 # Cargo-fuzz requires nightly.  Build with:
 #   cargo +nightly fuzz run decode_bytes  -- -max_total_time=300

@@ -27,6 +27,7 @@ Output schema per vector:
   ciphertext_hex      expected encrypt_bytes() output (positive only)
   tampered_hex        modified ciphertext for negative auth-failure vectors
   expected_exception  substring of expected ValueError message (negatives)
+  expected_error_contains  optional port-neutral substring (negatives)
 """
 
 import argparse
@@ -280,8 +281,9 @@ def _build_negative(
     aad: bytes = b"",
     expected_exception: str = "Authentication failed",
     allow_legacy: bool = False,
+    expected_error_contains: str | None = None,
 ) -> dict:
-    return {
+    vec = {
         "id": vec_id,
         "kind": "negative",
         "description": description,
@@ -290,8 +292,12 @@ def _build_negative(
         "aad_hex": aad.hex(),
         "tampered_hex": tampered_hex,
         "expected_exception": expected_exception,
-        "allow_legacy_unauthenticated": allow_legacy,
     }
+    # Rust/C error text differs from Python's; CVF-25 harnesses match on this.
+    if expected_error_contains is not None:
+        vec["expected_error_contains"] = expected_error_contains
+    vec["allow_legacy_unauthenticated"] = allow_legacy
+    return vec
 
 
 def generate() -> list[dict]:
@@ -438,6 +444,7 @@ def generate() -> list[dict]:
         "N002", "Ciphertext shorter than minimum (nonce+tag = 48 bytes)",
         KEY_4, (b"\x00" * 20).hex(),
         expected_exception="not a valid authenticated v7 payload",
+        expected_error_contains="too short",
     ))
 
     # N003: correct ciphertext but wrong key → tag mismatch
