@@ -125,7 +125,7 @@ MAX_SERIALISABLE_KEY_PRIME = (1 << 40) - 1
 #: independently and is the sole HMAC key, so no theorem depends on
 #: H_inf(key) and K is an interoperability parameter rather than a security
 #: one (docs/napseq-eprint-v3.tex, Remark ``key-roles``).  The warning is
-#: retained for v7 callers only.
+#: advisory, fires at key generation only, and matters for v7 callers only.
 MIN_KEY_COUNT = 7
 
 
@@ -138,7 +138,7 @@ def _warn_if_weak_key_count(count: int) -> None:
     """
     if count < MIN_KEY_COUNT:
         warnings.warn(
-            f"Key element count K={count} is below the recommended minimum "
+            f"Key element count K={count} is below the v7 advisory minimum "
             f"of {MIN_KEY_COUNT}. Under the v7 single-secret schedule this "
             "gives H_inf(key) < 128 bits, making offline exhaustive key "
             "search feasible. Under v8 no theorem depends on H_inf(key) "
@@ -250,7 +250,8 @@ def _validate_key(key: list[int]) -> None:
             f"Key has {len(key)} elements, exceeding MAX_KEY_ELEMENTS "
             f"({MAX_KEY_ELEMENTS})."
         )
-    _warn_if_weak_key_count(len(key))
+    # No K warning here: this runs on every encrypt/decrypt call. The
+    # advisory v7 warning fires at key generation only (CVF-36).
     for i, k in enumerate(key):
         if k < MIN_KEY_PRIME:
             raise ValueError(

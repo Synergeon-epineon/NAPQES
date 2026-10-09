@@ -62,23 +62,21 @@ int napqes_is_prime(uint64_t n) {
     return 1;
 }
 
-/* Minimum recommended number of prime key elements (Remark "min-K",
- * docs/napseq-eprint-preprint.tex §CVF8-fix). With the "PQ-128" interval
- * |P| = 892,206, H_inf(key) ~= 19.77*K bits; K < 7 gives H_inf(key) < 128
- * bits, making offline exhaustive key search feasible. Enforced as a
- * *warning* only (not a hard failure) so existing small-K KAT/test vectors
- * keep working. */
+/* Advisory key-count threshold inherited from the v7 single-secret schedule,
+ * in which H_inf(key) entered the IND-CPA bound (|P| = 892,206 gives
+ * H_inf(key) ~= 19.77*K bits, so K < 7 is below 128 bits). Under v8 sk is
+ * the sole HMAC key and no theorem depends on H_inf(key) (paper Remark
+ * "key-roles", CVF-36), so this is a warning only, never a failure, and
+ * small-K KAT/test vectors keep working. */
 #define NAPQES_MIN_KEY_COUNT 7
 
 static void warn_if_weak_key_count(size_t count) {
     if (count < NAPQES_MIN_KEY_COUNT) {
         fprintf(stderr,
-            "napqes: WARNING: key element count K=%zu is below the "
-            "recommended minimum of %d. H_inf(key) < 128 bits at this size, "
-            "making offline exhaustive key search feasible (see "
-            "docs/napseq-eprint-preprint.tex, Remark 'min-K'). This key is "
-            "usable but is NOT conformant with NAPQES's IND-CPA security "
-            "claim; use K>=7 (default K=13) for production deployments.\n",
+            "napqes: WARNING: key element count K=%zu is below the v7 "
+            "advisory minimum of %d (H_inf(key) < 128 bits). This matters "
+            "only for the legacy v7 schedule; under v8 K is an "
+            "interoperability parameter (default K=13).\n",
             count, NAPQES_MIN_KEY_COUNT);
     }
 }
@@ -88,10 +86,15 @@ int napqes_generate_primes(uint64_t *out, size_t count,
     warn_if_weak_key_count(count);
     if (max_val <= min_val) return -1;
     uint64_t span = max_val - min_val + 1;
+    /* CVF-20: unbiased rejection sampling -- accept x only below the
+     * largest multiple of span, so x % span is exactly uniform. */
+    uint64_t limit = (UINT64_MAX / span) * span;
     uint64_t max_attempts = span * 4;
     size_t filled = 0;
     for (uint64_t attempts = 0; attempts < max_attempts && filled < count; ++attempts) {
-        uint64_t num = min_val + (secure_rand_u64() % span);
+        uint64_t x;
+        do { x = secure_rand_u64(); } while (x >= limit);
+        uint64_t num = min_val + (x % span);
         if (!napqes_is_prime(num)) continue;
         int dup = 0;
         for (size_t i = 0; i < filled; ++i) {

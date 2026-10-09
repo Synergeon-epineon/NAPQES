@@ -940,8 +940,9 @@ fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
 // schedule, so masked_blob length no longer depends on plaintext content.
 // See docs/CAVEATS.md (CVF1) and SPEC.md for the full rationale.
 
-/// Width in bytes of each fixed-width token field, sized to comfortably hold
-/// the largest realistic token (codepoint * key_element + addend).
+/// Width in bytes of each fixed-width token field. Every token is
+/// `c * k + a` with `c <= 0x10FFFF`, `k <= MAX_KEY_PRIME` and `a < k`, so
+/// tokens are below 2^44 and always fit (CVF-21).
 const TOKEN_WIDTH: usize = 8;
 
 fn fixed_encode_tokens(tokens: &[u64]) -> Vec<u8> {
@@ -1338,9 +1339,10 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
 // encryption is deterministic for a fixed `(sk, primes, aad, message)`, so
 // re-encrypting the *same* message under the *same* key reveals only that
 // the two ciphertexts are equal — never a key-recovery or confidentiality
-// break. Callers who require probabilistic ciphertexts (semantic security
-// even for repeated identical messages) should continue to use the v7
-// random-nonce API ([`encrypt_bytes`]) instead.
+// break. Callers who require distinct ciphertexts for repeated identical
+// messages should bind a unique value (counter, timestamp) into the AAD,
+// which the synthetic nonce covers; the v7 random-nonce API is deprecated
+// (CVF-17) and is not a substitute.
 //
 // The wire-format byte layout is unchanged (`N || masked_blob || tag`); v7
 // and v8 ciphertexts are byte-compatible in shape but **not**
@@ -1351,9 +1353,9 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
 // agree out-of-band on whether a given key/ciphertext pair uses the v7 or
 // v8 schedule.
 //
-// See `docs/napseq-eprint-preprint.tex` (new subsection, "V8 Key Schedule
-// and Synthetic Nonce") and `docs/CAVEATS.md` (CVF3/CVF8/CVF13 follow-ups)
-// for the full specification and updated security argument.
+// See the NAPQES v4 paper (`docs/napseq-eprint-v3.tex`, Sections 3.2-3.3
+// and 4) and `docs/CAVEATS.md` (CVF3/CVF8/CVF13 follow-ups) for the full
+// specification and security argument.
 
 /// Size in bytes of the v8 independently-sampled HMAC subkey `sk`.
 pub const SK_SIZE: usize = 32;
@@ -2235,6 +2237,9 @@ impl StreamV8Encryptor {
         if self.finished {
             return Err("StreamV8Encryptor: push after finish".into());
         }
+        // CVF-47: a failed POST re-run after construction must stop output.
+        #[cfg(feature = "fips_gate")]
+        crate::self_test::require_post().map_err(|e| e.to_string())?;
         if self.chunk_idx == u32::MAX {
             return Err("v8 stream exceeds the 2^32 - 1 chunk limit.".into());
         }
@@ -2263,6 +2268,8 @@ impl StreamV8Encryptor {
         if self.finished {
             return Err("StreamV8Encryptor: finish called twice".into());
         }
+        #[cfg(feature = "fips_gate")]
+        crate::self_test::require_post().map_err(|e| e.to_string())?;
         self.finished = true;
         let mut out: Vec<u8> = Vec::new();
         if !self.cp_buf.is_empty() {
@@ -2723,25 +2730,36 @@ mod tests {
         assert_eq!(ASCII_PRINTABLE_BASE, 32);
     }
 
-    // CVF-46 regression: the four v7 encryptors share the emit_tokens_v7
-    // helper. This test locks in byte-for-byte agreement between the two v7
-    // encryptors that produce comparable output on the same input.
+    // CVF-46 regression: the four public v7 encryptors share the
+    // emit_tokens_v7 helper. Each draws its own CSPRNG nonce, so re-encrypt
+    // the same (ASCII) input under that nonce through the fixed-nonce KAT
+    // helper (itself pinned to the v6 corpus by kat_cross_check) and require
+    // byte-identical output from every entry point.
     #[test]
-    fn cvf46_v7_encryptors_share_emitter() {
-        // encrypt_bytes_with_nonce (pub(crate) KAT helper with a fixed
-        // nonce) must produce the same ciphertext as a hand-rolled call
-        // through the shared emit_tokens_v7 helper. Both go through the
-        // same code path now, so byte equality is definitional.
+    fn cvf46_all_four_v7_encryptors_share_emitter() {
         let key = test_key();
         let msg = "hello CVF-46";
         let aad = b"aad-check";
-        let nonce = [0x9c; NONCE_SIZE];
-        let a = encrypt_bytes_with_nonce(msg, &key, nonce, aad);
-        let b = encrypt_bytes_with_nonce(msg, &key, nonce, aad);
-        assert_eq!(a, b, "same inputs must give byte-identical output");
-        // A subtly-different message must give different ciphertext.
-        let c = encrypt_bytes_with_nonce("hello CVF-46!", &key, nonce, aad);
-        assert_ne!(a, c);
+        let nonce_of = |ct: &[u8]| -> [u8; NONCE_SIZE] { ct[..NONCE_SIZE].try_into().unwrap() };
+
+        let ct_b = encrypt_bytes(msg, &key, aad).unwrap();
+        assert_eq!(ct_b, encrypt_bytes_with_nonce(msg, &key, nonce_of(&ct_b), aad), "encrypt_bytes");
+
+        let ct_r = encrypt_raw(msg.as_bytes(), &key, aad).unwrap();
+        assert_eq!(ct_r, encrypt_bytes_with_nonce(msg, &key, nonce_of(&ct_r), aad), "encrypt_raw");
+
+        let ct_s = STANDARD.decode(encrypt_str(msg, &key, aad).unwrap()).unwrap();
+        assert_eq!(ct_s, encrypt_bytes_with_nonce(msg, &key, nonce_of(&ct_s), aad), "encrypt_str");
+
+        // `encrypt` returns the raw token vector: compare it with the tokens
+        // the helper serialises under the same nonce.
+        let cps: Vec<u32> = msg.chars().map(|c| c as u32).collect();
+        let (n_e, tokens) = encrypt(&cps, &key);
+        let reference = encrypt_bytes_with_nonce(msg, &key, n_e, aad);
+        let masked = &reference[NONCE_SIZE..reference.len() - TAG_SIZE];
+        let ks = varint_keystream(&key_bytes(&key), &n_e, masked.len());
+        let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
+        assert_eq!(tokens, fixed_decode_tokens(&blob).unwrap(), "encrypt");
     }
 
     // ─── NapqesKey regressions (CVF-29 + CVF-37 + CVF-41) ───
@@ -2876,7 +2894,12 @@ mod tests {
         assert_eq!(ps.len(), DEFAULT_KEY_COUNT);
         for p in &ps {
             assert!(is_prime(*p));
+            assert!((MIN_KEY_PRIME..=MAX_KEY_PRIME).contains(p));
         }
+        let mut sorted = ps.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ps.len(), "generated primes must be distinct");
     }
 
     // ─── V8 key schedule + synthetic nonce (CVF3/CVF8/CVF13 fix) ───────────
@@ -2965,11 +2988,18 @@ mod tests {
 
     #[test]
     fn v8_key_generation_is_independent() {
+        // CVF-19: test the property, not the shape (a 32-byte sk can never
+        // equal the 5K-byte key_bytes). sk must not be any HMAC of the prime
+        // material under the v7 or format-subkey schedules, and must be a
+        // fresh draw on every call.
         let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
         assert_eq!(primes.len(), DEFAULT_KEY_COUNT);
-        // sk must not be derivable from key_bytes(primes) via the v7 KDF —
-        // spot-check it does not equal the v7 HMAC key material shape.
-        assert_ne!(sk.to_vec(), key_bytes(&primes));
+        let kb = key_bytes(&primes);
+        assert_ne!(sk, hmac_digest(&kb, &[]));
+        assert_ne!(sk, derive_format_subkey(&kb, FORMAT_BLOCK_V8));
+        assert_ne!(sk, derive_format_subkey(&kb, FORMAT_STREAM_AE_V8));
+        let (_, sk2) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        assert_ne!(sk, sk2);
     }
 
     /// The `Bucket` profile must reproduce the pre-V3-CVF2 hard-wired ladder

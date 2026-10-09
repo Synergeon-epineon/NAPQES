@@ -20,13 +20,13 @@ The Fourth Review Round audit delivered 37 findings against the NAPQES v4 delive
 3. **Attestation drift** (procedural). The FIPS 140-3 power-on self-test attested v7 only, INT-1 was a version-string tautology, the fuzz harness fuzzed v7 with keys that could not reach the v8 panic paths the audit identified, the SP 800-22 bitstream came from v7, and Section 8.4's dudect attestation cited a file that did not ship. These were closed by re-targeting harnesses at v8, latching the POST outcome behind an opt-in `fips_gate` feature, and shipping the missing attestation document.
 
 **Remediation outcome:**
-- 37/37 findings addressed. Nothing left open.
+- 37/37 findings addressed; three named deferrals (§6) and the residual gaps recorded by the final verification pass (§8) are not claimed closed.
 - Rust reference implementation: **234 unit tests + 3 doctests + 8 KAT parity tests + 1 fips_gate integration test pass** — up from 197 pre-remediation. All 22 new regression tests are named after the CVF they close (`cvf<N>_...`) so future regressions surface immediately.
 - Cross-language KAT corpus regenerated: `tests/kat/v8_vectors.json` now carries 23 vectors (was 20); the twelve W001–W012 vectors are byte-identical to before; three new W013–W015 vectors pin the `coarse(3)`, `coarse(12)`, and `frame(1024)` padding profiles (CVF-32).
-- NIST SP 800-22 Statistical Test Suite regenerated over v8 output; **14/14 scored tests pass on a 1M-bit smoke run** (CVF-33). The paper's Section 9 table will be updated with the delivered 10^7-bit statistics in a follow-up spec pass.
+- NIST SP 800-22 Statistical Test Suite regenerated over v8 output (CVF-33): a 1M-bit smoke run passed 14/14 scored tests, and the subsequent $5\times10^7$-bit run (15 tests, 40 scored sub-results, all pass; `sts_report.json`) is the one reported in paper Section 9.
 - No wire-format breaks. Every existing v7 and v8 ciphertext continues to decrypt byte-for-byte.
 
-**What follows.** Section 2 covers process. Section 3 gives a status table for all 37 findings. Sections 4–5 give per-finding narratives grouped by severity. Section 6 lists the four deliberate deferrals. Section 7 documents verification. Appendices A–C give file-level change summaries and reproduction commands.
+**What follows.** Section 2 covers process. Section 3 gives a status table for all 37 findings. Sections 4–5 give per-finding narratives grouped by severity. Section 6 lists the deliberate deferrals. Section 7 documents verification. Section 8 records the final verification pass. Appendices A–C give file-level change summaries and reproduction commands.
 
 ---
 
@@ -48,7 +48,7 @@ The remediation ran across five sessions on 2026-09-22 in the order the audit's 
 - Every code change carries an inline `// CVF-<N>` comment naming the finding it closes.
 - Every regression test is named `cvf<N>_...` so `cargo test --lib cvf` surfaces the whole CVF regression set.
 - Every paper edit carries a footnote naming the finding (`CVF-27: ...`) so the audit team can walk from the report to the paper edit and back.
-- No `#[allow(dead_code)]` or `#[allow(deprecated)]` was added at a definition site; only at narrow call sites (with a comment explaining why).
+- No `#[allow(deprecated)]` was added at a definition site; only at narrow call sites (with a comment explaining why). One `#[allow(dead_code)]` sits on a definition: the reserved `Secret32` wrapper in `rust/src/key.rs`, which has no caller yet.
 
 ---
 
@@ -80,23 +80,23 @@ Legend: **C** = closed in this pass; **C+D** = closed with follow-up items expli
 | 30 | Minor | behavior | C | Paper §3.4 no-float claim qualified to "the v8 construction Π"; v7 float path documented as backward-compat retention; v7 encryptors already deprecated per CVF-17 |
 | 31 | Minor | over-underflow | C | `PadProfile::block_size` rejects `n >= 2^PAD_MAX_EXP` at the head; oversize check now shipped for all three profiles |
 | 32 | Minor | procedural | C | `pad_profile` schema field added; W013 (coarse(3)), W014 (coarse(12)), W015 (frame(1024)) vectors generated; Rust harness dispatches on the field |
-| 33 | Minor | procedural | C+D | `sts.rs` migrated from v7 `encrypt_bytes` to v8 `encrypt_bytes_v8`; module header + all "v6" strings updated; STS 14/14 pass on 1M-bit smoke run. **Deferred:** 10^7-bit full run + paper §9 statistics table update. |
-| 34 | Minor | behavior | C | `MAX_PLAINTEXT_CODEPOINTS` public constant added and enforced at every v7 entry (was previously an `assert!` inside `pad_message` that aborted release builds) |
+| 33 | Minor | procedural | C | `sts.rs` migrated from v7 `encrypt_bytes` to v8 `encrypt_bytes_v8`; module header + all "v6" strings updated; 1M-bit smoke run 14/14; the $5\times10^7$-bit run (40/40 sub-results) is reported in paper §9 |
+| 34 | Minor | behavior | C | `MAX_PLAINTEXT_CODEPOINTS` public constant added and enforced at every fallible v7 entry with `Err` (was previously an `assert!` inside `pad_message` that aborted release builds); the deprecated `encrypt`, which has no error channel, still panics on over-length input |
 | 35 | Minor | behavior | C | `pub fn encrypt` now routes its nonce draw through `generate_nonce_with_crng_check`; CRNG error message rescoped to SP 800-140B §4.9.2 |
-| 36 | Minor | documentation | C | Remark 3.3 K=7 warning sentence removed via footnote explaining the deletion; audit's rationale carried forward |
+| 36 | Minor | documentation | C | Remark 3.3 K=7 warning sentence removed via footnote explaining the deletion; the footnote now states accurately that Rust emits no warning while the Python and C ports keep an advisory, v7-labelled warning at key generation only (Python's per-call warning in `_validate_key` removed in the final pass) |
 | 37 | Minor | flaw | C | Closed by NapqesKey `Drop` (wipes `primes` and `sk`) + inline `zeroize_sk(&mut sk_fmt)` at end of v8 encrypt/decrypt cores |
 | 38 | Minor | documentation | C | `be5` gains `debug_assert!(n < 1u64 << 40)` — defense-in-depth against `MAX_KEY_PRIME` unenforcement |
 | 39 | Minor | documentation | C | `MAX_NOISE_RUN` doc-comment: "~13.4x average" corrected to 8.4 capped mean with range 3.99 – 18.21 |
-| 40 | Minor | readability | C+D | Item 9 (`MAX_PLAINTEXT_CODEPOINTS`) landed as public constant; **eight paper-side text edits deferred** to a dedicated paper pass |
+| 40 | Minor | readability | C | Item 9 (`MAX_PLAINTEXT_CODEPOINTS`) landed as public constant; items 1–8 and the optional `be5` bound note applied to the paper in the final pass (§8) |
 | 41 | Mod | efficiency | C | `MAX_KEY_ELEMENTS = 128` cap; distinctness scan replaced with `O(K log K)` sort-and-scan on a local clone; NapqesKey shifts the whole check off the per-message path |
 | 42 | Minor | naming | C | `NOISE_ALPHABET`, `PAD_ALPHABET`, `ASCII_PRINTABLE_BASE` (public); `THETA_MIN_F64`, `THETA_MAX_F64` (private, v7-only) |
 | 43 | Mod | flaw | C | `unpad_message` rejects prefix codepoints `> 0xFF` (non-canonical length encoding) |
 | 44 | Minor | documentation | C | `decrypt_core_v8` truncation error now names `ct_pos`, `n_tokens`, `real_idx`, `real_count`, `noise_run` |
 | 45 | Mod | flaw | V | Verified closed by CVF-12's `subtle::ConstantTimeEq` substitution (fails closed on length mismatch — the architectural property CVF-45 asks for); nonce-length regression test added |
 | 46 | Mod | architecture | C | `emit_tokens_v7` shared helper extracted; four v7 encryptors reduced to a single-line call; byte-identical output verified against the v6 KAT corpus |
-| 47 | Mod | procedural | C | `POST_STATE: AtomicU8` + `require_post()`; every public v8 entry gated behind opt-in `[features] fips_gate`; three-state (`NOT_RUN` / `RUNNING` / `PASSED` / `FAILED`) latch with explicit test for each transition |
+| 47 | Mod | procedural | C | `POST_STATE: AtomicU8` + `require_post()`; every public v8 encrypt/decrypt entry (block, streaming incl. `StreamV8Encryptor::push`/`finish`, `NapqesKey` variants) gated behind opt-in `[features] fips_gate`; four-state (`NOT_RUN` / `RUNNING` / `PASSED` / `FAILED`) latch with explicit test for each transition |
 
-**Total closed:** 37/37. **Fully closed:** 33. **Closed with named deferrals:** 4 (CVF-18, CVF-23, CVF-26, CVF-33, CVF-40 — the deferrals are listed in §6).
+**Total:** 37/37 addressed. Named deferrals: 3 (CVF-18, CVF-23, CVF-26 — see §6). Residual gaps identified by the final verification pass are listed in §8.3 and are **not** claimed closed.
 
 ---
 
@@ -265,7 +265,7 @@ Rust harness ([rust/src/kat_cross_check.rs](rust/src/kat_cross_check.rs)) added 
 
 ---
 
-## 6. Deferred items (five items, all in-tree noted)
+## 6. Deferred items (three open; two closed in the final pass)
 
 Each deferral is a scoped follow-up. In every case the shipping crate is functionally correct and secure without the deferred work; the deferral is either a stylistic improvement, a spec-side text pass, or a distinct release cycle.
 
@@ -275,9 +275,9 @@ Each deferral is a scoped follow-up. In every case the shipping crate is functio
 
 3. **CVF-26 — comparator-focused dudect harness.** The delivered harness measures the whole `decrypt_bytes_v8_key` call; a tighter harness that measures `ct_eq_bytes` directly requires exposing a `#[cfg(feature = "ct_bench")]` accessor. Documented in [docs/DUDECT_ATTESTATION.md](docs/DUDECT_ATTESTATION.md).
 
-4. **CVF-33 — 10^7-bit STS run + paper §9 table update.** The `sts.rs` code change landed and 14/14 scored tests pass on a 1M-bit smoke run. The full 10^7-bit run and the resulting Section 9 statistics table refresh belong in the paper-side pass along with CVF-40.
+4. **CVF-33 — ~~10^7-bit STS run + paper §9 table update.~~ Closed.** A $5\times10^7$-bit run over v8 output (40/40 scored sub-results pass, `sts_report.json`) is reported in paper §9.
 
-5. **CVF-40 items 1–8 — paper readability edits.** Section 3.3 over-claim on length-prefixing, Table 1 $k_i$ notation, §3.7 0- vs 1-based key tuple, Table 1 domain-`0x05` modulus source, Remark 3.7 half-open `[θ_min, θ_max)`, "agreed out of band" analogy, Table 2 short-class parenthetical, §12 "2-byte" → "2-codepoint" length prefix. Nine items collectively; item 9 landed as a public constant. Deferred to a paper text pass because they are stylistic and do not affect the crate.
+5. **CVF-40 items 1–8 — ~~paper readability edits.~~ Closed in the final pass (§8.2).** Section 3.3 over-claim on length-prefixing, Table 1 $k_i$ notation, §3.7 0- vs 1-based key tuple, Table 1 domain-`0x05` modulus source, Remark 3.7 half-open `[θ_min, θ_max)`, "agreed out of band" analogy, Table 2 short-class parenthetical, §12 "2-byte" → "2-codepoint" length prefix.
 
 Two other small paper-side items also belong in the same paper pass:
 - Rename `docs/napseq-eprint-v3.tex` → `napseq-eprint-v4.tex` (CVF-21 flag).
@@ -350,6 +350,46 @@ Named `cvf<N>_...` where possible so `cargo test --lib cvf` surfaces the whole s
 - All Python and Rust reference implementations continue to produce byte-identical ciphertexts on shared inputs (verified per KAT vector).
 - v7 wire format: unchanged. v7 decryptors continue to decode any pre-remediation v7 ciphertext.
 - v8 wire format: unchanged. v8 encrypt+decrypt round-trip on any pre-remediation v8 ciphertext.
+
+---
+
+## 8. Final verification pass
+
+A last pass re-ran the full matrix and re-checked every finding of both audit rounds (v3 paper CVF-1–25, v4 code CVF-11–47) against the code and the paper.
+
+### 8.1 Matrix (all green after the fixes in §8.2)
+
+`python -m pytest tests` (363 passed, 1 skipped); `gen_kats.py`, `gen_kats_v8.py`, `gen_kats_v8_stream.py --check`; `cargo test --release` and `cargo test --features fips_gate` (unit + doctests); `cargo build --examples --release`; `cargo check --bins` in `rust/fuzz`; C KAT harness built with MSVC `/W4` (zero warnings) passing all three corpora; independent v8 re-implementation 30/30; paper builds with no undefined references.
+
+### 8.2 Regressions and inaccuracies found and fixed
+
+- `tests/gen_kats.py --check` failed in CI: N002's `expected_error_contains` had been added to the JSON but not to the generator.
+- Three doctests (README examples, `NapqesKey` example) failed under `--features fips_gate` because they never ran POST; examples now call `run_power_on_self_tests()`, and `rust/README.md` gained a POST / `fips_gate` section stating the gate's boundary.
+- `rust/src/key.rs` claimed the bare-slice v8 entries were `#[deprecated]` (they are not).
+- CVF-19: `v8_key_generation_is_independent` was still vacuous (32-byte vs 5K-byte comparison); it now checks `sk` against HMAC derivations of the primes and freshness across calls. `primes_are_prime` now checks range and distinctness.
+- CVF-46: the agreement test compared one helper call with itself; it now re-encrypts the output of each of the four public v7 encryptors under its own nonce through the KAT-pinned helper and requires byte equality.
+- CVF-47: `StreamV8Encryptor::push`/`finish` were not gated.
+- CVF-36: the new paper footnote said no port warns below K=7, but Python (on every call) and C did; Python now warns at key generation only, C's message no longer claims IND-CPA non-conformance, and the footnote is accurate.
+- CVF-20: the C sampler kept the modulo bias; it now uses rejection sampling. Paper Remark 3.2 now states that interval rejection is distributionally identical and is what the implementations do.
+- CVF-21: stale preprint pointer and "largest realistic token" comment in `lib.rs`; a comment steering callers to the deprecated v7 API for probabilistic encryption was replaced.
+- `C/README.md` example declared `uint64_t key[10]` but generated `NAPQES_DEFAULT_KEY_COUNT` (13) primes into it.
+- Paper: CVF-40 items 1–8 plus the `be5` bound note; v7 surface, OT-frame use of `encrypt_raw`, per-call key-validation timing and v7 `f64` threshold disclosed (CVF-17/28/29/30); v8-scoped length-cap wording (CVF-34); v3 items — truncated nonce formula in Contributions (CVF-19), "keystream" → "ciphertext output" (CVF-20), comparison-table expansion cell (CVF-3), mismatched-key decryptor behaviour (CVF-18), two-hop PRF description in Contributions; the comparison table no longer runs off the page.
+
+### 8.3 Residual gaps (not claimed closed)
+
+- **CVF-14:** v7 byte and codepoint encodings remain indistinguishable for values ≤ U+00FF (`encrypt_bytes("é")` decrypts under `decrypt_raw` as `0xE9`). Inherent to the shared v7 format; v7 encryptors are deprecated.
+- **CVF-17:** `ot_frame` still encrypts with v7 `encrypt_raw` (disclosed in paper §8.2).
+- **CVF-18:** POST has no v8 tag-flip KAT (KAT-3 is v7), and the embedded KAT constants are not cross-checked against the corpus in CI.
+- **CVF-20:** `generate_prime_numbers` / `generate_v8_key` still panic on an invalid range rather than returning `Result` (`NapqesKey::generate` is the non-panicking path).
+- **CVF-19/25/32/44:** corpus tests assert a non-zero count, not an expected count; no vectors yet for `coarse(3)` at n = 15/16, a `frame(1024)` n = 1024 rejection, the 65,535-codepoint boundary, a non-scalar recovered codepoint, or noise-run exhaustion.
+- **CVF-21:** `SPEC.md` and `docs/draft-napqes-aead-00.md` still specify v6/v7; the v8 streaming format is specified only in code, the paper corpus section and `docs/CAVEATS.md`.
+- **CVF-22:** no recorded run of the re-tagging fuzz target (stated in paper §11).
+- **CVF-23:** no MSRV / pinned toolchain.
+- **CVF-29/41:** bare-slice APIs re-validate per call (disclosed in paper §8.4; `NapqesKey` avoids it).
+- **CVF-31:** `pad_to_block` precondition is a `debug_assert!`; the oversize test does not cover `Frame`.
+- **CVF-47:** `kem`, `kem_exchange`, `ot_frame`, `protocols`, `vale` and key generation are outside the gate; `fips_gate` is off by default; unit-test builds auto-run POST, so `NOT_RUN` is not exercised through the public API.
+- **v3 CVF-13:** the paper gives no digest of `v8_vectors.json`.
+- Outside both audits: `demos/drone` displays K=10 / 50-byte keys while generating K=13; pre-existing unused import in `rust/src/bin/ls_gateway.rs`; the CI ruff step lists a non-existent `main.py`.
 
 ---
 

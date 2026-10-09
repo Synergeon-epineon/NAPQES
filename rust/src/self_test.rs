@@ -22,10 +22,11 @@
 //!          a binary integrity check. The full binary HMAC is a Phase 4 item
 //!          (see comment on `build_provenance_check` below).
 //!
-//! v7 KAT vectors are derived from the retired v6 vector V002
-//! (`tests/kat/v6_vectors.json`) under the post-CVF1 fixed-width token
-//! encoding. v8 KAT constants are vector W002 of `tests/kat/v8_vectors.json`;
-//! KAT-4 compares against the SHA-256 of its 2,928-byte ciphertext.
+//! v7 KAT vectors are vector V002 of the live v7 corpus
+//! (`tests/kat/v6_vectors.json`; the filename keeps its v6 label) under the
+//! post-CVF1 fixed-width token encoding. v8 KAT constants are vector W002
+//! of `tests/kat/v8_vectors.json`; KAT-4 compares against the SHA-256 of its
+//! 2,928-byte ciphertext.
 //!
 //! Reference: NIST SP 800-140B §4.9.1 (power-on self-tests).
 
