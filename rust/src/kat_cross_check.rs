@@ -1,9 +1,10 @@
-//! Rust KAT cross-check for NAPSEQ v7 (Phase 0, workstream 0.1 / ROADMAP §2.B8).
+//! Rust cross-check against the shared KAT corpora in `tests/kat/`.
 //!
-//! Reads `tests/kat/v6_vectors.json` from the repo root, exercises both the
-//! deterministic `encrypt_bytes_with_nonce` API (exact byte comparison) and
-//! the `decrypt_bytes` API for positive vectors, and asserts that negative
-//! vectors return an `Err`.
+//! * `v8_vectors.json` and `v8_stream_vectors.json` — the v8 scheme the
+//!   NAPQES v4 paper specifies (`v8_*` tests below).
+//! * `v6_vectors.json` — the legacy v7 block format (the filename keeps its
+//!   v6 label); outside the paper's analysis, kept for archived ciphertexts
+//!   (`legacy_v7_*` tests).
 //!
 //! This module lives inside the crate (rather than as an external
 //! `tests/kats.rs` integration test) because `encrypt_bytes_with_nonce` is
@@ -22,41 +23,68 @@ use crate::{
     encrypt_bytes_with_nonce, NONCE_SIZE, PadProfile,
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-fn load_vectors() -> Vec<Value> {
-    // Path is relative to the Cargo workspace root (repo root / rust/).
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = Path::new(manifest_dir)
-        .parent()             // repo root
-        .unwrap()
-        .join("tests/kat/v6_vectors.json");
+/// CVF-25: locate `tests/kat/<name>` by walking up from the crate directory,
+/// so the harness does not depend on one fixed checkout layout.
+pub(crate) fn corpus_path(name: &str) -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .ancestors()
+        .map(|dir| dir.join("tests").join("kat").join(name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| {
+            panic!("KAT corpus {} not found above {}", name, manifest_dir.display())
+        })
+}
 
+pub(crate) fn load_corpus(name: &str) -> Vec<Value> {
+    let path = corpus_path(name);
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-
     let doc: Value = serde_json::from_str(&content)
-        .expect("Invalid JSON in v6_vectors.json");
-
+        .unwrap_or_else(|e| panic!("Invalid JSON in {}: {}", name, e));
     doc["vectors"]
         .as_array()
-        .expect("vectors array missing")
+        .unwrap_or_else(|| panic!("vectors array missing in {}", name))
         .clone()
 }
 
-fn hex_decode(h: &str) -> Vec<u8> {
+fn load_vectors() -> Vec<Value> {
+    load_corpus("v6_vectors.json")
+}
+
+pub(crate) fn hex_decode(h: &str) -> Vec<u8> {
     (0..h.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
         .collect()
 }
 
+/// CVF-19: a vector silently lost from (or added to) a corpus must fail.
+#[test]
+fn corpus_sizes_are_pinned() {
+    let count = |vs: &[Value], kind: &str| vs.iter().filter(|v| v["kind"] == kind).count();
+    let v7 = load_vectors();
+    assert_eq!((v7.len(), count(&v7, "positive"), count(&v7, "negative")), (37, 26, 11));
+    let v8 = load_v8_vectors();
+    assert_eq!(
+        (v8.len(), count(&v8, "positive"), count(&v8, "negative"), count(&v8, "encrypt_negative")),
+        (35, 22, 12, 1)
+    );
+    let stream = load_v8_stream_vectors();
+    assert_eq!(
+        (stream.len(), count(&stream, "positive"), count(&stream, "negative")),
+        (14, 11, 3)
+    );
+}
+
 // ---------------------------------------------------------------------------
-// Positive: decrypt_bytes of stored ciphertext must recover the message
+// Legacy v7 — positive: decrypt_bytes of stored ciphertext must recover the message
 // ---------------------------------------------------------------------------
 
 #[test]
-fn positive_decrypt_roundtrip() {
+fn legacy_v7_positive_decrypt_roundtrip() {
     let vectors = load_vectors();
     let mut tested = 0;
     let mut skipped = 0;  // vectors skipped due to empty message
@@ -133,7 +161,7 @@ fn positive_decrypt_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn positive_encrypt_bytes_deterministic() {
+fn legacy_v7_positive_encrypt_bytes_deterministic() {
     let vectors = load_vectors();
     let mut tested = 0;
 
@@ -198,7 +226,7 @@ fn positive_encrypt_bytes_deterministic() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn negative_returns_err() {
+fn legacy_v7_negative_returns_err() {
     let vectors = load_vectors();
     let mut tested = 0;
 
@@ -284,21 +312,7 @@ fn negative_returns_err() {
 // ---------------------------------------------------------------------------
 
 fn load_v8_vectors() -> Vec<Value> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = Path::new(manifest_dir)
-        .parent()
-        .unwrap()
-        .join("tests/kat/v8_vectors.json");
-
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-
-    let doc: Value = serde_json::from_str(&content).expect("Invalid JSON in v8_vectors.json");
-
-    doc["vectors"]
-        .as_array()
-        .expect("vectors array missing")
-        .clone()
+    load_corpus("v8_vectors.json")
 }
 
 fn v8_key(vec: &Value) -> Vec<u64> {
@@ -449,6 +463,30 @@ fn v8_negative_returns_err() {
     eprintln!("\nRust v8 KAT negative: {} passed", tested);
     assert!(tested > 0, "No v8 negative vectors were tested");
 }
+
+/// CVF-32: inputs every port must refuse to encrypt (e.g. frame(F) at n = F).
+#[test]
+fn v8_encrypt_negative_returns_err() {
+    let vectors = load_v8_vectors();
+    let mut tested = 0;
+
+    for vec in vectors.iter().filter(|v| v["kind"] == "encrypt_negative") {
+        let id = vec["id"].as_str().unwrap();
+        let message = vec["message"].as_str().unwrap();
+        let aad = hex_decode(vec["aad_hex"].as_str().unwrap_or(""));
+        let want = vec["expected_exception"].as_str().unwrap();
+        let sk = v8_sk(vec);
+        let key = v8_key(vec);
+
+        let err = pad_profile_from_vec(vec)
+            .and_then(|profile| encrypt_bytes_v8_with_profile(message, &key, &sk, &aad, profile))
+            .expect_err(id);
+        assert!(err.contains(want), "[{}] expected {:?}, got: {}", id, want, err);
+        tested += 1;
+    }
+
+    assert!(tested > 0, "No v8 encrypt-negative vectors were tested");
+}
 // ---------------------------------------------------------------------------
 // v8 STREAMING cross-language parity (tests/kat/v8_stream_vectors.json)
 //
@@ -463,16 +501,7 @@ use crate::{
 };
 
 fn load_v8_stream_vectors() -> Vec<Value> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = Path::new(manifest_dir)
-        .parent()
-        .unwrap()
-        .join("tests/kat/v8_stream_vectors.json");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-    let doc: Value = serde_json::from_str(&content)
-        .expect("Invalid JSON in v8_stream_vectors.json");
-    doc["vectors"].as_array().expect("vectors array missing").clone()
+    load_corpus("v8_stream_vectors.json")
 }
 
 fn v8_stream_primes(vec: &Value) -> Vec<u64> {

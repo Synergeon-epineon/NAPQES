@@ -101,14 +101,17 @@ messages that fit in memory, prefer the SIV-protected block API
 ## Power-on self-tests (FIPS 140-3)
 
 `napqes::self_test::run_power_on_self_tests()` runs the SP 800-140B §4.9.1
-KATs (v7 and v8) and latches the outcome process-wide. Building with
-`--features fips_gate` makes every public v8 encrypt/decrypt entry point
-(block, streaming, `NapqesKey` variants) refuse to run
-(`module not operational`) until that call has returned `Ok(())`; a failed
-POST keeps the module in the error state. Without the feature the outcome
-is still latched but not enforced. The gate covers v8 encryption and
-decryption only — key generation, the v7 legacy decryptors, `kem`,
-`kem_exchange`, `ot_frame`, `protocols` and `vale` are outside it.
+KATs (v7 and v8 encrypt/decrypt/tamper, a v8 structural reject, and a KEM
+derivation KAT plus FrodoKEM and hybrid pairwise-consistency checks) and
+latches the outcome process-wide. Building with `--features fips_gate`
+makes every public v8 encrypt/decrypt entry point (block, streaming,
+`NapqesKey` variants) and every KEM encapsulate/decapsulate call refuse to
+run (`module not operational`) until that call has returned `Ok(())`; a
+failed POST keeps the module in the error state. Without the feature the
+outcome is still latched but not enforced, and the feature is off by
+default. Key generation, the v7 legacy decryptors, `ot_frame`, `protocols`
+and `vale` are outside the gate. The bundled binaries and examples run POST
+at start-up.
 
 ## Public surface
 
@@ -119,21 +122,28 @@ decryption only — key generation, the v7 legacy decryptors, `kem`,
 `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`, `StreamV8Encryptor`,
 `generate_v8_key`, `zeroize_key`, `zeroize_sk`.
 
+**Key-generation helpers:** `generate_prime_numbers`, `is_prime`.
+
 **Constants:** `NONCE_SIZE`, `TAG_SIZE`, `SK_SIZE`, `MIN_KEY_PRIME`,
-`MAX_KEY_PRIME`, `DEFAULT_KEY_COUNT`, `MAX_NOISE_RUN`, `FORMAT_BLOCK_V8`,
+`MAX_KEY_PRIME`, `MAX_SAFE_KEY_PRIME`, `MAX_SERIALISABLE_KEY_PRIME`,
+`DEFAULT_KEY_COUNT`, `MAX_KEY_ELEMENTS`, `KEYGEN_DRAWS_PER_PRIME`,
+`MAX_PLAINTEXT_CODEPOINTS`, `MAX_NOISE_RUN`, `NOISE_ALPHABET`,
+`PAD_ALPHABET`, `ASCII_PRINTABLE_BASE`, `FORMAT_BLOCK_V8`,
 `FORMAT_STREAM_AE_V8`, `PAD_MIN_EXP`, `PAD_MAX_EXP`,
 `STREAM_AE_V8_DEFAULT_FRAME`, `STREAM_AE_V8_MAX_FRAME`.
 
 **Padding profile:** `PadProfile` (Bucket / Coarse / Frame).
 
 **Modules:** `self_test` (FIPS 140-3 SP 800-140B §4.9.1 power-on tests),
-`kem`, `kem_exchange`, `ot_frame`, `protocols`, `vale`.
+`kem`, `kem_exchange`, `ot_frame`, `protocols`; `vale` only with
+`--features vale` (its sources are not published).
 
 **Deprecated (v7 legacy — kept only for archived ciphertexts):**
-`encrypt`, `encrypt_bytes`, `encrypt_bytes_with_nonce`, `encrypt_str`,
-`encrypt_raw` — audit finding CVF-17 (length not a function of the padding
-bucket alone; the length-hiding property Corollary 4.14 proves for v8 does
-not hold). The corresponding decryptors (`decrypt`, `decrypt_bytes`,
+`encrypt`, `encrypt_bytes`, `encrypt_str`, `encrypt_raw` — audit finding
+CVF-17 (length not a function of the padding bucket alone; the
+length-hiding property Corollary 4.14 proves for v8 does not hold), and v7
+is keyed by the prime tuple rather than `sk`, so no theorem of the paper
+applies (CVF-28). The corresponding decryptors (`decrypt`, `decrypt_bytes`,
 `decrypt_str`, `decrypt_raw`) remain to decrypt existing v7 ciphertexts and
 are not deprecated.
 
@@ -143,6 +153,8 @@ Every entry point taking `&[u64]` runs `validate_key` at its head
 (CVF-15/CVF-16). Rejected: empty tuples, composite elements, elements
 outside `[MIN_KEY_PRIME, MAX_KEY_PRIME]`, duplicates. Key ordering is a
 security parameter — `[k0, k1]` and `[k1, k0]` are distinct keys.
+`generate_v8_key` and `generate_prime_numbers` return `Err` on an invalid
+or prime-poor range instead of panicking (CVF-20).
 
 ## Specification and caveats
 

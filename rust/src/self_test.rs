@@ -101,7 +101,8 @@ fn admit(state: u8, in_post: bool) -> Result<(), SelfTestError> {
 /// have passed. A caller arriving while POST is running on another thread
 /// blocks until it finishes, then sees the final outcome.
 ///
-/// Called from every public v8 entry point under `#[cfg(feature = "fips_gate")]`.
+/// Called from every public v8 encrypt/decrypt entry point and every KEM
+/// encapsulate/decapsulate function under `#[cfg(feature = "fips_gate")]`.
 #[allow(dead_code)]
 pub(crate) fn require_post() -> Result<(), SelfTestError> {
     if IN_POST.with(|f| f.get()) {
@@ -749,6 +750,45 @@ mod tests {
     #[test]
     fn kat3_tampered_ciphertext_rejected() {
         kat_tamper_rejection().expect("KAT-3 failed");
+    }
+
+    #[test]
+    fn kat7_v8_tampered_ciphertext_rejected() {
+        kat_v8_tamper_rejection().expect("KAT-7 failed");
+    }
+
+    #[test]
+    fn kat8_kem_derivation_and_pairwise_consistency() {
+        kat_kem().expect("KAT-8 failed");
+    }
+
+    /// CVF-18: the embedded constants must be corpus vectors V002 and W002,
+    /// so the self-test and the corpus cannot drift apart silently.
+    #[test]
+    fn kat_constants_match_corpus() {
+        use crate::kat_cross_check::{hex_decode, load_corpus};
+        let as_key = |v: &serde_json::Value| -> Vec<u64> {
+            v.as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect()
+        };
+
+        let v7 = load_corpus("v6_vectors.json");
+        let v002 = v7.iter().find(|v| v["id"] == "V002").expect("V002 missing");
+        assert_eq!(hex_decode(v002["ciphertext_hex"].as_str().unwrap()), decode_hex(KAT_CIPHERTEXT_HEX).unwrap());
+        assert_eq!(hex_decode(v002["nonce_hex"].as_str().unwrap()), KAT_NONCE.to_vec());
+        assert_eq!(as_key(&v002["key"]), KAT_KEY);
+        assert_eq!(v002["message"], KAT_MESSAGE);
+        assert_eq!(v002["aad_hex"], "");
+
+        let v8 = load_corpus("v8_vectors.json");
+        let w002 = v8.iter().find(|v| v["id"] == "W002").expect("W002 missing");
+        let ct = hex_decode(w002["ciphertext_hex"].as_str().unwrap());
+        let digest: [u8; 32] = Sha256::digest(&ct).into();
+        assert_eq!(ct.len(), KAT_V8_EXPECTED_LEN);
+        assert_eq!(digest, KAT_V8_EXPECTED_SHA256);
+        assert_eq!(hex_decode(w002["sk_hex"].as_str().unwrap()), KAT_V8_SK.to_vec());
+        assert_eq!(as_key(&w002["key"]), KAT_V8_PRIMES);
+        assert_eq!(w002["message"], KAT_V8_MESSAGE);
+        assert_eq!(hex_decode(w002["aad_hex"].as_str().unwrap()), KAT_V8_AAD.to_vec());
     }
 
     #[test]
