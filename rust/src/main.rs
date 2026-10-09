@@ -10,7 +10,9 @@ use napqes::{
 };
 
 fn main() {
-    let key = generate_prime_numbers(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+    napqes::self_test::run_power_on_self_tests().expect("power-on self-tests failed");
+    let key = generate_prime_numbers(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME)
+        .expect("key generation failed");
     println!("key: {:?}", key);
 
     let msg = "Hello from the Rust port of napqes!";
