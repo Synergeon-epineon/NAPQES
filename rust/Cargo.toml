@@ -11,6 +11,8 @@ edition = "2021"
 [features]
 default = []
 fips_gate = []
+# Requires the unpublished rust/src/vale sources (gitignored).
+vale = []
 
 [dependencies]
 hmac = "0.12"
@@ -66,6 +68,7 @@ path = "src/bin/ls_gateway.rs"
 [[bin]]
 name = "vale_demo"
 path = "src/bin/vale_demo.rs"
+required-features = ["vale"]
 
 [lib]
 name = "napqes"
