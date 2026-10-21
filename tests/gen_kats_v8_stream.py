@@ -134,9 +134,10 @@ def _forged_sentinel_negative(
     chunk_count = -(-len(message) // frame_codepoints)
     sk_fmt = napqes._derive_format_subkey(sk, napqes.FORMAT_STREAM_AE_V8)
     tag = napqes._compute_stream_v8_sentinel_tag(
-        sk_fmt, nonce, chunk_count, aad, forged_total)
+        sk_fmt, frame_codepoints, nonce, chunk_count, aad, forged_total)
+    mask = napqes._stream_v8_count_mask(sk_fmt, frame_codepoints, nonce, chunk_count)
     body = stream[:-(8 + napqes._TAG_SIZE)]
-    tampered = body + forged_total.to_bytes(8, "big") + tag
+    tampered = body + (forged_total ^ mask).to_bytes(8, "big") + tag
 
     expected = "Malformed v8 stream sentinel"
     try:
@@ -153,6 +154,42 @@ def _forged_sentinel_negative(
         "sk_hex": sk.hex(),
         "nonce_hex": nonce.hex(),
         "aad_hex": aad.hex(),
+        "frame_codepoints": frame_codepoints,
+        "tampered_hex": tampered.hex(),
+        "expected_exception": expected,
+    }
+
+
+def _rewritten_frame_negative(
+    vec_id: str,
+    description: str,
+    primes: list[int],
+    idx: int,
+    frame_codepoints: int,
+    forged_f: int,
+) -> dict:
+    """CVF-V5-9: an empty stream whose header F is rewritten must not verify."""
+    sk = _sk(idx)
+    nonce = _nonce(idx)
+    stream = b"".join(napqes._encrypt_stream_ae_v8_with_nonce(
+        iter(""), primes, sk, nonce, b"", frame_codepoints=frame_codepoints,
+    ))
+    tampered = stream[:1] + forged_f.to_bytes(4, "big") + stream[5:]
+    expected = "Authentication failed"
+    try:
+        "".join(napqes.decrypt_stream_ae_v8([tampered], primes, sk, b""))
+    except ValueError as exc:
+        assert re.search(expected, str(exc)), f"{vec_id}: got: {exc}"
+    else:
+        raise AssertionError(f"{vec_id}: negative vector decrypted successfully")
+    return {
+        "id": vec_id,
+        "kind": "negative",
+        "description": description,
+        "primes": primes,
+        "sk_hex": sk.hex(),
+        "nonce_hex": nonce.hex(),
+        "aad_hex": "",
         "frame_codepoints": frame_codepoints,
         "tampered_hex": tampered.hex(),
         "expected_exception": expected,
@@ -250,6 +287,13 @@ def generate() -> list[dict]:
         "S-N03",
         "Sentinel total (7) exceeds the decoded codepoint slots (6); re-tagged",
         KEY_4, idx := idx + 1, "abcdef", frame_codepoints=2, forged_total=7,
+    ))
+
+    # -- CVF-V5-9: the header is bound into the sentinel tag --
+    vectors.append(_rewritten_frame_negative(
+        "S-N04",
+        "Empty stream with F rewritten from 8 to 9 in the header -> auth failure",
+        KEY_4, idx := idx + 1, frame_codepoints=8, forged_f=9,
     ))
 
     return vectors

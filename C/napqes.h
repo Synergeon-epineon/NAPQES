@@ -243,7 +243,11 @@ char *napqes_decrypt_str_v8(const char *cypher,
  * Wire format:
  *   HEADER (21 B):     0x02 || be4(F) || nonce(16)
  *   CHUNK * C:         be4(F*160) || masked(F*160) || tag(32)
- *   SENTINEL (44 B):   be4(0) || be8(total_real_codepoints) || tag(32)
+ *   SENTINEL (44 B):   be4(0) || be8(total_real_codepoints) XOR count_mask || tag(32)
+ *
+ * CVF-V5-9: chunk tags, the sentinel tag and count_mask bind the full 21-byte
+ * HEADER. CVF-V5-1: count_mask = HMAC(sk_fmt, 0x0F || HEADER || be4(C))[:8];
+ * only the chunk count C = ceil(n / F) remains visible.
  *
  * Every chunk i is a self-contained v8 primitive call keyed by
  * (sk_fmt, sub_nonce_i) where sub_nonce_i = HMAC(sk_fmt, 0x0E || nonce ||

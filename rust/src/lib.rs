@@ -20,9 +20,11 @@
 //!   loop, per-bucket token ceiling. Wire layout is
 //!   `nonce(16) || masked_blob(fixed-width) || tag(32)`. Entry points:
 //!   [`encrypt_bytes_v8`], [`decrypt_bytes_v8`], [`generate_v8_key`],
-//!   [`encrypt_bytes_v8_with_profile`], [`encrypt_stream_ae_v8`],
-//!   [`decrypt_stream_ae_v8`], [`StreamV8Encryptor`]. Length-hiding property
-//!   holds per Corollary 4.14 of the paper.
+//!   [`encrypt_bytes_v8_with_profile`]. Length-hiding property holds per
+//!   Corollary 4.14 of the paper **for the block format only**. The v8
+//!   streaming format (feature-gated, outside the paper's claims) reveals
+//!   the chunk count `ceil(n / F)`; its exact codepoint count is masked
+//!   (CVF-V5-1).
 //!
 //! * **v7 (legacy — decryptors retained for archived ciphertexts).**
 //!   Fixed-width tokens (CVF1 fix). Wire layout same shape, but no
@@ -1877,7 +1879,13 @@ fn zeroize_codepoints(buf: &mut Vec<u32>) {
 // Wire format (FORMAT_STREAM_AE_V8 = 0x02):
 //   HEADER (21 B):     0x02 || be4(F) || nonce(16, CSPRNG)
 //   CHUNK FRAME * C:   be4(F*160) || masked_chunk(F*160) || chunk_tag(32)
-//   SENTINEL (44 B):   be4(0) || be8(total_real_codepoints) || sentinel_tag(32)
+//   SENTINEL (44 B):   be4(0) || be8(total_real_codepoints) XOR count_mask || sentinel_tag(32)
+//
+// CVF-V5-9: chunk tags, the sentinel tag and count_mask all bind the full
+// 21-byte HEADER (format byte, F, nonce), not just the nonce.
+// CVF-V5-1: count_mask = HMAC(sk_fmt, 0x0F || HEADER || be4(C))[:8], so the
+// exact codepoint count is not sent in clear; the chunk count C (that is,
+// ceil(n / F)) remains visible and is the residual length leak.
 //
 // Every chunk i is a self-contained v8 primitive call keyed by
 // (sk_fmt, sub_nonce_i) where
@@ -1907,6 +1915,35 @@ pub const STREAM_AE_V8_MAX_FRAME: u32 = 16_384;
 const DOMAIN_STREAM_V8_CHUNK_TAG: u8 = 0x0C;
 const DOMAIN_STREAM_V8_SENTINEL:  u8 = 0x0D;
 const DOMAIN_STREAM_V8_SUBNONCE:  u8 = 0x0E;
+/// CVF-V5-1: domain of the keystream that masks the sentinel's codepoint count.
+const DOMAIN_STREAM_V8_COUNT_MASK: u8 = 0x0F;
+
+/// The 21-byte stream header `0x02 || be4(F) || nonce`. CVF-V5-9: it is bound
+/// in full into every chunk tag, the sentinel tag and the count mask, so no
+/// header byte (in particular `F` of an empty stream) is malleable.
+fn stream_v8_header(f: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 1 + 4 + NONCE_SIZE] {
+    let mut h = [0u8; 1 + 4 + NONCE_SIZE];
+    h[0] = FORMAT_STREAM_AE_V8;
+    h[1..5].copy_from_slice(&f.to_be_bytes());
+    h[5..].copy_from_slice(nonce);
+    h
+}
+
+/// CVF-V5-1: `HMAC(sk_fmt, 0x0F || header || be4(chunk_count))[:8]`, XORed
+/// onto `be8(total_real_codepoints)` in the sentinel so the exact length is
+/// not sent in clear. Only the chunk count (`ceil(n / F)`) remains visible.
+fn stream_v8_count_mask(
+    sk_fmt: &[u8; 32],
+    f: u32,
+    nonce: &[u8; NONCE_SIZE],
+    chunk_count: u32,
+) -> u64 {
+    let mut buf = Vec::with_capacity(1 + 21 + 4);
+    buf.push(DOMAIN_STREAM_V8_COUNT_MASK);
+    buf.extend_from_slice(&stream_v8_header(f, nonce));
+    buf.extend_from_slice(&chunk_count.to_be_bytes());
+    u64_from_be8(&hmac_digest(sk_fmt, &buf)[..8])
+}
 
 fn derive_stream_v8_sub_nonce(
     sk_fmt: &[u8; 32],
@@ -2049,14 +2086,15 @@ fn decrypt_v8_stream_chunk_core(
 
 fn compute_stream_v8_chunk_tag(
     sk_fmt: &[u8; 32],
+    f: u32,
     nonce: &[u8; NONCE_SIZE],
     chunk_idx: u32,
     aad: &[u8],
     masked_chunk: &[u8],
 ) -> [u8; TAG_SIZE] {
-    let mut buf = Vec::with_capacity(1 + NONCE_SIZE + 4 + AAD_LEN_WIDTH_V8 + aad.len() + masked_chunk.len());
+    let mut buf = Vec::with_capacity(1 + 21 + 4 + AAD_LEN_WIDTH_V8 + aad.len() + masked_chunk.len());
     buf.push(DOMAIN_STREAM_V8_CHUNK_TAG);
-    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(&stream_v8_header(f, nonce)); // CVF-V5-9
     buf.extend_from_slice(&chunk_idx.to_be_bytes());
     buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
@@ -2066,14 +2104,15 @@ fn compute_stream_v8_chunk_tag(
 
 fn compute_stream_v8_sentinel_tag(
     sk_fmt: &[u8; 32],
+    f: u32,
     nonce: &[u8; NONCE_SIZE],
     chunk_count: u32,
     aad: &[u8],
     total_real_cps: u64,
 ) -> [u8; TAG_SIZE] {
-    let mut buf = Vec::with_capacity(1 + NONCE_SIZE + 4 + AAD_LEN_WIDTH_V8 + aad.len() + 8);
+    let mut buf = Vec::with_capacity(1 + 21 + 4 + AAD_LEN_WIDTH_V8 + aad.len() + 8);
     buf.push(DOMAIN_STREAM_V8_SENTINEL);
-    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(&stream_v8_header(f, nonce)); // CVF-V5-9
     buf.extend_from_slice(&chunk_count.to_be_bytes());
     buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
@@ -2104,7 +2143,7 @@ fn emit_stream_v8_chunk(
     let blob = fixed_encode_tokens(&tokens);
     let ks = varint_keystream(sk_fmt, &sub_nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
-    let tag = compute_stream_v8_chunk_tag(sk_fmt, nonce, idx, aad, &masked);
+    let tag = compute_stream_v8_chunk_tag(sk_fmt, codepoints_f.len() as u32, nonce, idx, aad, &masked);
     let mut out = Vec::with_capacity(4 + masked.len() + TAG_SIZE);
     out.extend_from_slice(&(masked.len() as u32).to_be_bytes());
     out.extend_from_slice(&masked);
@@ -2178,9 +2217,10 @@ fn encrypt_stream_ae_v8_inner(
     }
 
     let sentinel_tag = compute_stream_v8_sentinel_tag(
-        sk_fmt, nonce, chunk_idx, aad, total_real_cps);
+        sk_fmt, frame_codepoints, nonce, chunk_idx, aad, total_real_cps);
+    let mask = stream_v8_count_mask(sk_fmt, frame_codepoints, nonce, chunk_idx);
     stream.extend_from_slice(&0u32.to_be_bytes());
-    stream.extend_from_slice(&total_real_cps.to_be_bytes());
+    stream.extend_from_slice(&(total_real_cps ^ mask).to_be_bytes()); // CVF-V5-1
     stream.extend_from_slice(&sentinel_tag);
 
     Ok(stream)
@@ -2288,16 +2328,15 @@ fn decrypt_stream_ae_v8_inner(
         pos += 4;
 
         if chunk_len == 0 {
-            // SENTINEL: be8(total_real_cps) || tag(32)
+            // SENTINEL: be8(total_real_cps XOR count_mask) || tag(32)
             if stream.len() < pos + 8 + TAG_SIZE {
                 return Err("Stream truncated: need sentinel body.".into());
             }
-            let mut tr = [0u8; 8];
-            tr.copy_from_slice(&stream[pos..pos + 8]);
-            let total_real_cps = u64::from_be_bytes(tr);
+            let total_real_cps =
+                u64_from_be8(&stream[pos..pos + 8]) ^ stream_v8_count_mask(sk_fmt, f, &nonce, chunk_idx);
             let recv_tag = &stream[pos + 8..pos + 8 + TAG_SIZE];
             let calc = compute_stream_v8_sentinel_tag(
-                sk_fmt, &nonce, chunk_idx, aad, total_real_cps);
+                sk_fmt, f, &nonce, chunk_idx, aad, total_real_cps);
             if !ct_eq_bytes(recv_tag, calc.as_ref()) {
                 return Err("Authentication failed: invalid v8 stream sentinel tag.".into());
             }
@@ -2352,7 +2391,7 @@ fn decrypt_stream_ae_v8_inner(
         }
         let masked = &stream[pos..pos + chunk_len];
         let recv_tag = &stream[pos + chunk_len..pos + chunk_len + TAG_SIZE];
-        let calc = compute_stream_v8_chunk_tag(sk_fmt, &nonce, chunk_idx, aad, masked);
+        let calc = compute_stream_v8_chunk_tag(sk_fmt, f, &nonce, chunk_idx, aad, masked);
         if !ct_eq_bytes(recv_tag, calc.as_ref()) {
             return Err(format!(
                 "Authentication failed: invalid tag on v8 stream chunk {}.",
@@ -2493,10 +2532,12 @@ impl StreamV8Encryptor {
             out.extend_from_slice(&frame);
             self.chunk_idx += 1;
         }
+        let sk_fmt = Secret32::as_ref(&self.sk_fmt);
         let tag = compute_stream_v8_sentinel_tag(
-            Secret32::as_ref(&self.sk_fmt), &self.nonce, self.chunk_idx, &self.aad, self.total_real_cps);
+            sk_fmt, self.f, &self.nonce, self.chunk_idx, &self.aad, self.total_real_cps);
+        let mask = stream_v8_count_mask(sk_fmt, self.f, &self.nonce, self.chunk_idx);
         out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(&self.total_real_cps.to_be_bytes());
+        out.extend_from_slice(&(self.total_real_cps ^ mask).to_be_bytes()); // CVF-V5-1
         out.extend_from_slice(&tag);
         Ok(out)
     }
@@ -3083,10 +3124,12 @@ mod tests {
 
     fn forge_stream_sentinel(ct: &mut [u8], sk: &[u8; SK_SIZE], aad: &[u8], chunks: u32, total: u64) {
         let n = ct.len();
+        let f = u32::from_be_bytes(ct[1..5].try_into().unwrap());
         let nonce: [u8; NONCE_SIZE] = ct[5..5 + NONCE_SIZE].try_into().unwrap();
         let sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
-        let tag = compute_stream_v8_sentinel_tag(&sk_fmt, &nonce, chunks, aad, total);
-        ct[n - TAG_SIZE - 8..n - TAG_SIZE].copy_from_slice(&total.to_be_bytes());
+        let tag = compute_stream_v8_sentinel_tag(&sk_fmt, f, &nonce, chunks, aad, total);
+        let masked = total ^ stream_v8_count_mask(&sk_fmt, f, &nonce, chunks);
+        ct[n - TAG_SIZE - 8..n - TAG_SIZE].copy_from_slice(&masked.to_be_bytes());
         ct[n - TAG_SIZE..].copy_from_slice(&tag);
     }
 
@@ -3479,11 +3522,35 @@ mod tests {
     fn stream_v8_length_is_function_of_f_only() {
         // Two messages that both land in the "2 chunks" bucket at F=16 must
         // produce ciphertexts of equal length -- the V2-CVF11-for-streaming
-        // invariant.
+        // invariant -- AND (CVF-V5-1) the sentinel must not carry the exact
+        // codepoint count in clear. Under one fixed nonce the two sentinels'
+        // count fields differ only by the masked counts, and neither equals
+        // be8(n).
         let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
-        let a = encrypt_stream_ae_v8(&"A".repeat(17), &primes, &sk, b"", 16).unwrap();
-        let b = encrypt_stream_ae_v8(&"B".repeat(31), &primes, &sk, b"", 16).unwrap();
+        let nonce = [0x42u8; NONCE_SIZE];
+        let a = encrypt_stream_ae_v8_with_nonce(&"A".repeat(17), &primes, &sk, &nonce, b"", 16).unwrap();
+        let b = encrypt_stream_ae_v8_with_nonce(&"B".repeat(31), &primes, &sk, &nonce, b"", 16).unwrap();
         assert_eq!(a.len(), b.len());
+        let count_field = |ct: &[u8]| ct[ct.len() - TAG_SIZE - 8..ct.len() - TAG_SIZE].to_vec();
+        assert_ne!(count_field(&a), 17u64.to_be_bytes().to_vec(), "count sent in clear");
+        assert_ne!(count_field(&b), 31u64.to_be_bytes().to_vec(), "count sent in clear");
+        // Same (header, chunk count) => same mask, so the XOR of the two
+        // fields is exactly 17 ^ 31 and nothing else about n is exposed.
+        let xa = u64_from_be8(&count_field(&a));
+        let xb = u64_from_be8(&count_field(&b));
+        assert_eq!(xa ^ xb, 17 ^ 31);
+        assert_eq!(decrypt_stream_ae_v8(&a, &primes, &sk, b"").unwrap(), "A".repeat(17));
+    }
+
+    // CVF-V5-9: rewriting F in the header of an empty stream is detected.
+    #[test]
+    fn stream_v8_empty_stream_header_is_authenticated() {
+        let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
+        let mut ct = encrypt_stream_ae_v8("", &primes, &sk, b"", 8).unwrap();
+        assert_eq!(decrypt_stream_ae_v8(&ct, &primes, &sk, b"").unwrap(), "");
+        ct[1..5].copy_from_slice(&9u32.to_be_bytes());
+        let err = decrypt_stream_ae_v8(&ct, &primes, &sk, b"").unwrap_err();
+        assert!(err.contains("Authentication failed"), "got: {}", err);
     }
 
     #[test]

@@ -1242,6 +1242,39 @@ char *napqes_decrypt_str(const char *cypher,
 #define NAPQES_DOMAIN_STREAM_V8_CHUNK_TAG 0x0C
 #define NAPQES_DOMAIN_STREAM_V8_SENTINEL  0x0D
 #define NAPQES_DOMAIN_STREAM_V8_SUBNONCE  0x0E
+/* CVF-V5-1: keystream domain masking the sentinel's real-codepoint count. */
+#define NAPQES_DOMAIN_STREAM_V8_COUNT_MASK 0x0F
+
+/* CVF-V5-9: the 21-byte header 0x02 || be4(F) || nonce, bound in full into
+ * every chunk tag, the sentinel tag and the count mask. */
+static void stream_v8_header(uint32_t F, const uint8_t nonce[NAPQES_NONCE_SIZE],
+                             uint8_t out[21]) {
+    out[0] = NAPQES_FORMAT_STREAM_AE_V8;
+    out[1] = (uint8_t)((F >> 24) & 0xFF);
+    out[2] = (uint8_t)((F >> 16) & 0xFF);
+    out[3] = (uint8_t)((F >> 8)  & 0xFF);
+    out[4] = (uint8_t)(F         & 0xFF);
+    memcpy(out + 5, nonce, NAPQES_NONCE_SIZE);
+}
+
+/* CVF-V5-1: HMAC(sk_fmt, 0x0F || header || be4(chunk_count))[:8] as a
+ * big-endian integer, XORed onto the sentinel's real-codepoint count. */
+static uint64_t stream_v8_count_mask(const uint8_t sk_fmt[SHA256_DIGEST_SIZE], uint32_t F,
+                                     const uint8_t nonce[NAPQES_NONCE_SIZE],
+                                     uint32_t chunk_count) {
+    uint8_t msg[1 + 21 + 4];
+    msg[0] = NAPQES_DOMAIN_STREAM_V8_COUNT_MASK;
+    stream_v8_header(F, nonce, msg + 1);
+    msg[22] = (uint8_t)((chunk_count >> 24) & 0xFF);
+    msg[23] = (uint8_t)((chunk_count >> 16) & 0xFF);
+    msg[24] = (uint8_t)((chunk_count >> 8)  & 0xFF);
+    msg[25] = (uint8_t)(chunk_count         & 0xFF);
+    uint8_t d[SHA256_DIGEST_SIZE];
+    hmac_sha256(sk_fmt, SHA256_DIGEST_SIZE, msg, sizeof msg, d);
+    uint64_t m = 0;
+    for (int i = 0; i < 8; ++i) m = (m << 8) | d[i];
+    return m;
+}
 
 /* Domain 0x0E: sub_nonce_i = HMAC(sk_fmt, 0x0E || nonce || be4(i))[:16].
  * Each streaming chunk is a self-contained v8 primitive call keyed by
@@ -1273,9 +1306,10 @@ static uint32_t derive_stream_v8_filler_cp(const uint8_t sk_fmt[SHA256_DIGEST_SI
 }
 
 /* Compute the per-chunk HMAC tag (domain 0x0C).
- * HMAC(sk_fmt, 0x0C || nonce || be4(chunk_idx) || be8(|aad|) || aad
+ * HMAC(sk_fmt, 0x0C || header || be4(chunk_idx) || be8(|aad|) || aad
  *              || masked_chunk). */
 static void compute_stream_v8_chunk_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                        uint32_t F,
                                         const uint8_t nonce[NAPQES_NONCE_SIZE],
                                         uint32_t chunk_idx,
                                         const uint8_t *aad, size_t aad_len,
@@ -1302,8 +1336,10 @@ static void compute_stream_v8_chunk_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE]
     uint8_t inner[SHA256_DIGEST_SIZE];
     sha256_init(&c);
     sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
+    uint8_t header[21];
+    stream_v8_header(F, nonce, header);
     sha256_update(&c, &sep, 1);
-    sha256_update(&c, nonce, NAPQES_NONCE_SIZE);
+    sha256_update(&c, header, sizeof header);  /* CVF-V5-9 */
     sha256_update(&c, idx_be, 4);
     sha256_update(&c, aad_len_be, AAD_LEN_WIDTH_V8);
     if (aad_len) sha256_update(&c, aad, aad_len);
@@ -1316,9 +1352,10 @@ static void compute_stream_v8_chunk_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE]
 }
 
 /* Compute the sentinel HMAC tag (domain 0x0D).
- * HMAC(sk_fmt, 0x0D || nonce || be4(chunk_count) || be8(|aad|) || aad
+ * HMAC(sk_fmt, 0x0D || header || be4(chunk_count) || be8(|aad|) || aad
  *              || be8(total_real_codepoints)). */
 static void compute_stream_v8_sentinel_tag(const uint8_t sk_fmt[SHA256_DIGEST_SIZE],
+                                           uint32_t F,
                                            const uint8_t nonce[NAPQES_NONCE_SIZE],
                                            uint32_t chunk_count,
                                            const uint8_t *aad, size_t aad_len,
@@ -1348,8 +1385,10 @@ static void compute_stream_v8_sentinel_tag(const uint8_t sk_fmt[SHA256_DIGEST_SI
     uint8_t inner[SHA256_DIGEST_SIZE];
     sha256_init(&c);
     sha256_update(&c, ipad, SHA256_BLOCK_SIZE);
+    uint8_t header[21];
+    stream_v8_header(F, nonce, header);
     sha256_update(&c, &sep, 1);
-    sha256_update(&c, nonce, NAPQES_NONCE_SIZE);
+    sha256_update(&c, header, sizeof header);  /* CVF-V5-9 */
     sha256_update(&c, idx_be, 4);
     sha256_update(&c, aad_len_be, AAD_LEN_WIDTH_V8);
     if (aad_len) sha256_update(&c, aad, aad_len);
@@ -1490,7 +1529,7 @@ static uint8_t *emit_stream_v8_chunk(const uint32_t *chunk_cps, uint32_t F, uint
     frame[3] = (uint8_t)(blob_len         & 0xFF);
     memcpy(frame + 4, blob, blob_len);
     uint8_t tag[NAPQES_TAG_SIZE];
-    compute_stream_v8_chunk_tag(sk_fmt, nonce, idx, aad, aad_len, blob, blob_len, tag);
+    compute_stream_v8_chunk_tag(sk_fmt, F, nonce, idx, aad, aad_len, blob, blob_len, tag);
     memcpy(frame + 4 + blob_len, tag, NAPQES_TAG_SIZE);
     free(blob);
     *frame_len = frame_bytes;
@@ -1580,11 +1619,13 @@ static uint8_t *encrypt_stream_v8_impl(const char *message,
 
     /* SENTINEL */
     stream[pos++] = 0; stream[pos++] = 0; stream[pos++] = 0; stream[pos++] = 0;
+    uint64_t masked_total = total_real_cps
+                          ^ stream_v8_count_mask(sk_fmt, F, nonce, chunk_idx);  /* CVF-V5-1 */
     for (int i = 0; i < 8; ++i)
-        stream[pos + 7 - i] = (uint8_t)((total_real_cps >> (i * 8)) & 0xFF);
+        stream[pos + 7 - i] = (uint8_t)((masked_total >> (i * 8)) & 0xFF);
     pos += 8;
     uint8_t sentinel_tag[NAPQES_TAG_SIZE];
-    compute_stream_v8_sentinel_tag(sk_fmt, nonce, chunk_idx, aad, aad_len,
+    compute_stream_v8_sentinel_tag(sk_fmt, F, nonce, chunk_idx, aad, aad_len,
                                    total_real_cps, sentinel_tag);
     memcpy(stream + pos, sentinel_tag, NAPQES_TAG_SIZE);
     pos += NAPQES_TAG_SIZE;
@@ -1653,9 +1694,10 @@ char *napqes_decrypt_stream_ae_v8_bytes(const uint8_t *stream, size_t stream_len
     if (sentinel[0] || sentinel[1] || sentinel[2] || sentinel[3]) return NULL;
     uint64_t total_real_cps = 0;
     for (int i = 0; i < 8; ++i) total_real_cps = (total_real_cps << 8) | sentinel[4 + i];
+    total_real_cps ^= stream_v8_count_mask(sk_fmt, F, nonce, (uint32_t)n_chunks);  /* CVF-V5-1 */
     const uint8_t *recv_sentinel_tag = sentinel + 12;
     uint8_t calc_sentinel_tag[NAPQES_TAG_SIZE];
-    compute_stream_v8_sentinel_tag(sk_fmt, nonce, (uint32_t)n_chunks, aad, aad_len,
+    compute_stream_v8_sentinel_tag(sk_fmt, F, nonce, (uint32_t)n_chunks, aad, aad_len,
                                    total_real_cps, calc_sentinel_tag);
     if (!constant_time_eq(recv_sentinel_tag, calc_sentinel_tag, NAPQES_TAG_SIZE)) return NULL;
 
@@ -1683,7 +1725,7 @@ char *napqes_decrypt_stream_ae_v8_bytes(const uint8_t *stream, size_t stream_len
         const uint8_t *masked = frame + 4;
         const uint8_t *recv_tag = frame + 4 + body_len;
         uint8_t calc_tag[NAPQES_TAG_SIZE];
-        compute_stream_v8_chunk_tag(sk_fmt, nonce, (uint32_t)i, aad, aad_len,
+        compute_stream_v8_chunk_tag(sk_fmt, F, nonce, (uint32_t)i, aad, aad_len,
                                     masked, body_len, calc_tag);
         if (!constant_time_eq(recv_tag, calc_tag, NAPQES_TAG_SIZE)) {
             free(plain); return NULL;

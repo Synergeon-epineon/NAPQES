@@ -75,7 +75,7 @@ fn corpus_sizes_are_pinned() {
     let stream = load_v8_stream_vectors();
     assert_eq!(
         (stream.len(), count(&stream, "positive"), count(&stream, "negative")),
-        (14, 11, 3)
+        (15, 11, 4)
     );
 }
 

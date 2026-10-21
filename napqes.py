@@ -1821,14 +1821,16 @@ def decrypt_stream_ae(
 #   CHUNK FRAME x C  (each 4 + F*160 + 32 bytes; fixed size)
 #     be4(F*160)                  # masked_chunk length (constant per stream)
 #     masked_chunk (F*160 B)      # F*20 fixed-width 8-byte tokens, XOR keystream
-#     chunk_tag_i (32 B)          # HMAC over 0x0C || nonce || be4(i)
+#     chunk_tag_i (32 B)          # HMAC over 0x0C || HEADER || be4(i)
 #                                 #        || be8(|aad|) || aad || masked_chunk
 #
 #   SENTINEL (44 B)
 #     be4(0)                      # length discriminator
 #     be8(total_real_codepoints)  # true real-codepoint count (used to strip
-#                                 # filler codepoints from the final chunk)
-#     sentinel_tag (32 B)         # HMAC over 0x0D || nonce || be4(C)
+#       XOR count_mask            # filler codepoints from the final chunk),
+#                                 # masked with HMAC(sk_fmt, 0x0F || HEADER
+#                                 # || be4(C))[:8] (CVF-V5-1)
+#     sentinel_tag (32 B)         # HMAC over 0x0D || HEADER || be4(C)
 #                                 #        || be8(|aad|) || aad
 #                                 #        || be8(total_real_codepoints)
 #
@@ -1868,6 +1870,23 @@ _STREAM_AE_V8_MAX_FRAME = 16384
 _DOMAIN_STREAM_V8_CHUNK_TAG = 0x0C
 _DOMAIN_STREAM_V8_SENTINEL  = 0x0D
 _DOMAIN_STREAM_V8_SUBNONCE  = 0x0E
+#: CVF-V5-1: keystream domain masking the sentinel's real-codepoint count.
+_DOMAIN_STREAM_V8_COUNT_MASK = 0x0F
+
+
+def _stream_v8_header(F: int, nonce: bytes) -> bytes:
+    """The 21-byte header ``0x02 || be4(F) || nonce``, bound in full into
+    every chunk tag, the sentinel tag and the count mask (CVF-V5-9)."""
+    return bytes([FORMAT_STREAM_AE_V8]) + F.to_bytes(4, 'big') + nonce
+
+
+def _stream_v8_count_mask(sk_fmt: bytes, F: int, nonce: bytes,
+                          chunk_count: int) -> int:
+    """CVF-V5-1: ``HMAC(sk_fmt, 0x0F || header || be4(C))[:8]`` as an integer,
+    XORed onto ``be8(total_real_codepoints)`` in the sentinel."""
+    msg = (bytes([_DOMAIN_STREAM_V8_COUNT_MASK]) + _stream_v8_header(F, nonce)
+           + chunk_count.to_bytes(4, 'big'))
+    return int.from_bytes(hmac.new(sk_fmt, msg, hashlib.sha256).digest()[:8], 'big')
 
 
 def _derive_stream_v8_sub_nonce(sk_fmt: bytes, nonce: bytes,
@@ -2004,34 +2023,35 @@ def _decrypt_v8_stream_chunk_core(chunk_tokens: list[int],
     return codepoints
 
 
-def _compute_stream_v8_chunk_tag(sk_fmt: bytes, nonce: bytes, chunk_idx: int,
-                                 aad: bytes, masked_chunk: bytes) -> bytes:
+def _compute_stream_v8_chunk_tag(sk_fmt: bytes, F: int, nonce: bytes,
+                                 chunk_idx: int, aad: bytes,
+                                 masked_chunk: bytes) -> bytes:
     """Domain ``0x0C``: per-chunk HMAC tag for v8 streaming.
 
-    ``HMAC(sk_fmt, 0x0C || nonce || be4(chunk_idx) || be8(|aad|) || aad
+    ``HMAC(sk_fmt, 0x0C || header || be4(chunk_idx) || be8(|aad|) || aad
                  || masked_chunk)``.  The 8-byte AAD length prefix matches
     v8 block mode's TagIn width (audit finding CVF1) and diverges from v7
     stream_ae's 4-byte prefix -- reusing 0x08 would repeat CVF2's
     domain-separation defect on top of two different serialisations.
     """
     aad_len8 = len(aad).to_bytes(_AAD_LEN_WIDTH_V8, 'big')
-    msg = (bytes([_DOMAIN_STREAM_V8_CHUNK_TAG]) + nonce
+    msg = (bytes([_DOMAIN_STREAM_V8_CHUNK_TAG]) + _stream_v8_header(F, nonce)
            + chunk_idx.to_bytes(4, 'big') + aad_len8 + aad + masked_chunk)
     return hmac.new(sk_fmt, msg, hashlib.sha256).digest()
 
 
-def _compute_stream_v8_sentinel_tag(sk_fmt: bytes, nonce: bytes,
+def _compute_stream_v8_sentinel_tag(sk_fmt: bytes, F: int, nonce: bytes,
                                     chunk_count: int, aad: bytes,
                                     total_real_cps: int) -> bytes:
     """Domain ``0x0D``: sentinel HMAC tag for v8 streaming.
 
-    ``HMAC(sk_fmt, 0x0D || nonce || be4(chunk_count) || be8(|aad|) || aad
+    ``HMAC(sk_fmt, 0x0D || header || be4(chunk_count) || be8(|aad|) || aad
                  || be8(total_real_codepoints))``.  Binds *both* the chunk
     count (anti-truncation) and the real-codepoint count (so the decoder
     can strip the correct number of filler codepoints from the last chunk).
     """
     aad_len8 = len(aad).to_bytes(_AAD_LEN_WIDTH_V8, 'big')
-    msg = (bytes([_DOMAIN_STREAM_V8_SENTINEL]) + nonce
+    msg = (bytes([_DOMAIN_STREAM_V8_SENTINEL]) + _stream_v8_header(F, nonce)
            + chunk_count.to_bytes(4, 'big') + aad_len8 + aad
            + total_real_cps.to_bytes(8, 'big'))
     return hmac.new(sk_fmt, msg, hashlib.sha256).digest()
@@ -2095,7 +2115,7 @@ def _encrypt_stream_ae_v8_with_nonce(
         ks = _varint_keystream(sk_fmt, sub_nonce, len(blob))
         masked = bytes(a ^ b for a, b in zip(blob, ks))
         tag = _compute_stream_v8_chunk_tag(
-            sk_fmt, nonce, idx, aad, masked)
+            sk_fmt, F, nonce, idx, aad, masked)
         return len(masked).to_bytes(4, 'big') + masked + tag
 
     for char in plaintext:
@@ -2125,9 +2145,10 @@ def _encrypt_stream_ae_v8_with_nonce(
 
     # SENTINEL -- binds both chunk_count and total_real_codepoints.
     sentinel_tag = _compute_stream_v8_sentinel_tag(
-        sk_fmt, nonce, chunk_idx, aad, total_real_cps)
+        sk_fmt, F, nonce, chunk_idx, aad, total_real_cps)
+    mask = _stream_v8_count_mask(sk_fmt, F, nonce, chunk_idx)
     yield ((0).to_bytes(4, 'big')
-           + total_real_cps.to_bytes(8, 'big')
+           + (total_real_cps ^ mask).to_bytes(8, 'big')   # CVF-V5-1
            + sentinel_tag)
 
 
@@ -2231,9 +2252,10 @@ def decrypt_stream_ae_v8(
             # SENTINEL: be4(0) || be8(total_real_cps) || sentinel_tag
             total_real_bytes = _read_n(8)
             recv_tag = _read_n(_TAG_SIZE)
-            total_real_cps = int.from_bytes(total_real_bytes, 'big')
+            total_real_cps = (int.from_bytes(total_real_bytes, 'big')
+                              ^ _stream_v8_count_mask(sk_fmt, F, nonce, chunk_idx))
             expected_tag = _compute_stream_v8_sentinel_tag(
-                sk_fmt, nonce, chunk_idx, aad, total_real_cps)
+                sk_fmt, F, nonce, chunk_idx, aad, total_real_cps)
             if not hmac.compare_digest(recv_tag, expected_tag):
                 raise ValueError(
                     "Authentication failed: invalid v8 stream sentinel tag."
@@ -2275,7 +2297,7 @@ def decrypt_stream_ae_v8(
         recv_chunk_tag = _read_n(_TAG_SIZE)
 
         expected_chunk_tag = _compute_stream_v8_chunk_tag(
-            sk_fmt, nonce, chunk_idx, aad, masked_chunk)
+            sk_fmt, F, nonce, chunk_idx, aad, masked_chunk)
         if not hmac.compare_digest(recv_chunk_tag, expected_chunk_tag):
             raise ValueError(
                 f"Authentication failed: invalid tag on v8 stream chunk "
