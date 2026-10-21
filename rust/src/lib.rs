@@ -2263,8 +2263,10 @@ fn next_stream_chunk_idx(chunk_idx: u32) -> Result<u32, String> {
 ///
 /// Convenience "all-at-once" API: consumes the entire plaintext and returns
 /// the fully framed byte stream in one call. Uses a CSPRNG-drawn 16-byte
-/// nonce (with the FIPS CRNG self-test). For chunk-at-a-time production use
-/// [`StreamV8Encryptor`].
+/// nonce (with the FIPS CRNG self-test), not a synthetic one, so it is not
+/// misuse-resistant even though it holds the whole message (CVF-V5-10); a
+/// synthetic stream nonce would need its own analysis and is not offered.
+/// For chunk-at-a-time production use [`StreamV8Encryptor`].
 ///
 /// `frame_codepoints` (F) sets the per-chunk real-codepoint capacity: each
 /// chunk carries exactly F codepoint slots (partial last chunk padded with
@@ -2291,10 +2293,19 @@ pub fn encrypt_stream_ae_v8(
 
 /// v8 streaming-AE decryption -- consumes the full ciphertext byte stream.
 ///
-/// Convenience "all-at-once" API. Each per-chunk tag is verified before that
-/// chunk's plaintext contributes to the output; the sentinel binds the
-/// chunk count (anti-truncation) and the true real-codepoint count (used to
-/// strip filler codepoints from the last chunk).
+/// **Not incremental (CVF-V5-10).** Rust streaming is incremental on the
+/// encrypt side only ([`StreamV8Encryptor`]). This decryptor needs the
+/// complete stream in memory — about 160 bytes per plaintext codepoint plus
+/// 36 bytes per chunk — and returns nothing until every chunk tag and the
+/// sentinel have verified, so it never releases unverified plaintext. A
+/// receiver that cannot hold the whole stream must not use this format. The
+/// Python port's generator is incremental and releases chunks before the
+/// sentinel (CAV-001); the two ports share the wire format, not the release
+/// semantics.
+///
+/// Each per-chunk tag is verified before that chunk is decoded; the sentinel
+/// binds the chunk count (anti-truncation) and the true real-codepoint count
+/// (used to strip filler codepoints from the last chunk).
 #[cfg(any(test, feature = "experimental-stream"))]
 pub fn decrypt_stream_ae_v8(
     stream: &[u8],

@@ -111,6 +111,13 @@ buf.extend_from_slice(&enc.finish().unwrap());
   returns any plaintext. A decryptor that releases chunk *i* as soon as its
   tag verifies (as the Python generator does) releases plaintext before
   truncation can be detected at the sentinel — see CAV-001.
+* **Rust streaming is incremental on the encrypt side only (CVF-V5-10).**
+  `StreamV8Encryptor` emits chunks as they fill; `decrypt_stream_ae_v8`
+  takes the complete stream (about 160 bytes per codepoint) and returns
+  only after the sentinel verifies. There is no incremental Rust
+  decryptor. The all-at-once `encrypt_stream_ae_v8` still draws a random
+  nonce; for messages up to 65,535 codepoints use the misuse-resistant
+  block API instead.
 
 ## Power-on self-tests (FIPS 140-3)
 
