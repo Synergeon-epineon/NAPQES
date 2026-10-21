@@ -7,6 +7,19 @@ on:
     branches: ["main", "dev"]
 
 jobs:
+  # CVF-V5-15: block commits that embed key material (prime tuples, sk).
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
   lint-and-test:
     name: Lint & Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

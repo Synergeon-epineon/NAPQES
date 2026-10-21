@@ -1218,6 +1218,32 @@ serialisation. Previously the Rust and C ports would silently truncate such
 an element to its low 5 bytes, producing a different key than Python
 (which raised); the three implementations now agree on every accepted key.
 
+## CVF-V5-15 — A 13-prime key tuple was committed in `meta.json` (compromised)
+
+| Field | Value |
+|---|---|
+| **ID** | CVF-V5-15 (audit round 5) |
+| **Category** | Key management / secret hygiene |
+| **Severity** | Moderate (operational) |
+| **Affects** | The tuple formerly in `meta.json` at the repository root, commits `fa246a8`..`f6ced5d` |
+| **Status** | **Fixed** — file purged from history, tuple declared compromised |
+
+**Description.** Commit `fa246a8` added a demo `meta.json` that carried a
+complete 13-prime key tuple. The file has been removed from every commit with
+`git filter-repo --path meta.json --invert-paths`; the audited commit
+`f6ced5d` is now `acbf9d0`, whose tree differs from `f6ced5d` only by the
+absence of `meta.json`. The original history is archived offline and is not
+published.
+
+**Required action.** Treat the tuple as **compromised**: it must never be
+provisioned, and any deployment that used it must rekey (new primes and a
+new `sk`). Any clone made before the purge still contains the file and must
+be re-cloned.
+
+**Prevention.** `meta.json` and `*.key.json` are in `.gitignore`, and CI
+runs gitleaks (`.gitleaks.toml`) with a NAPQES prime-tuple rule and an `sk`
+hex rule on every push and pull request.
+
 ## HYBRID-KEM — Key establishment hybridised with X25519
 
 | Field | Value |

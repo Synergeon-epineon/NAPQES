@@ -1,0 +1,30 @@
+# CVF-V5-15: secret scanning. Extends the gitleaks default rule set with a rule
+# for NAPQES prime-tuple keys, which the default rules do not recognise.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "napqes-prime-tuple"
+description = "NAPQES key prime tuple (key_primes / primes array of >= 8 integers in [1e6, 2^40))"
+regex = '''(?i)"?(key_primes|primes|prime_tuple)"?\s*[:=]\s*\[\s*(\d{7,13}\s*,\s*){7,}\d{7,13}\s*\]'''
+keywords = ["key_primes", "primes", "prime_tuple"]
+
+[[rules]]
+id = "napqes-sk-hex"
+description = "NAPQES 256-bit sk as a hex literal assigned to sk/sk_hex"
+regex = '''(?i)"?(sk|sk_hex|secret_key)"?\s*[:=]\s*"[0-9a-f]{64}"'''
+keywords = ["sk", "secret_key"]
+
+[allowlist]
+description = "Published test vectors and fuzz fixtures use public, non-provisioned keys"
+paths = [
+  '''tests/kat/.*''',
+  '''rust/fuzz/.*''',
+  '''rust/src/.*''',
+  '''C/.*''',
+  '''tests/.*\.py''',
+  '''napqes\.py''',
+  '''napqes_kem\.py''',
+  '''docs/.*''',
+  '''SPEC\.md''',
+]
