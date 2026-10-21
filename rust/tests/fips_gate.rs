@@ -40,8 +40,11 @@ fn assert_all_refused() {
         "encrypt_bytes_v8_with_profile_key",
         encrypt_bytes_v8_with_profile_key("m", &key, b"", PadProfile::Bucket),
     );
+    #[cfg(feature = "experimental-stream")]
     refused("encrypt_stream_ae_v8", encrypt_stream_ae_v8("m", PRIMES, &SK, b"", 16));
+    #[cfg(feature = "experimental-stream")]
     refused("decrypt_stream_ae_v8", decrypt_stream_ae_v8(&[0u8; 64], PRIMES, &SK, b""));
+    #[cfg(feature = "experimental-stream")]
     refused("StreamV8Encryptor::new", StreamV8Encryptor::new(PRIMES, &SK, b"", 16));
     #[cfg(feature = "legacy-v7")]
     refused("encrypt", encrypt(&[0x41], PRIMES));

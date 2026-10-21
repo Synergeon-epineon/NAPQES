@@ -59,16 +59,22 @@ zeroize_sk(&mut sk);
 
 ```text
 v8 block:    nonce(16) || masked_blob(fixed-width tokens) || tag(32)
-v8 streaming:                                        (see below)
+v8 streaming: 0x02 || be4(F) || nonce(16) || chunks || sentinel  (see below)
 ```
 
-The ciphertext carries no format identifier — format selection is an
-out-of-band API contract. A v7 ciphertext handed to `decrypt_bytes_v8`
-fails the tag check like any wrong-key ciphertext, and vice versa.
+A v8 **block** ciphertext carries no format identifier — format selection is
+an out-of-band API contract. A v7 ciphertext handed to `decrypt_bytes_v8`
+fails the tag check like any wrong-key ciphertext, and vice versa. A v8
+**stream** starts with the format byte `0x02` (CVF-V5-2).
 
-## Streaming AE (v8)
+## Streaming AE (v8) — experimental
 
-```rust
+**Compiled only with `--features experimental-stream` (CVF-V5-2).** The
+streaming format has no security definition or proof in the paper and is
+outside the audited claims; do not treat it as part of the normative v8
+surface. Its byte-level specification is `SPEC.md` §8.2.
+
+```rust,ignore
 use napqes::{
     generate_v8_key, encrypt_stream_ae_v8, decrypt_stream_ae_v8,
     StreamV8Encryptor,
@@ -92,11 +98,19 @@ for c in "chunk-by-chunk".chars() {
 buf.extend_from_slice(&enc.finish().unwrap());
 ```
 
-**Streaming caveat.** v8 streaming is NOT misuse-resistant — the 16-byte
-per-stream nonce is CSPRNG-drawn, not SIV-derived. Nonce reuse under the
-same `sk` is a CVF-3-class hazard. See `docs/CAVEATS.md` CAV-005. For
-messages that fit in memory, prefer the SIV-protected block API
-(`encrypt_bytes_v8` / `decrypt_bytes_v8`).
+**Streaming caveats.**
+
+* NOT misuse-resistant — the 16-byte per-stream nonce is CSPRNG-drawn, not
+  SIV-derived. Nonce reuse under the same `sk` is a CVF-3-class hazard. The
+  per-key data limit counts **chunks**, not streams (`docs/CAVEATS.md`
+  CAV-005). For messages that fit in memory, prefer the SIV-protected block
+  API (`encrypt_bytes_v8` / `decrypt_bytes_v8`).
+* Length: the exact codepoint count is masked (CVF-V5-1), but the chunk
+  count `ceil(n / F)` is visible.
+* The Rust decryptor verifies every chunk tag and the sentinel before it
+  returns any plaintext. A decryptor that releases chunk *i* as soon as its
+  tag verifies (as the Python generator does) releases plaintext before
+  truncation can be detected at the sentinel — see CAV-001.
 
 ## Power-on self-tests (FIPS 140-3)
 
@@ -136,8 +150,11 @@ binaries and examples run POST at start-up.
 `NapqesKey` with `encrypt_bytes_v8_key`, `decrypt_bytes_v8_key`,
 `encrypt_bytes_v8_with_profile_key` (validates once, wipes on drop);
 `encrypt_bytes_v8`, `encrypt_bytes_v8_with_profile`, `decrypt_bytes_v8`,
-`encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`, `StreamV8Encryptor`,
 `generate_v8_key`, `zeroize_key`, `zeroize_sk`.
+
+**Experimental (`--features experimental-stream`, outside the audited
+claims):** `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`,
+`StreamV8Encryptor`.
 
 **Key-generation helpers:** `generate_prime_numbers`, `is_prime`.
 

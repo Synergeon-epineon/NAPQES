@@ -85,6 +85,11 @@ jobs:
         working-directory: rust/
         run: cargo build --release
 
+      # CVF-V5-2 / CVF-V5-4: the feature-gated surfaces must keep compiling.
+      - name: Cargo build (experimental-stream, legacy-v7)
+        working-directory: rust/
+        run: cargo build --release --all-targets --features experimental-stream,legacy-v7
+
       - name: Cargo test (includes KAT stubs)
         working-directory: rust/
         run: cargo test --release -- --nocapture

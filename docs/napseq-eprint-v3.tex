@@ -72,9 +72,11 @@ $\texttt{0x0B}$; format $\texttt{0x01}$ for the block mode specified in
 this paper, Section~\ref{sec:domains}), and every subsequent HMAC domain
 derivation used for noise injection, plaintext padding, keystream
 masking, message authentication, and synthetic-nonce derivation is keyed
-by $\mathsf{sk}_{\mathrm{fmt}}$. This layer binds every derivation to
+by $\mathsf{sk}_{\mathrm{fmt}}$. This layer is designed to bind every derivation to
 one wire format so that a tag produced under one format cannot verify
-under another sharing the same $(\mathbf{k},\mathsf{sk})$. The nonce is
+under another sharing the same $(\mathbf{k},\mathsf{sk})$; this paper
+specifies and proves only the block format, and the separation from the
+experimental streaming format is not proved (Section~\ref{sec:domains}). The nonce is
 derived synthetically as
 $N=\mathrm{HMAC}(\mathsf{sk}_{\mathrm{fmt}},\texttt{0x0A}\|\mathrm{be8}(|A|)\|A\|M)[0{:}16]$,
 in
@@ -437,10 +439,16 @@ $\texttt{0x0B}$:
 where $\mathrm{format\_id}\in\{0,1\}^{8}$ is a 1-byte constant
 identifying the wire format. This paper specifies exactly one format,
 $\mathrm{format\_id}=\texttt{0x01}$ (block mode). The identifier
-$\mathrm{format\_id}=\texttt{0x02}$ is reserved for a streaming-AE
-format that is outside the scope of this paper
-(Section~\ref{sec:caveats}); its wire format is specified in
-\texttt{SPEC.md} \S 8.2. Domain $\texttt{0x0B}$ takes no nonce and
+$\mathrm{format\_id}=\texttt{0x02}$ is reserved for an experimental
+streaming-AE format that is outside the scope of this paper: it has no
+security definition or proof here, the format-subkey separation between
+$\texttt{0x01}$ and $\texttt{0x02}$ is asserted but not proved (the games
+of Section~\ref{sec:security} query the format subkey for $\texttt{0x01}$
+only), and its release-of-unverified-plaintext and per-key chunk-count
+caveats are recorded in \texttt{docs/CAVEATS.md} (CAV-001, CAV-005). Its
+wire format is specified byte for byte in \texttt{SPEC.md} \S 8.2, and
+unlike the block format a stream begins with the byte $\texttt{0x02}$
+(CVF-V5-2). Domain $\texttt{0x0B}$ takes no nonce and
 no context beyond the 1-byte identifier; the derivation need only be
 invoked once per key install, not per message (an implementation may
 equally recompute it per call, with identical output).
@@ -453,7 +461,8 @@ $(\mathbf{k},\mathsf{sk})$. The ciphertext itself carries no
 $\mathrm{format\_id}$ byte on the wire — format selection is an
 out-of-band API contract — so a ciphertext produced under one format
 subkey simply fails the tag comparison at the receiver and is
-indistinguishable from a wrong-key ciphertext.
+indistinguishable from a wrong-key ciphertext. (This describes the block
+format; an experimental stream starts with its $\texttt{0x02}$ byte.)
 
 \paragraph{Per-message derivations.}
 All \emph{other} internal values are computed as
@@ -501,15 +510,25 @@ Domain & Function & Context & Output \\
 \texttt{0x07} & Keystream block & $\mathrm{be4}(block\_idx)$ & 32-byte block \\
 \texttt{0x0A} & Synthetic nonce & $\mathrm{be8}(|A|) \| A \| M$ & 16 bytes \\
 \texttt{0x0B} & Format subkey & $\mathrm{format\_id}$ (1 byte, no nonce) & 32 bytes \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Experimental streaming format only ($\mathrm{format\_id}=\texttt{0x02}$, \texttt{SPEC.md} \S 8.2; not covered by any theorem):}} \\
+\texttt{0x0C} & Stream chunk tag & $H\|\mathrm{be4}(i)\|\mathrm{be8}(|A|)\|A\|\widetilde{B}_i$ & 32 bytes \\
+\texttt{0x0D} & Stream sentinel tag & $H\|\mathrm{be4}(C)\|\mathrm{be8}(|A|)\|A\|\mathrm{be8}(n)$ & 32 bytes \\
+\texttt{0x0E} & Stream sub-nonce & $N\|\mathrm{be4}(i)$ & 16 bytes \\
+\texttt{0x0F} & Stream count mask & $H\|\mathrm{be4}(C)$ & 8 bytes \\
 \bottomrule
 \end{tabular}
 \caption{Domain-separated HMAC derivation schedule. Domain
 $\texttt{0x0B}$ is keyed by $\mathsf{sk}$ and produces the format subkey
 $\mathsf{sk}_{\mathrm{fmt}}$ (Definition~\ref{def:fmtkey}); every other
 domain is keyed by $\mathsf{sk}_{\mathrm{fmt}}$, not by $\mathsf{sk}$
-directly. The nonce $N$ is applied uniformly by $\mathrm{Derive}_d$ for
+directly. In the streaming rows (CVF-V5-2) $H=\texttt{0x02}\|\mathrm{be4}(F)\|N$
+is the 21-byte stream header, which replaces the bare nonce, $i$ is the
+0-based chunk index, $C$ the chunk count and $n$ the real-codepoint count;
+the streaming format reuses domains $\texttt{0x00}$--$\texttt{0x02}$ and
+$\texttt{0x04}$--$\texttt{0x07}$ under the per-chunk sub-nonce. The nonce $N$ is applied uniformly by $\mathrm{Derive}_d$ for
 $d\notin\{\texttt{0x0A},\texttt{0x0B}\}$ and is therefore omitted from
-the Context column above. In rows $\texttt{0x01}$ and $\texttt{0x05}$,
+the Context column above for the block-format rows. In rows $\texttt{0x01}$ and $\texttt{0x05}$,
 $k=k_{(real\_idx \bmod K)+1}$ is the key element selected by the
 real-token counter; for $\texttt{0x05}$ this holds even though the context
 is $\mathrm{be5}(ct\_pos)$, so the noise tokens of a run use the key

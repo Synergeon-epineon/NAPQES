@@ -102,6 +102,7 @@ fn admit(state: u8, in_post: bool) -> Result<(), SelfTestError> {
 /// self-test failure such as the continuous RNG test. FAILED is sticky: no
 /// later call to [`run_power_on_self_tests`] clears it, so the module stays
 /// non-operational until the process restarts.
+#[cfg_attr(not(any(test, feature = "legacy-v7", feature = "experimental-stream")), allow(dead_code))]
 pub(crate) fn enter_error_state() {
     let _lock = lock_post();
     POST_STATE.store(POST_FAILED, Ordering::Release);

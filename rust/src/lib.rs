@@ -77,7 +77,6 @@ use hmac::{Hmac, Mac};
 use key::Secret32;
 use rand::RngCore;
 use sha2::Sha256;
-use std::sync::Mutex;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -104,10 +103,12 @@ fn check_v7_aad_len(aad_len: usize) -> Result<(), String> {
 
 // ─── CRNG conditional self-test ──────────────────────────────────────────────
 
-static PREV_NONCE: Mutex<Option<[u8; NONCE_SIZE]>> = Mutex::new(None);
+#[cfg(any(test, feature = "legacy-v7", feature = "experimental-stream"))]
+static PREV_NONCE: std::sync::Mutex<Option<[u8; NONCE_SIZE]>> = std::sync::Mutex::new(None);
 
 /// Generate a cryptographically random 16-byte nonce, verifying it differs
 /// from the previous one (FIPS 140-3 continuous RNG test, SP 800-140B §4.9.2).
+#[cfg(any(test, feature = "legacy-v7", feature = "experimental-stream"))]
 fn generate_nonce_with_crng_check() -> Result<[u8; NONCE_SIZE], String> {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -1865,6 +1866,7 @@ pub fn zeroize_key(key: &mut [u64]) {
 /// Wipe a plaintext codepoint buffer over its whole capacity (live elements
 /// and the spare capacity left by earlier `clear`/`drain` calls), then
 /// empty it (CVF-V5-11).
+#[cfg(any(test, feature = "experimental-stream"))]
 fn zeroize_codepoints(buf: &mut Vec<u32>) {
     let cap = buf.capacity();
     buf.resize(cap, 0);
@@ -1874,7 +1876,12 @@ fn zeroize_codepoints(buf: &mut Vec<u32>) {
     buf.clear();
 }
 
-// --- Streaming AE v8 (misuse-resistant primitives, streaming nonce) -----------
+// --- Streaming AE v8 (EXPERIMENTAL, feature `experimental-stream`) -----------
+//
+// CVF-V5-2: this format has no security definition or proof in the paper and
+// is outside the audited claims. It is NOT misuse-resistant: the per-stream
+// nonce is drawn from a CSPRNG (no synthetic nonce), so nonce reuse under one
+// sk is catastrophic. Full byte-level specification: SPEC.md section 8.2.
 //
 // Wire format (FORMAT_STREAM_AE_V8 = 0x02):
 //   HEADER (21 B):     0x02 || be4(F) || nonce(16, CSPRNG)
@@ -1912,15 +1919,20 @@ pub const STREAM_AE_V8_DEFAULT_FRAME: u32 = 128;
 /// Hard upper bound on F. Keeps a chunk under ~3 MB and be4-representable.
 pub const STREAM_AE_V8_MAX_FRAME: u32 = 16_384;
 
+#[cfg(any(test, feature = "experimental-stream"))]
 const DOMAIN_STREAM_V8_CHUNK_TAG: u8 = 0x0C;
+#[cfg(any(test, feature = "experimental-stream"))]
 const DOMAIN_STREAM_V8_SENTINEL:  u8 = 0x0D;
+#[cfg(any(test, feature = "experimental-stream"))]
 const DOMAIN_STREAM_V8_SUBNONCE:  u8 = 0x0E;
 /// CVF-V5-1: domain of the keystream that masks the sentinel's codepoint count.
+#[cfg(any(test, feature = "experimental-stream"))]
 const DOMAIN_STREAM_V8_COUNT_MASK: u8 = 0x0F;
 
 /// The 21-byte stream header `0x02 || be4(F) || nonce`. CVF-V5-9: it is bound
 /// in full into every chunk tag, the sentinel tag and the count mask, so no
 /// header byte (in particular `F` of an empty stream) is malleable.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn stream_v8_header(f: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 1 + 4 + NONCE_SIZE] {
     let mut h = [0u8; 1 + 4 + NONCE_SIZE];
     h[0] = FORMAT_STREAM_AE_V8;
@@ -1932,6 +1944,7 @@ fn stream_v8_header(f: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 1 + 4 + NONCE_SIZE
 /// CVF-V5-1: `HMAC(sk_fmt, 0x0F || header || be4(chunk_count))[:8]`, XORed
 /// onto `be8(total_real_codepoints)` in the sentinel so the exact length is
 /// not sent in clear. Only the chunk count (`ceil(n / F)`) remains visible.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn stream_v8_count_mask(
     sk_fmt: &[u8; 32],
     f: u32,
@@ -1945,6 +1958,7 @@ fn stream_v8_count_mask(
     u64_from_be8(&hmac_digest(sk_fmt, &buf)[..8])
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn derive_stream_v8_sub_nonce(
     sk_fmt: &[u8; 32],
     nonce: &[u8; NONCE_SIZE],
@@ -1963,6 +1977,7 @@ fn derive_stream_v8_sub_nonce(
 /// Domain 0x06: derive a filler codepoint for the final partial chunk.
 /// Deterministic in (sk_fmt, sub_nonce, fill_idx); indistinguishable on the
 /// wire from real codepoints once passed through `c * k + addend`.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn derive_stream_v8_filler_cp(
     sk_fmt: &[u8; 32],
     sub_nonce: &[u8; NONCE_SIZE],
@@ -1980,6 +1995,7 @@ fn derive_stream_v8_filler_cp(
 }
 
 /// Encode exactly F * (MAX_NOISE_RUN + 1) tokens for one streaming chunk.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn encrypt_v8_stream_chunk_core(
     chunk_cps: &[u32],
     primes: &[u64],
@@ -2035,6 +2051,7 @@ fn noise_token(kb: &[u8], nonce: &[u8], ct_pos: u64, k: u64) -> u64 {
 }
 
 /// Recover exactly F codepoints from a streaming chunk's token stream.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn decrypt_v8_stream_chunk_core(
     chunk_tokens: &[u64],
     primes: &[u64],
@@ -2084,6 +2101,7 @@ fn decrypt_v8_stream_chunk_core(
     Ok(codepoints)
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn compute_stream_v8_chunk_tag(
     sk_fmt: &[u8; 32],
     f: u32,
@@ -2102,6 +2120,7 @@ fn compute_stream_v8_chunk_tag(
     hmac_digest(sk_fmt, &buf)
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn compute_stream_v8_sentinel_tag(
     sk_fmt: &[u8; 32],
     f: u32,
@@ -2120,6 +2139,7 @@ fn compute_stream_v8_sentinel_tag(
     hmac_digest(sk_fmt, &buf)
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn validate_stream_v8_frame(f: u32) -> Result<(), String> {
     if f < 1 || f > STREAM_AE_V8_MAX_FRAME {
         return Err(format!(
@@ -2130,6 +2150,7 @@ fn validate_stream_v8_frame(f: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn emit_stream_v8_chunk(
     codepoints_f: &[u32],
     idx: u32,
@@ -2153,10 +2174,13 @@ fn emit_stream_v8_chunk(
 
 /// Deterministic v8 streaming encryption with caller-supplied nonce.
 ///
-/// **Test-only.** Used by `kat_cross_check::stream_v8_*` to compare byte
-/// output against the Python KAT vectors. Production callers must draw the
-/// nonce from a CSPRNG per stream (CAV-005) -- reusing a nonce across two
-/// streams under the same sk is catastrophic.
+/// The core of [`encrypt_stream_ae_v8`], which calls it with a fresh CSPRNG
+/// nonce, and of the KAT harness (`kat_cross_check::stream_v8_*`), which
+/// calls it with fixed nonces (CVF-V5-2: the previous "test-only" label was
+/// wrong). It is `pub(crate)` because a caller-chosen nonce is a CVF3-class
+/// hazard: reusing a nonce across two streams under the same `sk` is
+/// catastrophic (CAV-005).
+#[cfg(any(test, feature = "experimental-stream"))]
 pub(crate) fn encrypt_stream_ae_v8_with_nonce(
     plaintext: &str,
     primes: &[u64],
@@ -2172,6 +2196,7 @@ pub(crate) fn encrypt_stream_ae_v8_with_nonce(
     encrypt_stream_ae_v8_inner(plaintext, primes, sk_fmt.as_ref(), nonce, aad, frame_codepoints)
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn encrypt_stream_ae_v8_inner(
     plaintext: &str,
     primes: &[u64],
@@ -2227,6 +2252,7 @@ fn encrypt_stream_ae_v8_inner(
 }
 
 /// Chunk indices are u32 and bound into every sub-nonce; wrapping would reuse keystream.
+#[cfg(any(test, feature = "experimental-stream"))]
 fn next_stream_chunk_idx(chunk_idx: u32) -> Result<u32, String> {
     chunk_idx
         .checked_add(1)
@@ -2248,6 +2274,7 @@ fn next_stream_chunk_idx(chunk_idx: u32) -> Result<u32, String> {
 /// **Not misuse-resistant**: nonce reuse under the same `sk` is catastrophic
 /// (CAV-005). Use the v8 *block* API (`encrypt_bytes_v8`) whenever the whole
 /// message fits in memory and MRAE is desired.
+#[cfg(any(test, feature = "experimental-stream"))]
 pub fn encrypt_stream_ae_v8(
     plaintext: &str,
     primes: &[u64],
@@ -2268,6 +2295,7 @@ pub fn encrypt_stream_ae_v8(
 /// chunk's plaintext contributes to the output; the sentinel binds the
 /// chunk count (anti-truncation) and the true real-codepoint count (used to
 /// strip filler codepoints from the last chunk).
+#[cfg(any(test, feature = "experimental-stream"))]
 pub fn decrypt_stream_ae_v8(
     stream: &[u8],
     primes: &[u64],
@@ -2282,6 +2310,7 @@ pub fn decrypt_stream_ae_v8(
     decrypt_stream_ae_v8_inner(stream, primes, sk_fmt.as_ref(), aad)
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 fn decrypt_stream_ae_v8_inner(
     stream: &[u8],
     primes: &[u64],
@@ -2421,6 +2450,7 @@ fn decrypt_stream_ae_v8_inner(
 /// Emits the 21-byte header from `new`, one full chunk per completed frame
 /// via `push`, and the sentinel from `finish`. See [`encrypt_stream_ae_v8`]
 /// for the security caveats (CAV-005).
+#[cfg(any(test, feature = "experimental-stream"))]
 pub struct StreamV8Encryptor {
     primes: Vec<u64>,
     // CVF-V5-11: boxed so that moving the encryptor never copies sk_fmt.
@@ -2434,6 +2464,7 @@ pub struct StreamV8Encryptor {
     finished: bool,
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 impl StreamV8Encryptor {
     /// Create a new encryptor and return `(self, header_bytes)`. `header_bytes`
     /// is exactly 21 B (0x02 || be4(F) || nonce). The nonce is drawn from a
@@ -2543,6 +2574,7 @@ impl StreamV8Encryptor {
     }
 }
 
+#[cfg(any(test, feature = "experimental-stream"))]
 impl Drop for StreamV8Encryptor {
     fn drop(&mut self) {
         zeroize_key(&mut self.primes);

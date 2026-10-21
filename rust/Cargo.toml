@@ -25,6 +25,11 @@ fault_injection = []
 # the crate encrypts with v7 any more; the v7 decryptors stay available for
 # archived ciphertexts without this feature.
 legacy-v7 = []
+# CVF-V5-2: the v8 streaming format (`encrypt_stream_ae_v8`,
+# `decrypt_stream_ae_v8`, `StreamV8Encryptor`). Experimental: it has no
+# security model or proof in the paper and is outside the audited claims.
+# Off by default.
+experimental-stream = []
 # Requires the unpublished rust/src/vale sources (gitignored).
 vale = []
 # Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
@@ -90,6 +95,10 @@ path = "src/bin/ls_gateway.rs"
 name = "vale_demo"
 path = "src/bin/vale_demo.rs"
 required-features = ["vale"]
+
+[[example]]
+name = "file_bench"
+required-features = ["experimental-stream"]
 
 [[test]]
 name = "fips_gate"

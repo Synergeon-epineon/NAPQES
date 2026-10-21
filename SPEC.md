@@ -510,79 +510,122 @@ identical for equal inputs.
 
 ---
 
-## 8.2 Streaming AE wire format v8 (`FORMAT_STREAM_AE_V8 = 0x02`)
+## 8.2 Streaming AE wire format v8 (`FORMAT_STREAM_AE_V8 = 0x02`) — EXPERIMENTAL
 
 *(napqes.py `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`;
 rust/src/lib.rs `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`,
-`StreamV8Encryptor`; C/napqes.c `napqes_encrypt_stream_ae_v8_bytes`,
+`StreamV8Encryptor` — compiled only with the `experimental-stream` feature;
+C/napqes.c `napqes_encrypt_stream_ae_v8_bytes`,
 `napqes_decrypt_stream_ae_v8_bytes`)*
 
-The v8 streaming construction upgrades §8.1 to the full v8 primitive family
-(independent 256-bit subkey `sk` + per-format subkey
-`sk_fmt = HMAC(sk, 0x0B || FORMAT_STREAM_AE_V8)`), uses fixed-width 8-byte
-tokens (closing the per-token length leak retained by §8.1 for LEB128
-tokens), and pads each chunk to a fixed `F * (MAX_NOISE_RUN + 1)` token
-ceiling so per-chunk ciphertext size is a pure function of the sender-chosen
-frame parameter `F`, which is public.
+**Status (CVF-V5-2).** This format is experimental. It has no security
+definition and no proof: the paper's theorems cover the v8 block format
+only, and the separation between the block and streaming format subkeys is
+asserted, not proved. The intended model is nonce-based online AE with a
+uniformly random per-stream nonce, reducing to the PRF assumption on
+HMAC-SHA256; that analysis has not been done. Do not rely on it as part of
+the normative v8 surface. This section specifies every byte so that
+independent implementations agree.
+
+### 8.2.1 Keys and notation
+
+- `sk` is the 256-bit v8 secret and `k = (k_1..k_K)` the prime tuple, as
+  in v8 block mode. `sk_fmt = HMAC(sk, 0x0B || 0x02)`.
+- `F` (frame) is the number of codepoint slots per chunk,
+  `1 <= F <= 16384`; `F = 0` is invalid (it would collide with the
+  sentinel's zero length marker). Default 128.
+- Plaintext is a sequence of `n` Unicode scalar values (the C port is
+  byte-oriented, V3-CVF6). Chunk count `C = ceil(n / F)` (`C = 0` for the
+  empty plaintext), and `C <= 2^32 - 1`: an encryptor MUST fail rather
+  than wrap the 32-bit chunk index.
+- `HEADER = 0x02 || be4(F) || N`, 21 bytes, where `N` is a fresh 16-byte
+  CSPRNG nonce per stream.
+- Chunk indices are **0-based**: the first chunk is `i = 0`.
+
+### 8.2.2 Wire format
 
 ```
-stream = 0x02 || uint32_be(F) || nonce (16 bytes)             # HEADER (21 B)
-       || [ uint32_be(F * 160)                                  # CHUNK FRAME × C
-            || masked_chunk (F * 160 bytes)                     #   (each frame is
-            || chunk_tag (32 bytes) ] × C                       #   4 + F*160 + 32 B,
-                                                                #   fixed per stream)
-       || uint32_be(0) || uint64_be(total_real_codepoints)      # SENTINEL (44 B)
-            || sentinel_tag (32 bytes)
+stream = HEADER                                                # 21 B
+       || [ be4(F * 160) || masked_chunk_i (F * 160 B)          # CHUNK FRAME i,
+            || chunk_tag_i (32 B) ]  for i = 0 .. C-1           #   4 + F*160 + 32 B
+       || be4(0) || masked_count (8 B) || sentinel_tag (32 B)  # SENTINEL, 44 B
 ```
 
-`F` = codepoints per chunk (sender-chosen; default 128, hard upper bound
-16384). Every chunk carries exactly `F` real-codepoint slots; if the input
-stream ends mid-chunk, the remaining slots are filled with HMAC-derived
-filler codepoints (domain `0x06`, keyed by the per-chunk sub-nonce). The
-decoder strips filler using `total_real_codepoints` from the sentinel.
+### 8.2.3 Per-chunk encryption
 
-**Sub-nonce (domain `0x0E`).** Each chunk `i` is encrypted as a
-self-contained v8 primitive call keyed by `(sk_fmt, sub_nonce_i)` where
+For chunk `i`:
 
-```
-sub_nonce_i = HMAC(sk_fmt, 0x0E || nonce || uint32_be(i))[:16]
-```
+1. `sub_nonce_i = HMAC(sk_fmt, 0x0E || N || be4(i))[:16]`.
+2. Slots: chunks `0 .. C-2` hold `F` plaintext codepoints. The last chunk
+   holds the remaining `r = n - (C-1)F` codepoints (`1 <= r <= F`)
+   followed by `F - r` filler codepoints; filler `j` (0-based,
+   `j = 0 .. F-r-1`) is `(u32_be(HMAC(sk_fmt, 0x06 || sub_nonce_i ||
+   be4(j))[0:4]) mod 95) + 32`. There is no length prefix inside a chunk.
+3. Token emission is exactly the v8 block emission loop with
+   `(sk_fmt, sub_nonce_i)` in place of `(sk_fmt, N_block)`: noise threshold
+   `theta = theta(sub_nonce_i)` (domain `0x02`), noise oracle domain `0x00`,
+   addends `0x01`, noise characters `0x04`, noise addends `0x05`. The
+   counters `ct_pos` and `real_idx` **restart at 0 for every chunk**, and
+   the key element for a token is `k[(real_idx mod K)]` with the
+   per-chunk `real_idx`. Runs of noise are capped at `MAX_NOISE_RUN = 19`
+   and the chunk is topped up with noise tokens to exactly
+   `F * (MAX_NOISE_RUN + 1) = 20F` tokens.
+4. Tokens are serialised as 8-byte big-endian integers (`F * 160` bytes)
+   and XORed with the keystream `ks(sk_fmt, sub_nonce_i)` (domain `0x07`).
+5. `chunk_tag_i = HMAC(sk_fmt, 0x0C || HEADER || be4(i) || be8(|A|) || A
+   || masked_chunk_i)`.
 
-so domains `0x00`–`0x07` (position oracle, addend, noise char/addend,
-threshold, keystream) are reused verbatim from v8 block mode.
+### 8.2.4 Sentinel
 
-**Per-chunk tag (domain `0x0C`).**
+- `count_mask = u64_be(HMAC(sk_fmt, 0x0F || HEADER || be4(C))[0:8])`.
+- `masked_count = be8(n XOR count_mask)` (CVF-V5-1: the exact length is
+  not sent in clear; only `C` is visible).
+- `sentinel_tag = HMAC(sk_fmt, 0x0D || HEADER || be4(C) || be8(|A|) || A
+  || be8(n))`, over the **unmasked** `n`.
 
-```
-chunk_tag_i = HMAC(sk_fmt,
-    0x0C || nonce || uint32_be(i) || uint64_be(len(aad)) || aad || masked_chunk)
-```
+All three tags and the mask bind the full `HEADER`, so neither the format
+byte nor `F` is malleable, including for an empty stream (CVF-V5-9).
 
-**Sentinel tag (domain `0x0D`).**
+### 8.2.5 Decoder checks (all MUST be performed)
 
-```
-sentinel_tag = HMAC(sk_fmt,
-    0x0D || nonce || uint32_be(C) || uint64_be(len(aad)) || aad
-         || uint64_be(total_real_codepoints))
-```
+1. At least 21 bytes; byte 0 is `0x02`; `1 <= F <= 16384`.
+2. Frames are read in order with `i` counting from 0. A length field of 0
+   starts the sentinel; any other length field MUST equal `F * 160`.
+   Fewer bytes than a full frame or sentinel is an error.
+3. `chunk_tag_i` is verified (constant-time) before chunk `i` is unmasked.
+   Then, recomputing the noise oracle with the same per-chunk counters,
+   the decoder skips at most `MAX_NOISE_RUN` noise tokens, reads one real
+   token `t`, and requires `t >= a` and `(t - a) mod k == 0` for the
+   expected addend `a` and key element `k`; the recovered value
+   `(t - a) / k` MUST be at most `0x10FFFF` and not a surrogate. It stops
+   after `F` real tokens; running out of tokens first is an error.
+4. At the sentinel: `n = u64_be(masked_count) XOR count_mask` with `C` the
+   number of chunks read; `sentinel_tag` is verified (constant-time); then
+   `n` MUST satisfy `n = 0` if `C = 0`, else `(C-1)F < n <= CF`.
+5. No bytes may follow the sentinel.
+6. Output is the first `n` decoded codepoints (filler is discarded).
 
-The sentinel binds *both* the chunk count `C` (anti-truncation) and the
-real-codepoint count (needed to strip filler from the last chunk safely).
+**Release of unverified plaintext.** Chunk tags are verified before
+decoding, but truncation is detected only at step 4. An implementation
+that releases chunk `i` before the sentinel verifies releases unverified
+plaintext; see `docs/CAVEATS.md` CAV-001 for how each port behaves. The
+Rust and C decryptors return nothing until the sentinel has verified.
 
-**Security properties:**
-- **Verify-before-yield.** Per-chunk tag verifies before any of that
-  chunk's plaintext contributes to the output; the sentinel verifies
-  before the last chunk's real codepoints are emitted.
-- **Anti-truncation.** Chunk count `C` is bound into `sentinel_tag`.
-- **Anti-reorder.** `chunk_idx` is bound into every `chunk_tag_i`.
-- **Length hiding at chunk granularity.** Per-chunk masked_blob length is
-  a pure function of `F`, which is public — the LEB128 residual
-  (V2-CVF11) that §8.1 retains is closed here.
-- **Not misuse-resistant** — the 16-byte nonce is CSPRNG-drawn per stream,
-  not SIV-derived (SIV requires hashing the full message, which is
-  incompatible with streaming). Nonce reuse across two streams under the
-  same `sk` is catastrophic (CVF3-class hazard on aligned codepoint
-  positions). See `docs/CAVEATS.md` CAV-005.
+### 8.2.6 Properties and limits
+
+- **Anti-truncation / anti-reorder.** `C` is bound into the sentinel tag;
+  `i` into every chunk tag.
+- **Length.** Each frame is a pure function of the public `F`; the exact
+  `n` is masked; the chunk count `C = ceil(n / F)` is the residual leak.
+- **Not misuse-resistant.** `N` is CSPRNG-drawn per stream, not
+  synthetic; nonce reuse under one `sk` is catastrophic (CVF3 class).
+- **Data limit.** Count chunks, not streams: keep the total number of
+  chunks under one `sk` at most `2^48` (sub-nonce collision probability
+  at most `2^-33`). See CAV-005.
+- **Domains** used by this format: `0x00`–`0x02`, `0x04`–`0x07` (reused
+  from block mode under `sub_nonce_i`), `0x0B` (format subkey), and the
+  streaming-only `0x0C` (chunk tag), `0x0D` (sentinel tag), `0x0E`
+  (sub-nonce) and `0x0F` (count mask).
 
 **Compatibility.** v8 streams are **not** cross-compatible with:
 - §5 (v7 block) — different keying and no format subkey.
@@ -590,6 +633,8 @@ real-codepoint count (needed to strip filler from the last chunk safely).
 - §8.1 (v7 streaming AE) — different keying, different domain bytes.
 - v8 *block* mode — different format subkey (`FORMAT_STREAM_AE_V8` vs
   `FORMAT_BLOCK_V8`) and different domain bytes.
+- Streams produced before round 5 (CVF-V5-1/V5-9): the sentinel count was
+  unmasked and the tags bound only `N`, so they do not verify.
 
 ---
 

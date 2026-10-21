@@ -477,6 +477,23 @@ streaming, v6s-ae vs. the deprecated basic format) is an out-of-band API
 contract agreed by both endpoints, not something inferred from ciphertext
 bytes.
 
+**Restated for the v8 streaming format (round 5, CVF-V5-2).** The v8
+streaming format (`SPEC.md` §8.2) verifies each chunk tag before that
+chunk is decoded, but truncation is detected only at the sentinel. How
+much plaintext a decryptor releases before the sentinel verifies is
+therefore an implementation property, and the three ports differ:
+
+| Port | Behaviour | Unverified plaintext released? |
+|---|---|---|
+| Rust `decrypt_stream_ae_v8` | Buffers every chunk; returns only after the sentinel verifies | No |
+| C `napqes_decrypt_stream_ae_v8_bytes` | Verifies the sentinel first, then every chunk; returns the whole plaintext | No |
+| Python `decrypt_stream_ae_v8` (generator) | Yields chunk *i* once chunk *i + 1* (or the sentinel) has been read; the final chunk only after the sentinel | **Yes** — a truncated or spliced stream yields every chunk before the cut, then raises |
+
+A caller of the Python generator MUST treat the yielded text as
+provisional until the generator finishes without an exception (for
+example, collect it with `"".join(...)` and discard it on error), exactly
+as for the deprecated `decrypt_stream`.
+
 ---
 
 ## CAV-002 — 16-bit plaintext length cap (65535 codepoints)
@@ -697,7 +714,7 @@ the expansion bound explicitly in all datasheets.
 | **ID** | CAV-005 |
 | **Category** | Algorithm |
 | **Severity** | High if misused; accepted trade-off if respected |
-| **Affects** | `encrypt_stream_ae_v8` / `decrypt_stream_ae_v8` in Python (`napqes.py`), Rust (`rust/src/lib.rs`) and C (`C/napqes.c`) — including `StreamV8Encryptor`/`StreamV8Decryptor` (Rust) and `napqes_encrypt_stream_ae_v8_bytes` (C) |
+| **Affects** | `encrypt_stream_ae_v8` / `decrypt_stream_ae_v8` in Python (`napqes.py`), Rust (`rust/src/lib.rs`, feature `experimental-stream`) and C (`C/napqes.c`) — including `StreamV8Encryptor` (Rust; there is no Rust incremental decryptor, see CVF-V5-10) and `napqes_encrypt_stream_ae_v8_bytes` (C) |
 | **Owner** | TBD |
 | **Status** | Documented (by-design residual) |
 | **Risk retired** | N/A |
@@ -730,11 +747,23 @@ recover the prime tuple via `k = (t1 - t2) / (c1 - c2)`.
    for messages that fit in memory; it preserves the full SIV/MRAE
    guarantee.
 
-**Deployment guidance.** Draw a fresh CSPRNG nonce for every stream.
-Under a 128-bit birthday bound this is safe for well under 2⁴⁸ streams
-per key. Do NOT persist a "session key + stream counter" pattern with a
-deterministic nonce derivation — a snapshot-and-restore of the counter
-state reproduces a nonce and triggers the CVF3 hazard.
+**Deployment guidance.** Draw a fresh CSPRNG nonce for every stream. The
+data limit counts **chunks**, not streams (corrected in round 5,
+CVF-V5-2): every chunk is keyed by a 128-bit truncated sub-nonce
+`HMAC(sk_fmt, 0x0E || nonce || be4(i))[:16]`, so the relevant birthday
+quantity is the total number of chunks `q` encrypted under one `sk`
+across all streams. Keep `q <= 2^48` per key (collision probability at
+most `q^2 / 2^129 = 2^-33`); with the default `F = 128` that is about
+`2^55` codepoints. Do NOT persist a "session key + stream counter" pattern
+with a deterministic nonce derivation — a snapshot-and-restore of the
+counter state reproduces a nonce and triggers the CVF3 hazard.
+
+**Status of the format (CVF-V5-2).** The v8 streaming format has no
+security definition or proof in the paper; it is compiled into the Rust
+crate only with the `experimental-stream` feature and is outside the
+audited claims. Its byte-level specification is `SPEC.md` §8.2. The
+release-of-unverified-plaintext caveat that applies to it is restated
+under CAV-001 above.
 
 **Follow-up under V2-CVF11.** The v8 streaming format switches from
 LEB128 tokens (retained by the v7 stream_ae format) to fixed-width 8-byte
