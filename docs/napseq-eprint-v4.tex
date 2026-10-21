@@ -2369,10 +2369,16 @@ $\theta(N)$ and indirectly about $N$; $N$ is transmitted in the clear in
 any case, so this particular leak is not by itself a break, but no bound is
 offered on what else such a channel exposes. A dudect timing study of the
 Rust port (\texttt{rust/examples/dudect\_harness.rs}) is reported in
-\texttt{docs/DUDECT\_ATTESTATION.md}: it times the whole
-\texttt{decrypt\_bytes\_v8\_key} call on ciphertexts whose first versus last
-tag byte is corrupted, and observed $|t|=1.11$ after $2.97\times10^7$
-samples, below the TVLA threshold of $4.5$. It covers the tag comparison only. Deployments in which the adversary can measure
+\texttt{docs/DUDECT\_ATTESTATION.md} (round 5, CVF-V5-27). Its primary
+evidence times the tag comparator \emph{alone} on operands differing in the
+first versus the last byte: $|t|=0.79$ after $7.6\times10^{6}$ samples, while
+a positive control (a deliberately early-exit comparator measured the same
+way) reaches $|t|>4{,}600$ within a minute, showing the test has the power
+to detect such a leak; CI repeats the comparator test on every change with a
+fixed threshold of $4.5$. A second measurement of the whole
+\texttt{decrypt\_bytes\_v8\_key} call ($|t|=1.96$ after $1.3\times10^{7}$
+samples) is low-power evidence only, since the comparator is about $0.1\%$
+of that call. Both cover the tag comparison only. Deployments in which the adversary can measure
 decryption time on attacker-influenced inputs should treat this as an open
 gap and are directed to Section~\ref{sec:caveats}.
 

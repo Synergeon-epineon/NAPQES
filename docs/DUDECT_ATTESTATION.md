@@ -7,6 +7,40 @@ Section 8.4 (constant-time claims).
 **Created.** 2026-09-22, in response to audit finding CVF-26 which noted
 that the paper cited this document without it having been delivered.
 
+## Round 5 measurement (CVF-V5-27) — current evidence
+
+This section supersedes the round-4 measurement below (which ran on an
+undelivered commit and timed only the whole decrypt call).
+
+| Field | Value |
+|---|---|
+| Commits | `e3ea69d` (comparator bench, positive control); `9a2cbec` (whole-call bench with warm-up; the comparator code is unchanged) |
+| Date | 2026-10-21 |
+| Platform | Windows 11 x86_64, AMD Ryzen AI 7 350 w/ Radeon 860M, otherwise idle |
+| Compiler | `rustc 1.93.1 (01f6ddf75 2026-02-11)`, `--release` (opt-level 3, `overflow-checks = true`) |
+| Command | `cargo run --release --features ct_bench --example dudect_harness -- --continuous <bench>` |
+| Key | pinned (`[1000003, 1000033, 1000037, 1000039]`, `sk = 0x5a * 32`) |
+| Threshold | TVLA, `\|t\| < 4.5` |
+
+| Bench | What is timed | Duration | Samples | max \|t\| | Result |
+|---|---|---|---|---|---|
+| `bench_ct_eq_bytes` | `ct_eq_bytes` alone (100 calls per sample), 32-byte operands differing in byte 0 vs byte 31 | 300 s | 7.604 M | 0.785 | **pass** |
+| `bench_positive_control_early_exit` | the same measurement on a naive early-exit comparator | 60 s | 2.372 M | 4,610.6 | **fails, as it must** — shows the bench detects a position-dependent leak |
+| `bench_tag_comparison` | whole `decrypt_bytes_v8_key` call, first vs last tag byte flipped | ~300 s | 12.97 M | 1.957 | pass (low-power: the comparator is ~0.1% of the call) |
+
+**Reading.** The comparator-level bench is the evidence for the claim in
+paper §8.4 that tag comparison is constant-time: with the positive control
+separating at |t| in the thousands within a minute, a comparator-level
+leak of that kind would not stay below 4.5 over 7.6 M samples. The
+whole-call bench is retained as end-to-end, low-power evidence only. CI runs
+the comparator bench for 120 s on every push and fails on `|t| >= 4.5` or
+fewer than 0.5 M samples. Nothing here covers the token-emission and
+inversion loops or key validation, which are not constant-time (§8.4).
+
+---
+
+## Round 4 measurement (historical)
+
 ## Scope
 
 The harness at `rust/examples/dudect_harness.rs` runs a two-class TVLA
