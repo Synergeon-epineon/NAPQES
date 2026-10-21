@@ -177,18 +177,41 @@ pub const MAX_KEY_ELEMENTS: usize = 128;
 /// bytes, yielding a different key element than Python (which rejects it).
 pub const MAX_SERIALISABLE_KEY_PRIME: u64 = (1u64 << 40) - 1;
 
+/// Odd primes below 59, tried before the general trial-division loop
+/// (CVF-V5-30): they reject about 77% of odd composites with no loop setup.
+const SMALL_ODD_PRIMES: [u64; 15] = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53];
+
+/// `floor(sqrt(n))`, exact for every `u64`.
+fn isqrt_u64(n: u64) -> u64 {
+    let mut r = (n as f64).sqrt() as u64;
+    while r.checked_mul(r).map_or(true, |sq| sq > n) {
+        r -= 1;
+    }
+    while (r + 1).checked_mul(r + 1).map_or(false, |sq| sq <= n) {
+        r += 1;
+    }
+    r
+}
+
+/// Deterministic primality by trial division. Not constant-time: its running
+/// time depends on `n` (see the paper's §8.4 list of non-constant-time
+/// operations).
 pub fn is_prime(n: u64) -> bool {
     if n < 2 {
         return false;
     }
-    if n == 2 {
-        return true;
-    }
     if n % 2 == 0 {
-        return false;
+        return n == 2;
     }
-    let mut i: u64 = 3;
-    while i.saturating_mul(i) <= n {
+    for &p in SMALL_ODD_PRIMES.iter() {
+        if n % p == 0 {
+            return n == p;
+        }
+    }
+    // CVF-V5-30: the square-root bound is computed once, not per iteration.
+    let limit = isqrt_u64(n);
+    let mut i: u64 = 59;
+    while i <= limit {
         if n % i == 0 {
             return false;
         }
@@ -237,17 +260,26 @@ pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Resul
     let dist = Uniform::new_inclusive(min_val, max_val);
     let max_attempts = (count.max(1) as u64).saturating_mul(KEYGEN_DRAWS_PER_PRIME);
     let mut primes: Vec<u64> = Vec::with_capacity(count);
+    // CVF-V5-30: membership via binary search in a sorted index instead of a
+    // linear `contains` per candidate. The index is key material and is
+    // wiped before return (CVF-V5-11).
+    let mut sorted: Vec<u64> = Vec::with_capacity(count);
     let mut attempts: u64 = 0;
     while primes.len() < count && attempts < max_attempts {
         // CVF-20: unbiased sample via rand::Uniform (Lemire rejection),
         // replacing the modulo-bias line `min_val + (rng.next_u64() % span)`.
         let num = dist.sample(&mut rng);
-        if is_prime(num) && !primes.contains(&num) {
-            primes.push(num);
+        if let Err(pos) = sorted.binary_search(&num) {
+            if is_prime(num) {
+                sorted.insert(pos, num);
+                primes.push(num);
+            }
         }
         attempts += 1;
     }
+    zeroize_key(&mut sorted);
     if primes.len() < count {
+        zeroize_key(&mut primes);
         return Err(format!(
             "generate_prime_numbers: could not find {} distinct primes in \
              [{}, {}] within {} draws; the range is too narrow or too prime-poor \
@@ -3446,6 +3478,39 @@ mod v5_tests {
     fn v5_11_validate_key_reports_duplicate_indices() {
         let err = validate_key(&[1_000_003, 1_000_033, 1_000_003]).unwrap_err();
         assert!(err.contains("index 2 duplicates index 0"), "{}", err);
+    }
+
+    // CVF-V5-30: the optimised is_prime agrees with a sieve, including
+    // squares of primes on both sides of the small-prime table boundary.
+    #[test]
+    fn v5_30_is_prime_matches_sieve_and_edge_cases() {
+        const N: usize = 200_000;
+        let mut sieve = vec![true; N];
+        sieve[0] = false;
+        sieve[1] = false;
+        for i in 2..N {
+            if sieve[i] {
+                let mut j = i * i;
+                while j < N {
+                    sieve[j] = false;
+                    j += i;
+                }
+            }
+        }
+        for n in 0..N {
+            assert_eq!(is_prime(n as u64), sieve[n], "n = {}", n);
+        }
+        for &(n, p) in &[
+            (53u64 * 53, false), (59 * 59, false), (61 * 61, false),
+            (1_000_003 * 1_000_033, false), (14_999_977, true), (14_999_981, true),
+            (14_999_999, false), (u64::MAX, false),
+        ] {
+            assert_eq!(is_prime(n), p, "n = {}", n);
+        }
+        for n in [0u64, 1, 3, 4, 15, 16, 17, 1 << 32, u64::MAX] {
+            let r = isqrt_u64(n);
+            assert!(r as u128 * r as u128 <= n as u128 && (r as u128 + 1).pow(2) > n as u128);
+        }
     }
 
     // CVF-V5-14: key generation refuses counts validate_key would reject.
