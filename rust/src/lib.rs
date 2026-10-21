@@ -741,32 +741,33 @@ fn unpad_message(padded: &[u32]) -> Result<Vec<u32>, String> {
             the paper applies (CVF-28). Use encrypt_bytes_v8 / \
             encrypt_bytes_v8_with_profile."
 )]
-pub fn encrypt(message: &[u32], key: &[u64]) -> ([u8; NONCE_SIZE], Vec<u64>) {
-    // CVF-34: uphold the length cap even on this Vec<u64>-returning legacy
-    // path. The .expect() surfaces the cap consistently with the deprecation
-    // attribute and matches the pattern of the CVF-15 validate_key call.
-    assert!(
-        message.len() <= MAX_PLAINTEXT_CODEPOINTS,
-        "message length {} exceeds MAX_PLAINTEXT_CODEPOINTS ({})",
-        message.len(), MAX_PLAINTEXT_CODEPOINTS
-    );
-    // CVF-15: this v7 API returns `Vec<u64>` and cannot report a validation
-    // error. Every other entry point returns `Result` and propagates via `?`.
-    // The .expect() here surfaces the same validation failure as a panic,
-    // consistent with `pub fn decrypt`'s prior panic contract and matched by
-    // the #[deprecated] attribute (CVF-17) that steers callers to v8.
-    validate_key(key).expect("CVF-15: encrypt called with invalid key material");
-    // CVF-35: route through the checked CRNG helper like every other v7
-    // encryptor. Signature is `-> (nonce, tokens)` so a CRNG failure is
-    // surfaced as `.expect` — consistent with the deprecation attribute
-    // that steers callers to v8.
-    let nonce = generate_nonce_with_crng_check()
-        .expect("CVF-35: CRNG stuck-generator check failed inside encrypt");
+/// Legacy v7 low-level encryptor: returns the nonce and the raw token vector.
+///
+/// **Input domain (CVF-V5-17).** `message` must be a sequence of Unicode
+/// scalar values (`0..=0x10FFFF` excluding the surrogates `0xD800..=0xDFFF`)
+/// of at most [`MAX_PLAINTEXT_CODEPOINTS`] elements, and `key` must pass
+/// key validation. Anything else is an `Err`, so every output of `encrypt`
+/// is accepted by its inverse [`decrypt`].
+pub fn encrypt(message: &[u32], key: &[u64]) -> Result<([u8; NONCE_SIZE], Vec<u64>), String> {
+    if message.len() > MAX_PLAINTEXT_CODEPOINTS {
+        return Err(format!(
+            "message length {} exceeds MAX_PLAINTEXT_CODEPOINTS ({})",
+            message.len(), MAX_PLAINTEXT_CODEPOINTS
+        ));
+    }
+    if let Some((i, &c)) = message.iter().enumerate().find(|(_, &c)| char::from_u32(c).is_none()) {
+        return Err(format!(
+            "message value {:#x} at position {} is not a Unicode scalar value.",
+            c, i
+        ));
+    }
+    validate_key(key)?;
+    let nonce = generate_nonce_with_crng_check()?;
     let kb = key_bytes(key);
     let noise_p = derive_noise_p(&kb, &nonce);
     let padded = pad_message(message, &kb, &nonce);
     let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key);
-    (nonce, cypher)
+    Ok((nonce, cypher))
 }
 
 /// Shared core of [`decrypt`] and the v8 (`decrypt_bytes_v8`) path, taking
@@ -2659,12 +2660,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "CVF-15")]
-    fn cvf15_pub_encrypt_panics_on_invalid_key() {
-        // `pub fn encrypt` cannot report a validation error (its signature is
-        // `-> ([u8; NONCE_SIZE], Vec<u64>)`), so it panics with a message
-        // naming CVF-15. Consumers should migrate to encrypt_bytes_v8.
-        let _ = encrypt(&[b'x' as u32], &[]);
+    fn cvf15_pub_encrypt_rejects_invalid_key() {
+        // CVF-V5-17: `encrypt` now returns Result, so a bad key is an Err.
+        let err = encrypt(&[b'x' as u32], &[]).unwrap_err();
+        assert!(err.contains("non-empty"), "{}", err);
     }
 
     // CVF-25 regressions: extend v8 round-trip coverage above U+007F. The
@@ -2850,7 +2849,7 @@ mod tests {
         // `encrypt` returns the raw token vector: compare it with the tokens
         // the helper serialises under the same nonce.
         let cps: Vec<u32> = msg.chars().map(|c| c as u32).collect();
-        let (n_e, tokens) = encrypt(&cps, &key);
+        let (n_e, tokens) = encrypt(&cps, &key).unwrap();
         let reference = encrypt_bytes_with_nonce(msg, &key, n_e, aad);
         let masked = &reference[NONCE_SIZE..reference.len() - TAG_SIZE];
         let ks = varint_keystream(&key_bytes(&key), &n_e, masked.len());
@@ -3399,5 +3398,19 @@ mod v5_tests {
     fn v5_11_validate_key_reports_duplicate_indices() {
         let err = validate_key(&[1_000_003, 1_000_033, 1_000_003]).unwrap_err();
         assert!(err.contains("index 2 duplicates index 0"), "{}", err);
+    }
+
+    // CVF-V5-17: encrypt rejects exactly what decrypt rejects, so the pair
+    // round-trips on every accepted input.
+    #[test]
+    #[allow(deprecated)]
+    fn v5_17_encrypt_rejects_non_scalar_input() {
+        let key = [1_000_003u64, 1_000_033, 1_000_037, 1_000_039];
+        for bad in [0xD800u32, 0xDFFF, 0x11_0000, u32::MAX] {
+            assert!(encrypt(&[0x41, bad], &key).is_err(), "{:#x} accepted", bad);
+        }
+        let msg: Vec<u32> = "é😀A".chars().map(|c| c as u32).collect();
+        let (n, t) = encrypt(&msg, &key).unwrap();
+        assert_eq!(decrypt(&n, &t, &key).unwrap(), msg);
     }
 }
