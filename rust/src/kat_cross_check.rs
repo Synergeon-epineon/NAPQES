@@ -63,6 +63,17 @@ pub(crate) fn hex_decode(h: &str) -> Vec<u8> {
         .collect()
 }
 
+/// CVF-V5-21: number of vectors each harness test must actually exercise.
+/// A harness that skips a vector (or exercises none) fails its exact-count
+/// assertion instead of reporting a clean run.
+const V7_POSITIVE: usize = 22;
+const V7_NEGATIVE: usize = 9;
+const V8_POSITIVE: usize = 23;
+const V8_NEGATIVE: usize = 12;
+const V8_ENCRYPT_NEGATIVE: usize = 2;
+const V8_STREAM_POSITIVE: usize = 11;
+const V8_STREAM_NEGATIVE: usize = 4;
+
 /// CVF-19: a vector silently lost from (or added to) a corpus must fail.
 #[test]
 fn corpus_sizes_are_pinned() {
@@ -89,7 +100,6 @@ fn corpus_sizes_are_pinned() {
 fn legacy_v7_positive_decrypt_roundtrip() {
     let vectors = load_vectors();
     let mut tested = 0;
-    let mut skipped = 0;  // vectors skipped due to empty message
 
     for vec in vectors
         .iter()
@@ -100,18 +110,9 @@ fn legacy_v7_positive_decrypt_roundtrip() {
         let ct_hex = vec["ciphertext_hex"].as_str().unwrap_or("");
         let aad_hex = vec["aad_hex"].as_str().unwrap_or("");
 
-        // CVF-13: previously we skipped empty-message vectors because encrypt
-        // returned an empty ciphertext and there was nothing to decrypt. That
-        // is no longer true — empty messages now encrypt through the normal
-        // path — so an empty-message vector should carry a real ciphertext_hex
-        // and be decrypted like any other. We still skip if the corpus entry
-        // has no ciphertext_hex at all, so an under-specified vector doesn't
-        // cause a spurious failure.
-        if ct_hex.is_empty() {
-            skipped += 1;
-            eprintln!("[SKIP] {} — no ciphertext_hex in corpus", id);
-            continue;
-        }
+        // CVF-13 / CVF-V5-21: every positive vector, including the empty
+        // message, carries a real ciphertext; a missing one is a corpus error.
+        assert!(!ct_hex.is_empty(), "[{}] positive vector without ciphertext_hex", id);
 
         let key: Vec<u64> = vec["key"]
             .as_array()
@@ -139,23 +140,8 @@ fn legacy_v7_positive_decrypt_roundtrip() {
         }
     }
 
-    eprintln!(
-        "\nRust KAT positive: {} passed, {} skipped (SKIP-PHASE2)",
-        tested, skipped
-    );
-    // CVF-19: the previous guard was `if tested == 0 && skipped == 0 { panic!(...) }`.
-    // Because `skipped` incremented for any vector missing `ciphertext_hex`,
-    // a corpus rename that made every field absent left `skipped > 0`,
-    // `tested == 0`, and the guard silently accepted the outcome. Match the
-    // sibling test `positive_encrypt_bytes_deterministic` (line 183): a
-    // positive-decrypt test with no vectors decrypted is a failure regardless
-    // of the skip counter.
-    assert!(
-        tested > 0,
-        "positive_decrypt_roundtrip: no vectors were decrypted (skipped: {}) — \
-         check vector file path and corpus schema (CVF-19)",
-        skipped
-    );
+    eprintln!("\nRust KAT positive: {} passed", tested);
+    assert_eq!(tested, V7_POSITIVE, "positive_decrypt_roundtrip: not every vector was exercised (CVF-V5-21)");
 }
 
 // ---------------------------------------------------------------------------
@@ -186,10 +172,11 @@ fn legacy_v7_positive_encrypt_bytes_deterministic() {
         // empty-message v7 KAT vector must supply nonce_hex and ciphertext_hex like
         // any other positive vector; if it does not, we skip it below rather than
         // silently pretending an empty ciphertext is the answer.
-        if nonce_hex.is_empty() || ct_hex.is_empty() {
-            eprintln!("[SKIP] {} — missing nonce_hex or ciphertext_hex", id);
-            continue;
-        }
+        assert!(
+            !nonce_hex.is_empty() && !ct_hex.is_empty(),
+            "[{}] positive vector without nonce_hex or ciphertext_hex (CVF-V5-21)",
+            id
+        );
 
         let key: Vec<u64> = vec["key"]
             .as_array()
@@ -220,7 +207,7 @@ fn legacy_v7_positive_encrypt_bytes_deterministic() {
     }
 
     eprintln!("\nRust KAT deterministic encrypt: {} passed", tested);
-    assert!(tested > 0, "No vectors were tested");
+    assert_eq!(tested, V7_POSITIVE, "not every v7 positive vector was exercised (CVF-V5-21)");
 }
 
 // ---------------------------------------------------------------------------
@@ -240,10 +227,8 @@ fn legacy_v7_negative_returns_err() {
         let tampered_hex = vec["tampered_hex"].as_str().unwrap_or("");
         let aad_hex = vec["aad_hex"].as_str().unwrap_or("");
 
-        if tampered_hex.is_empty() {
-            eprintln!("[SKIP] {} — no tampered_hex", id);
-            continue;
-        }
+        // CVF-V5-21: an empty tampered_hex is a vector (N009, the empty
+        // ciphertext), not a missing field; it is submitted like any other.
 
         let key: Vec<u64> = vec["key"]
             .as_array()
@@ -294,11 +279,7 @@ fn legacy_v7_negative_returns_err() {
     // is a hard failure. The previous eprintln! was the auditor's headline
     // example of a test that could not report failure: "Not a hard failure"
     // is exactly the wrong disposition for a rejection-oracle test.
-    assert!(
-        tested > 0,
-        "negative_returns_err: no tampered vectors submitted — the \
-         rejection oracle was never exercised (CVF-19)"
-    );
+    assert_eq!(tested, V7_NEGATIVE, "negative_returns_err: not every v7 negative vector was submitted (CVF-19 / CVF-V5-21)");
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +376,7 @@ fn v8_positive_encrypt_matches_python() {
     }
 
     eprintln!("\nRust v8 KAT encrypt: {} passed", tested);
-    assert!(tested > 0, "No v8 positive vectors were tested");
+    assert_eq!(tested, V8_POSITIVE, "not every vector was exercised (CVF-V5-21)");
 }
 
 #[test]
@@ -419,7 +400,7 @@ fn v8_positive_decrypt_roundtrip() {
     }
 
     eprintln!("\nRust v8 KAT decrypt: {} passed", tested);
-    assert!(tested > 0, "No v8 positive vectors were tested");
+    assert_eq!(tested, V8_POSITIVE, "not every vector was exercised (CVF-V5-21)");
 }
 
 #[test]
@@ -463,7 +444,7 @@ fn v8_negative_returns_err() {
     }
 
     eprintln!("\nRust v8 KAT negative: {} passed", tested);
-    assert!(tested > 0, "No v8 negative vectors were tested");
+    assert_eq!(tested, V8_NEGATIVE, "not every vector was exercised (CVF-V5-21)");
 }
 
 /// CVF-32: inputs every port must refuse to encrypt (e.g. frame(F) at n = F).
@@ -487,7 +468,7 @@ fn v8_encrypt_negative_returns_err() {
         tested += 1;
     }
 
-    assert!(tested > 0, "No v8 encrypt-negative vectors were tested");
+    assert_eq!(tested, V8_ENCRYPT_NEGATIVE, "not every vector was exercised (CVF-V5-21)");
 }
 // ---------------------------------------------------------------------------
 // v8 STREAMING cross-language parity (tests/kat/v8_stream_vectors.json)
@@ -557,7 +538,7 @@ fn v8_stream_positive_encrypt_matches_python() {
         tested += 1;
     }
     eprintln!("\nRust v8 stream KAT encrypt: {} passed", tested);
-    assert!(tested > 0, "No v8 stream positive vectors were tested");
+    assert_eq!(tested, V8_STREAM_POSITIVE, "not every vector was exercised (CVF-V5-21)");
 }
 
 #[test]
@@ -579,7 +560,7 @@ fn v8_stream_positive_decrypt_roundtrip() {
         tested += 1;
     }
     eprintln!("\nRust v8 stream KAT decrypt: {} passed", tested);
-    assert!(tested > 0, "No v8 stream positive vectors were tested");
+    assert_eq!(tested, V8_STREAM_POSITIVE, "not every vector was exercised (CVF-V5-21)");
 }
 
 #[test]
@@ -600,5 +581,5 @@ fn v8_stream_negative_returns_err() {
         }
         tested += 1;
     }
-    assert!(tested > 0, "No v8 stream negative vectors were tested");
+    assert_eq!(tested, V8_STREAM_NEGATIVE, "not every vector was exercised (CVF-V5-21)");
 }

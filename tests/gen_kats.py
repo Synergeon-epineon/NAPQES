@@ -578,6 +578,7 @@ def generate() -> list[dict]:
         "N009", "Empty ciphertext rejected: no nonce, no tag, no authentication",
         KEY_4, "",
         expected_exception="not a valid authenticated v7 payload",
+        expected_error_contains="too short",  # CVF-V5-21: port-neutral reason
     ))
 
     # N008: v3-format colon-delimited string encoded as raw bytes.  When fed
