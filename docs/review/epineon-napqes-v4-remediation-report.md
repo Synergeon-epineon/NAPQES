@@ -223,10 +223,11 @@ Rust harness ([rust/src/kat_cross_check.rs](rust/src/kat_cross_check.rs)) added 
 
 **CVF-33 — SP 800-22 bitstream regenerated over v8.** [rust/src/bin/sts.rs](rust/src/bin/sts.rs) migrated: `napqes::encrypt_bytes(msg, &STS_KEY, b"")` → `napqes::encrypt_bytes_v8(msg, &STS_KEY, &STS_SK, b"")`. New `STS_SK` constant pinned so the bitstream is reproducible. Module header and all "v6" strings updated to "v8". **1M-bit smoke run: 14/14 scored SP 800-22 tests pass**; Random Excursion / Random Excursion Variant are skipped as ineligible (need ≥10M bits). The 10^7-bit full run and the paper §9 statistics table update are deferred to a follow-up pass, tracked in §6.
 
-**CVF-47 — FIPS self-test outcome latching.** New `static POST_STATE: AtomicU8` in [rust/src/self_test.rs](rust/src/self_test.rs) with four states (`POST_NOT_RUN`, `POST_RUNNING`, `POST_PASSED`, `POST_FAILED`). `run_power_on_self_tests` transitions to `POST_RUNNING` on entry and to `POST_PASSED` or `POST_FAILED` on exit. New `pub(crate) fn require_post()` returns `Ok(())` iff the atomic is `POST_PASSED` or `POST_RUNNING` (the latter to permit the self-test's own KAT calls). Every public v8 entry point (both bare-slice and `_key`-suffixed) gates on `#[cfg(feature = "fips_gate")] self_test::require_post()?`. **Feature is opt-in** — non-FIPS consumers see zero behaviour change. Regression tests:
+**CVF-47 — FIPS self-test outcome latching.** New `static POST_STATE: AtomicU8` in [rust/src/self_test.rs](rust/src/self_test.rs) with four states (`POST_NOT_RUN`, `POST_RUNNING`, `POST_PASSED`, `POST_FAILED`). `run_power_on_self_tests` transitions to `POST_RUNNING` on entry and to `POST_PASSED` or `POST_FAILED` on exit. New `pub(crate) fn require_post()` returns `Ok(())` iff the atomic is `POST_PASSED` or `POST_RUNNING` (the latter to permit the self-test's own KAT calls). Every public v8 entry point (both bare-slice and `_key`-suffixed) gates on `#[cfg(feature = "fips_gate")] self_test::require_post()?`. **Feature is opt-in** — non-FIPS consumers see zero behaviour change. Regression tests (*corrected in round 5, CVF-V5-8: the two refusal tests previously listed here, `cvf47_require_post_gates_correctly` and `v8_entry_refuses_before_post_and_admits_after`, did not exist*):
 - `cvf47_post_state_transitions_to_passed` — state machine.
-- `cvf47_require_post_gates_correctly` — Err before POST, Ok after.
-- `v8_entry_refuses_before_post_and_admits_after` (behind `#[cfg(all(test, feature = "fips_gate"))]`) — end-to-end: v8 encrypt errors with `BuildProvenanceMismatch` before POST runs, succeeds after.
+- `cvf47_gate_decision_table` — the `admit` decision for every (state, POST-thread) pair.
+- `v8_entry_admits_after_post`, `concurrent_callers_wait_for_post` (behind `#[cfg(all(test, feature = "fips_gate"))]`) — admission only.
+- Round 5 (CVF-V5-8): `rust/tests/fips_gate.rs` (`--features fips_gate,fault_injection`) asserts that **every** gated entry point refuses before POST and after an injected POST failure, and that the failure is sticky.
 
 ### 5.4 Documentation and configuration (CVF-21, 23, 24, 27, 28, 36, 38, 39, 40)
 
@@ -340,7 +341,7 @@ Named `cvf<N>_...` where possible so `cargo test --lib cvf` surfaces the whole s
 - **CVF-42:** `cvf42_named_alphabet_constants_are_correct`
 - **CVF-43:** `cvf43_unpad_rejects_noncanonical_length_prefix`
 - **CVF-46:** `cvf46_v7_encryptors_share_emitter`
-- **CVF-47:** `cvf47_post_state_transitions_to_passed`, `cvf47_require_post_gates_correctly`, `v8_entry_refuses_before_post_and_admits_after`
+- **CVF-47:** `cvf47_post_state_transitions_to_passed`, `cvf47_gate_decision_table`, `v8_entry_admits_after_post`, `concurrent_callers_wait_for_post`; refusal coverage added in round 5 by `rust/tests/fips_gate.rs` (CVF-V5-8)
 - **CVF-18:** `kat4_v8_encrypt_roundtrip`, `kat5_v8_decrypt_roundtrip`, `kat6_v8_structural_reject`
 
 ### 7.5 What did **not** change (deliberate parity guarantees)

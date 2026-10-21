@@ -104,14 +104,30 @@ messages that fit in memory, prefer the SIV-protected block API
 KATs (v7 and v8 encrypt/decrypt/tamper, a v8 structural reject, and a KEM
 derivation KAT plus FrodoKEM and hybrid pairwise-consistency checks) and
 latches the outcome process-wide. Building with `--features fips_gate`
-makes every public v8 encrypt/decrypt entry point (block, streaming,
-`NapqesKey` variants) and every KEM encapsulate/decapsulate call refuse to
-run (`module not operational`) until that call has returned `Ok(())`; a
-failed POST keeps the module in the error state. Without the feature the
-outcome is still latched but not enforced, and the feature is off by
-default. Key generation, the v7 legacy decryptors, `ot_frame`, `protocols`
-and `vale` are outside the gate. The bundled binaries and examples run POST
-at start-up.
+makes the following refuse to run (`module not operational`) until that
+call has returned `Ok(())`:
+
+* every public v8 entry point (block, streaming, `NapqesKey` `_key` variants);
+* every public v7 entry point (`encrypt`, `encrypt_bytes`, `encrypt_str`,
+  `encrypt_raw`, `decrypt`, `decrypt_bytes`, `decrypt_str`, `decrypt_raw`);
+* key generation (`generate_prime_numbers`, `generate_v8_key`,
+  `NapqesKey::generate`);
+* every KEM encapsulate/decapsulate call.
+
+**Not gated:** `is_prime`, `NapqesKey::new` (validation only), the KEM
+`keygen`/`keygen_hybrid` and `derive_napqes_key*` helpers, and the
+`ot_frame`/`protocols` framing code, which reaches crypto only through the
+gated entry points above.
+
+A failed POST, or a failed conditional self-test, puts the module in the
+error state. **The error state is sticky:** a later call to
+`run_power_on_self_tests()` returns `Err(NotOperational)` without
+re-running, and the module stays refused until the process restarts.
+`rust/tests/fips_gate.rs` (`cargo test --features fips_gate,fault_injection
+--test fips_gate`) asserts the refusal of every gated entry point before
+POST and after an injected failure. Without `fips_gate` the outcome is
+still latched but not enforced; the feature is off by default. The bundled
+binaries and examples run POST at start-up.
 
 ## Public surface
 

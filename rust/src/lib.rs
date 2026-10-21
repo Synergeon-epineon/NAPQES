@@ -206,6 +206,9 @@ pub fn is_prime(n: u64) -> bool {
 /// roughly 250 times the expected number of draws, so a prime-poor range is
 /// diagnosed in milliseconds instead of after `4·span` primality tests.
 pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Result<Vec<u64>, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     use rand::distributions::{Distribution, Uniform};
     if max_val <= min_val {
         return Err(format!(
@@ -749,6 +752,9 @@ fn unpad_message(padded: &[u32]) -> Result<Vec<u32>, String> {
 /// key validation. Anything else is an `Err`, so every output of `encrypt`
 /// is accepted by its inverse [`decrypt`].
 pub fn encrypt(message: &[u32], key: &[u64]) -> Result<([u8; NONCE_SIZE], Vec<u64>), String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     if message.len() > MAX_PLAINTEXT_CODEPOINTS {
         return Err(format!(
             "message length {} exceeds MAX_PLAINTEXT_CODEPOINTS ({})",
@@ -822,6 +828,9 @@ fn decrypt_core(
 /// new signature propagates the error like every other decryption path.
 /// Legacy v7: see [`decrypt_bytes`] for the caveats.
 pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Result<Vec<u32>, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15
     let kb = key_bytes(key);
     decrypt_core(nonce, cypher, key, &kb)
@@ -1055,6 +1064,9 @@ fn fixed_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
             encrypt_bytes_v8 / encrypt_bytes_v8_with_profile."
 )]
 pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15
     check_v7_aad_len(aad.len())?;
     // CVF-34: cap plaintext length at MAX_PLAINTEXT_CODEPOINTS at the entry
@@ -1136,6 +1148,9 @@ pub(crate) fn encrypt_bytes_with_nonce(
 /// derivation by the serialised prime tuple rather than an independent `sk`,
 /// and no theorem of the NAPQES v4 paper applies to it (CVF-28).
 pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15
     check_v7_aad_len(aad.len())?;
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
@@ -1190,6 +1205,9 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
             and no theorem of the paper applies (CVF-28). Use encrypt_bytes_v8."
 )]
 pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     // CVF-15: transitively covered by encrypt_bytes, but early-rejecting a
     // bad key means we never allocate the base64 buffer for a doomed op.
     validate_key(key)?;
@@ -1200,6 +1218,9 @@ pub fn encrypt_str(message: &str, key: &[u64], aad: &[u8]) -> Result<String, Str
 /// Legacy v7 decryptor (base64 wrapper over [`decrypt_bytes`]); see that
 /// function for the v7 caveats.
 pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15 — reject before base64 decode
     let bytes = STANDARD
         .decode(cypher.as_bytes())
@@ -1228,6 +1249,9 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
             text encoding."
 )]
 pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15
     check_v7_aad_len(aad.len())?;
     // CVF-34: cap at MAX_PLAINTEXT_CODEPOINTS bytes (each byte becomes a
@@ -1265,6 +1289,9 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
 /// `Err` on authentication failure — the caller must never use the
 /// ciphertext for any purpose if this returns an error.
 pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(key)?; // CVF-15
     check_v7_aad_len(aad.len())?;
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
@@ -1464,6 +1491,9 @@ pub fn generate_v8_key(
     min_val: u64,
     max_val: u64,
 ) -> Result<(Vec<u64>, [u8; SK_SIZE]), String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
     if !(MIN_KEY_PRIME <= min_val && max_val <= MAX_KEY_PRIME) {
         return Err(format!(
             "generate_v8_key: range [{}, {}] lies outside [MIN_KEY_PRIME, MAX_KEY_PRIME]",

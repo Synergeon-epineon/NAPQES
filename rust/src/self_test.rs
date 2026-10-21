@@ -47,8 +47,9 @@ use std::sync::{Mutex, MutexGuard};
 // caller could drop. A Result a caller can drop is not what FIPS 140-3
 // §4.9.1 requires — a failed module must enter an error state that inhibits
 // crypto. We latch the outcome into a process-global atomic and, behind the
-// opt-in `fips_gate` cargo feature, every public v8 entry point calls
-// `require_post()` before doing any crypto work.
+// opt-in `fips_gate` cargo feature, every public v8 and v7 entry point, key
+// generation and every KEM encapsulate/decapsulate call `require_post()`
+// before doing any crypto work (CVF-V5-8). FAILED is sticky until restart.
 //
 // The feature is opt-in so that existing consumers see zero behaviour
 // change; FIPS 140-3 deployments enable `--features fips_gate` and are
@@ -96,6 +97,40 @@ fn admit(state: u8, in_post: bool) -> Result<(), SelfTestError> {
         _ => Err(SelfTestError::NotOperational),
     }
 }
+
+/// Enter the error state (CVF-V5-8 / CVF-V5-19). Called on a conditional
+/// self-test failure such as the continuous RNG test. FAILED is sticky: no
+/// later call to [`run_power_on_self_tests`] clears it, so the module stays
+/// non-operational until the process restarts.
+pub(crate) fn enter_error_state() {
+    let _lock = lock_post();
+    POST_STATE.store(POST_FAILED, Ordering::Release);
+}
+
+/// Test-only fault injection (CVF-V5-8). Compiled only with the
+/// `fault_injection` feature, which refuses to build in release mode, so a
+/// production binary cannot carry these hooks.
+#[cfg(feature = "fault_injection")]
+#[doc(hidden)]
+pub mod fault_injection {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub(crate) static FAIL_NEXT_POST: AtomicBool = AtomicBool::new(false);
+    pub(crate) static CRNG_STUCK: AtomicBool = AtomicBool::new(false);
+
+    /// Make the next `run_power_on_self_tests` fail as if a KAT had failed.
+    pub fn fail_next_post() {
+        FAIL_NEXT_POST.store(true, Ordering::Release);
+    }
+
+    /// Make the next CRNG continuous test report two identical draws.
+    pub fn force_crng_stuck() {
+        CRNG_STUCK.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(all(feature = "fault_injection", not(debug_assertions)))]
+compile_error!("the `fault_injection` feature is test-only and must not be built in release mode");
 
 /// Crate-visible gate (CVF-47). Returns `Ok(())` iff the power-on self-tests
 /// have passed. A caller arriving while POST is running on another thread
@@ -557,12 +592,24 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, SelfTestError> {
 ///
 /// This function MUST be called by the Crypto Officer before any cryptographic
 /// operations are performed in a production deployment.
+///
+/// **The error state is sticky (CVF-V5-8).** Once POST or a conditional
+/// self-test has failed, this function returns
+/// `Err(SelfTestError::NotOperational)` without re-running: the module can
+/// only be returned to service by restarting the process.
 pub fn run_power_on_self_tests() -> Result<(), SelfTestError> {
     // CVF-47: a panicking KAT leaves POST_RUNNING, which refuses all callers.
     let _lock = lock_post();
+    if POST_STATE.load(Ordering::Acquire) == POST_FAILED {
+        return Err(SelfTestError::NotOperational);
+    }
     POST_STATE.store(POST_RUNNING, Ordering::Release);
     let _in_post = InPostFlag::set();
     let result = (|| -> Result<(), SelfTestError> {
+        #[cfg(feature = "fault_injection")]
+        if fault_injection::FAIL_NEXT_POST.swap(false, Ordering::AcqRel) {
+            return Err(SelfTestError::InternalError("fault injected"));
+        }
         kat_encrypt()?;
         kat_decrypt()?;
         kat_tamper_rejection()?;

@@ -3,14 +3,23 @@ name = "napqes"
 version = "0.1.0"
 edition = "2021"
 
-# CVF-47: opt-in FIPS 140-3 self-test gating. When enabled, every public v8
-# entry point calls `self_test::require_post()?` before doing crypto — the
-# caller MUST first call `run_power_on_self_tests()` and it MUST succeed,
-# else all crypto operations return `Err(NotOperational)`. Disabled
-# by default so existing (non-FIPS) consumers see zero behaviour change.
+# CVF-47 / CVF-V5-8: opt-in FIPS 140-3 self-test gating. When enabled, every
+# public v8 and v7 encrypt/decrypt entry point, key generation
+# (`generate_prime_numbers`, `generate_v8_key`, `NapqesKey::generate`) and
+# every KEM encapsulate/decapsulate call first checks the POST latch and
+# returns `Err(NotOperational)` unless `run_power_on_self_tests()` has
+# succeeded. The error state is sticky until the process restarts. Not gated:
+# `is_prime`, `validate_key`, `NapqesKey::new`, the KEM `keygen*` and
+# `derive_napqes_key*` helpers, and `ot_frame` / `protocols` framing (which
+# reach crypto only through gated entry points). Disabled by default so
+# existing (non-FIPS) consumers see zero behaviour change.
 [features]
 default = []
 fips_gate = []
+# Test-only: exposes `self_test::fault_injection` so the FAILED state and the
+# CRNG continuous-test failure can be exercised (rust/tests/fips_gate.rs).
+# Refuses to compile in release mode.
+fault_injection = []
 # Requires the unpublished rust/src/vale sources (gitignored).
 vale = []
 # Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
@@ -76,6 +85,11 @@ path = "src/bin/ls_gateway.rs"
 name = "vale_demo"
 path = "src/bin/vale_demo.rs"
 required-features = ["vale"]
+
+[[test]]
+name = "fips_gate"
+path = "tests/fips_gate.rs"
+required-features = ["fips_gate", "fault_injection"]
 
 [lib]
 name = "napqes"
