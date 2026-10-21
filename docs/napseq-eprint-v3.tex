@@ -403,11 +403,16 @@ construction (the reference implementations cap $K\le128$ to bound the
 per-call cost of key validation), and both parties must agree on it out of band exactly as they
 agree on $\mathbf{k}$ itself. A receiver configured with a different tuple
 (including a different $K$) still verifies the tag, which is keyed by
-$\mathsf{sk}$ alone, and then fails the structural checks of
-$\mathsf{Dec}$ step (7) with overwhelming probability as soon as a real
-token uses a differing element; a mismatch therefore surfaces as a
-decryption error, never (except with that negligible probability) as a
-wrong plaintext.\footnote{CVF-36: an earlier revision of this
+$\mathsf{sk}_{\mathrm{fmt}}$ (derived from $\mathsf{sk}$ alone), and
+then reaches the structural checks of $\mathsf{Dec}$ step (7). Each real
+token produced under an element $k$ but checked against a differing element
+$k'$ passes the divisibility guard with probability about $1/k'$, that is
+between $2^{-23.8}$ and $2^{-19.9}$ over $\mathcal{P}$ — small, but not
+negligible in the cryptographic sense (CVF-V5-24); a message has at least
+$R\ge18$ real tokens, and a mismatch on any element that is used makes all
+of them pass only with a probability that is the product of these terms.
+A mismatch therefore surfaces as a decryption error, and only with that
+small probability as a wrong plaintext.\footnote{CVF-36: an earlier revision of this
 remark stated that ``the reference implementations emit a warning below
 $K=7$''. The Rust port emits no such warning; the Python and C ports keep
 an advisory warning at key generation, labelled as relevant to the legacy
@@ -582,7 +587,7 @@ the whole domain: any two distinct argument tuples, whatever their
 provenance, map to distinct HMAC-SHA256 inputs.
 \end{proof}
 
-\begin{remark}[Audit finding CV-11: undocumented $\texttt{0x0B}$
+\begin{remark}[Audit finding CVF-11: undocumented $\texttt{0x0B}$
 format-subkey layer]\label{rem:cv11}
 Previous revisions of this section stated the schedule as
 $\mathrm{Derive}_d(\mathsf{sk},N,\mathsf{ctx})=\mathrm{HMAC}(\mathsf{sk},d\|N\|\mathsf{ctx})$
@@ -600,10 +605,15 @@ implementation written from the earlier text produces \emph{none} of the
 twelve positive vectors. The defect was in the specification, not the
 port; the extra PRF layer is deliberate and buys cross-format tag
 separation, so this section, Table~\ref{tab:domains}, Lemma~\ref{lem:domsep},
-the four security theorems of Section~\ref{sec:security}, and the
-Section~\ref{sec:caveats} ``Scope of $\mathsf{sk}$ and $\mathbf{k}$
-compromise'' caveat have all been restated in terms of
-$\mathsf{sk}_{\mathrm{fmt}}$ as it is actually computed. Each theorem's
+the four security theorems of Section~\ref{sec:security}, the security
+preamble of Section~\ref{sec:security}, the correctness proof
+(Proposition~\ref{prop:correctness}), $\mathsf{Dec}$ (step (0)),
+Lemma~\ref{lem:nonce-collision}, and the Section~\ref{sec:caveats}
+``Scope of $\mathsf{sk}$ and $\mathbf{k}$ compromise'' caveat are stated
+in terms of $\mathsf{sk}_{\mathrm{fmt}}$ as it is actually computed
+(the preamble, the proof, $\mathsf{Dec}$ step (0) and the lemma were
+completed in round 5, CVF-V5-24; an earlier version of this remark claimed
+the restatement was already complete). Each theorem's
 bound gains one
 $\mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}_0)$
 term for the single-query $\texttt{0x0B}$ hop — a quantitatively
@@ -646,11 +656,14 @@ wire format retained in the reference implementations for backward
 compatibility with archived ciphertexts uses an IEEE-754 f64 form of the
 noise threshold. v7 encryptors are \texttt{\#[deprecated]} per CVF-17; v7
 decryptors are kept so archived ciphertexts remain decodable. The v7 f64
-path is documented in \texttt{docs/CAVEATS.md} under CVF-30.} Fix the public integer constants
+path is documented in the rustdoc of \texttt{derive\_noise\_p} in
+\texttt{rust/src/lib.rs}.} Fix the public integer constants
 \[
-  \theta_{\min} = \lfloor 0.75 \times 2^{64} \rfloor, \qquad
-  \theta_{\max} = \lfloor 0.99 \times 2^{64} \rfloor,
+  \theta_{\min} = \left\lfloor \tfrac{75 \cdot 2^{64}}{100} \right\rfloor = 13{,}835{,}058{,}055{,}282{,}163{,}712, \qquad
+  \theta_{\max} = \left\lfloor \tfrac{99 \cdot 2^{64}}{100} \right\rfloor = 18{,}262{,}276{,}632{,}972{,}456{,}099,
 \]
+computed exactly in integer arithmetic (CVF-V5-24): the IEEE-754 product
+$0.99\times2^{64}$ rounds to a value $163$ lower and MUST NOT be used,
 and let $\tau = \mathrm{Derive}_{0x02}(\mathsf{sk}_{\mathrm{fmt}}, N, \varepsilon)[0:8]_{\mathrm{be64}} \in [0, 2^{64})$
 be the raw 64-bit unsigned integer HMAC output (no division involved).
 The per-message noise threshold is the 64-bit integer
@@ -1012,7 +1025,8 @@ $\mathsf{Encrypt}(\mathbf{k},\mathsf{sk},A,M)\triangleq\mathsf{Enc}(\mathbf{k},\
 rather than sampled.
 
 \paragraph{$\mathsf{Dec}(\mathbf{k}, \mathsf{sk}, A, C) \to M \text{ or } \bot$.}
-(1) if $|C|<48$, output $\bot$; (2) parse $C=N\|\widetilde{B}\|T'$ with $N$
+(0) derive $\mathsf{sk}_{\mathrm{fmt}}$ (Definition~\ref{def:fmtkey}; it
+may be cached per key install, CVF-V5-24); (1) if $|C|<48$, output $\bot$; (2) parse $C=N\|\widetilde{B}\|T'$ with $N$
 the leading 16 bytes and $T'$ the trailing 32 bytes; (3) let
 $N_{\mathrm{tok}}=(|C|-48)/8$ and, if this is not a non-negative integer or
 not divisible by $\mathrm{MAX\_NOISE\_RUN}+1$, output $\bot$; otherwise set
@@ -1095,7 +1109,8 @@ $\widetilde{B}$ that $\mathsf{Enc}$ emitted; in particular $N$ is
 \emph{read from the ciphertext}, not re-derived, so no circularity with the
 synthetic-nonce derivation arises. Hence $\mathsf{Dec}$ step (4) evaluates
 $\mathrm{Derive}_{0x03}$ on $\mathrm{TagIn}(A,\widetilde{B})$ with the same
-$\mathsf{sk}$, the same $N$, the same caller-supplied $A$, and the same
+$\mathsf{sk}_{\mathrm{fmt}}$ (both derive it from the same $\mathsf{sk}$
+in their step (0)), the same $N$, the same caller-supplied $A$, and the same
 $\widetilde{B}$ as $\mathsf{Enc}$ step (6) did
 (Definition~\ref{def:taginput}). The two tag inputs are byte-identical, so
 $T=T'$ and step (5) does not reject. Since $R=B(|M|)+2$ with
@@ -1104,13 +1119,23 @@ the length prefix written by $\mathsf{Enc}$ satisfies $n=|M|\le B(|M|)=R-2$,
 neither does step (8).
 
 Step (7) then unmasks with $\mathrm{ks}(N)$, the same keystream
-$\mathsf{Enc}$ masked with (a function of $\mathsf{sk}$ and the recovered
-$N$ alone), recovering $B$ and hence the token vector. $\mathsf{Enc}$'s
-token-emission loop and $\mathsf{Dec}$'s loop-inversion step both compute
-the noise-position oracle, addends, and padding codepoints as pure,
-deterministic functions of $(\mathsf{sk},N,\mathrm{position})$, so with the
-same $\mathsf{sk}$ and $N$ they compute identical intermediate values at
-every position; emission and inversion are therefore exact inverses, and
+$\mathsf{Enc}$ masked with (a function of $\mathsf{sk}_{\mathrm{fmt}}$ and
+the recovered $N$ alone), recovering $B$ and hence the token vector.
+$\mathsf{Enc}$'s token-emission loop and $\mathsf{Dec}$'s loop-inversion
+step both compute the noise-position oracle, addends, and padding
+codepoints as pure, deterministic functions of
+$(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{position})$, so they compute
+identical intermediate values at every position and $\mathsf{Dec}$ reads
+exactly the real tokens $t=c\cdot k+a$ that $\mathsf{Enc}$ wrote, with the
+same $k$ and reduced addend $a\in[1,k-1]$. The rejection branches of step
+(7) are therefore never taken (CVF-V5-24): $t\ge a$ and
+$(t-a)=c\cdot k\equiv0\pmod k$ hold, and the recovered $c$ is a padded
+codepoint — a codepoint of $M\in\mathcal{M}$ (a Unicode scalar value), a
+padding codepoint in $[32,126]$, or a length-prefix byte in $[0,255]$ —
+so it is a scalar value at most $\mathtt{0x10FFFF}$. Nor is the
+byte-valued test of step (8): $\mathsf{Enc}$ writes
+$(p_0,p_1)=(\lfloor|M|/256\rfloor,|M|\bmod256)$ with $|M|\le65{,}535$, so
+$p_0,p_1\le255$. Emission and inversion are therefore exact inverses, and
 stripping the length prefix and padding yields $M$.
 \end{proof}
 
@@ -1154,13 +1179,17 @@ Every theorem in this section is unconditional under the standard,
 uniform-key PRF assumption on HMAC-SHA256 stated below: because
 $\mathsf{sk}$ is sampled uniformly and independently of $\mathbf{k}$, every
 reduction constructed in this section may sample $\mathbf{k}$ on its own
-(to run the arithmetic layer) while forwarding every HMAC call to an
-external oracle keyed by the challenger's $\mathsf{sk}$ — the reduction
-never needs to extract $\mathsf{sk}$ from $\mathbf{k}$, or vice versa, so
-no simulation gap and no non-standard key-distribution assumption arises.
+(to run the arithmetic layer) while forwarding every HMAC call to
+external oracles: the single domain-$\texttt{0x0B}$ call to one keyed by
+the challenger's $\mathsf{sk}$, and every per-message call to one keyed by
+$\mathsf{sk}_{\mathrm{fmt}}=\mathrm{HMAC}(\mathsf{sk},\texttt{0x0B}\|\texttt{0x01})$,
+which the first PRF hop of every proof replaces by a uniform 256-bit key
+(CVF-V5-24). The reduction never needs to extract $\mathsf{sk}$ or
+$\mathsf{sk}_{\mathrm{fmt}}$ from $\mathbf{k}$, or vice versa, so no
+simulation gap and no non-standard key-distribution assumption arises.
 NAPQES does not define a standalone MAC verification key separate from
-$\mathsf{sk}$, so EUF-CMA unforgeability of the tag and INT-CTXT
-unforgeability of the ciphertext coincide here.
+$\mathsf{sk}_{\mathrm{fmt}}$, so EUF-CMA unforgeability of the tag and
+INT-CTXT unforgeability of the ciphertext coincide here.
 
 \subsection{PRF Advantage and Truncation}
 
@@ -1306,8 +1335,10 @@ this is a direct consequence of $B$ depending only on codepoint count.
 
 \begin{lemma}[Nonce collision]\label{lem:nonce-collision}
 For any two distinct queried pairs $(A_1,M_1)\neq(A_2,M_2)$ under the same
-$\mathsf{sk}$, there is a PRF adversary $\mathcal{B}$ with similar running
-time such that
+$\mathsf{sk}_{\mathrm{fmt}}$, where $\mathsf{sk}_{\mathrm{fmt}}$ is
+uniform in $\{0,1\}^{256}$ (as it is in game $G_1$, after the
+domain-$\texttt{0x0B}$ hop; CVF-V5-24), there is a PRF adversary
+$\mathcal{B}$ with similar running time such that
 $\Pr[N(\mathsf{sk}_{\mathrm{fmt}},A_1,M_1)=N(\mathsf{sk}_{\mathrm{fmt}},A_2,M_2)] \le \mathrm{Adv}^{\mathrm{PRF}}_{\mathrm{HMAC\text{-}SHA256}}(\mathcal{B}) + 2^{-128}$.
 \end{lemma}
 
@@ -2315,7 +2346,8 @@ $\mathsf{Enc}$ as specified here, encrypting 480-codepoint slices of a
 cycling printable-ASCII corpus under a 10-element prime key, a fixed
 $\mathsf{sk}$, and a distinct per-slice AAD (without it the deterministic
 $\mathsf{Enc}$ repeats its output whenever the corpus slice repeats, and the
-suite correctly rejects the repetition). All 15 tests, 40 scored
+suite correctly rejects the repetition). All 14 implemented tests (Overlapping Template Matching is not
+implemented; CVF-V5-24), 40 scored
 sub-results, passed at the $\alpha=0.01$ significance level; the smallest
 $p$-value was $0.016$. Results are reproducible with
 \texttt{rust/src/bin/sts.rs} and recorded in \texttt{sts\_report.json} and
