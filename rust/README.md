@@ -122,8 +122,11 @@ buf.extend_from_slice(&enc.finish().unwrap());
 ## Power-on self-tests (FIPS 140-3)
 
 `napqes::self_test::run_power_on_self_tests()` runs the SP 800-140B §4.9.1
-KATs (v7 and v8 encrypt/decrypt/tamper, a v8 structural reject, and a KEM
-derivation KAT plus FrodoKEM and hybrid pairwise-consistency checks) and
+KATs (v7 decrypt/tamper and a v7 encrypt KAT through the crate-internal
+fixed-nonce sealer; v8 block encrypt/decrypt/tamper and a structural
+reject; a KEM derivation KAT plus FrodoKEM and hybrid pairwise-consistency
+checks; and, only when built with `experimental-stream`, v8 streaming
+encrypt/decrypt/truncation KATs on vector S002, CVF-V5-18) and
 latches the outcome process-wide. Building with `--features fips_gate`
 makes the following refuse to run (`module not operational`) until that
 call has returned `Ok(())`:

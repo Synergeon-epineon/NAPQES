@@ -21,6 +21,9 @@
 //!   KAT-8  KEM: FrodoKEM-640 key derivation from a fixed shared secret
 //!          (known answer, matches napqes_kem.py), plus a pairwise-consistency
 //!          round trip for the FrodoKEM and hybrid FrodoKEM+X25519 KEMs.
+//!   KAT-9..11 (only with `experimental-stream`, CVF-V5-18) v8 streaming:
+//!          S002 encrypt known answer (SHA-256), decrypt, and rejection of
+//!          a stream with its chunk frame removed.
 //!   INT-1  Software build-provenance check — a self-declared build-metadata
 //!          comparator, renamed from "integrity" per CVF-18: comparing
 //!          CARGO_PKG_VERSION to a literal is a version-string tautology, not
@@ -494,6 +497,26 @@ const KAT_V8_SK: [u8; crate::SK_SIZE] = [
     0x77, 0x44, 0x63, 0x4a, 0xc0, 0xd3, 0x8f, 0x57,
 ];
 const KAT_V8_MESSAGE: &str = "A";
+
+// KAT-9..11 constants (CVF-V5-18): vector S002 of tests/kat/v8_stream_vectors.json.
+#[cfg(any(test, feature = "experimental-stream"))]
+mod stream_kat {
+    pub(super) const PRIMES: &[u64] = &[1_000_003, 1_000_033, 1_000_037, 1_000_039];
+    pub(super) const SK: [u8; crate::SK_SIZE] = [
+        0x3b, 0x49, 0xe3, 0x04, 0x32, 0x9a, 0x9d, 0x92, 0x6c, 0x29, 0x10, 0x78, 0xde, 0x46, 0xbd, 0x4d,
+        0xce, 0x30, 0x86, 0xae, 0xe5, 0xac, 0xe7, 0xa6, 0x10, 0x8d, 0x55, 0x2b, 0xbb, 0x4e, 0x4b, 0xef,
+    ];
+    pub(super) const NONCE: [u8; crate::NONCE_SIZE] = [
+        0x45, 0xa7, 0xf8, 0xfa, 0xcb, 0xc1, 0x09, 0x2d, 0x59, 0x97, 0x50, 0x2d, 0x05, 0x4a, 0x87, 0xc7,
+    ];
+    pub(super) const MESSAGE: &str = "A";
+    pub(super) const FRAME: u32 = 8;
+    pub(super) const EXPECTED_LEN: usize = 1381;
+    pub(super) const EXPECTED_SHA256: [u8; 32] = [
+        0xa4, 0xbd, 0x2e, 0xf9, 0x4b, 0xc4, 0xca, 0x24, 0xcd, 0xe4, 0x32, 0xc1, 0x86, 0x8e, 0xc9, 0x80,
+        0x83, 0x15, 0xfb, 0xbd, 0xd1, 0xcb, 0xe5, 0x66, 0x73, 0xf5, 0xfc, 0x4b, 0x0f, 0xa2, 0x02, 0xb4,
+    ];
+}
 const KAT_V8_AAD: &[u8] = b"";
 /// Expected v8 ciphertext length for a one-codepoint message under the
 /// default bucket profile: 16 (nonce) + 8 * R * (MAX_NOISE_RUN+1) + 32 (tag)
@@ -542,6 +565,9 @@ pub enum SelfTestError {
     KatV8TamperNotRejected,
     /// KAT-8: KEM derivation or pairwise-consistency test failed (CVF-18).
     KatKemFailed,
+    /// KAT-9..11: v8 streaming encrypt, decrypt or truncation-rejection
+    /// known-answer test failed (CVF-V5-18; `experimental-stream` only).
+    KatStreamFailed,
     /// INT-1: build-provenance mismatch. **Renamed from `IntegrityCheckFailed`
     /// per CVF-18.** This check compares `CARGO_PKG_VERSION` to an operator-
     /// supplied `NAPQES_ATTESTED_VERSION`; it is not a binary HMAC integrity
@@ -565,6 +591,7 @@ impl fmt::Display for SelfTestError {
             Self::KatV8StructuralAccept  => write!(f, "KAT-6 FAIL: v8 structural-reject accepted malformed ciphertext"),
             Self::KatV8TamperNotRejected => write!(f, "KAT-7 FAIL: v8 tampered ciphertext was not rejected"),
             Self::KatKemFailed           => write!(f, "KAT-8 FAIL: KEM derivation or pairwise-consistency test failed"),
+            Self::KatStreamFailed        => write!(f, "KAT-9..11 FAIL: v8 streaming known-answer test failed"),
             Self::BuildProvenanceMismatch => write!(f, "INT-1 FAIL: build-provenance check mismatch"),
             Self::NotOperational         => write!(f, "module not operational: power-on self-tests have not passed"),
             Self::InternalError(s)       => write!(f, "SELF-TEST INTERNAL ERROR: {}", s),
@@ -619,6 +646,8 @@ pub fn run_power_on_self_tests() -> Result<(), SelfTestError> {
         kat_v8_structural_reject()?;
         kat_v8_tamper_rejection()?;
         kat_kem()?;
+        #[cfg(any(test, feature = "experimental-stream"))]
+        kat_stream()?;
         build_provenance_check()?;
         Ok(())
     })();
@@ -742,6 +771,37 @@ fn kat_kem() -> Result<(), SelfTestError> {
     Ok(())
 }
 
+// ─── KAT-9..11: v8 streaming (CVF-V5-18; experimental-stream only) ──────────
+//
+// KAT-9  encrypt: S002 inputs through the deterministic stream core must hash
+//        to the S002 reference ciphertext (covers the 0x02 format subkey,
+//        sub-nonces, filler, header binding and the masked sentinel).
+// KAT-10 decrypt: that ciphertext must decrypt to the S002 message.
+// KAT-11 truncation: dropping the only chunk frame (sentinel kept) must be
+//        rejected by the sentinel's chunk-count binding.
+
+#[cfg(any(test, feature = "experimental-stream"))]
+fn kat_stream() -> Result<(), SelfTestError> {
+    use stream_kat::*;
+    let fail = SelfTestError::KatStreamFailed;
+    let ct = crate::encrypt_stream_ae_v8_with_nonce(MESSAGE, PRIMES, &SK, &NONCE, b"", FRAME)
+        .map_err(|_| SelfTestError::KatStreamFailed)?;
+    let digest: [u8; 32] = Sha256::digest(&ct).into();
+    if ct.len() != EXPECTED_LEN || digest != EXPECTED_SHA256 {
+        return Err(fail);
+    }
+    if crate::decrypt_stream_ae_v8(&ct, PRIMES, &SK, b"").as_deref() != Ok(MESSAGE) {
+        return Err(SelfTestError::KatStreamFailed);
+    }
+    let frame_len = 4 + FRAME as usize * 160 + crate::TAG_SIZE;
+    let mut truncated = ct[..21].to_vec();
+    truncated.extend_from_slice(&ct[21 + frame_len..]);
+    if crate::decrypt_stream_ae_v8(&truncated, PRIMES, &SK, b"").is_ok() {
+        return Err(SelfTestError::KatStreamFailed);
+    }
+    Ok(())
+}
+
 // ─── INT-1: build-provenance check (CVF-18, renamed from integrity_check) ───
 //
 // The auditor observed that comparing `CARGO_PKG_VERSION` to a hard-coded
@@ -837,6 +897,26 @@ mod tests {
         assert_eq!(as_key(&w002["key"]), KAT_V8_PRIMES);
         assert_eq!(w002["message"], KAT_V8_MESSAGE);
         assert_eq!(hex_decode(w002["aad_hex"].as_str().unwrap()), KAT_V8_AAD.to_vec());
+
+        // CVF-V5-18: the streaming KAT constants are vector S002.
+        let stream = load_corpus("v8_stream_vectors.json");
+        let s002 = stream.iter().find(|v| v["id"] == "S002").expect("S002 missing");
+        let ct = hex_decode(s002["ciphertext_hex"].as_str().unwrap());
+        let digest: [u8; 32] = Sha256::digest(&ct).into();
+        assert_eq!(ct.len(), stream_kat::EXPECTED_LEN);
+        assert_eq!(digest, stream_kat::EXPECTED_SHA256);
+        assert_eq!(hex_decode(s002["sk_hex"].as_str().unwrap()), stream_kat::SK.to_vec());
+        assert_eq!(hex_decode(s002["nonce_hex"].as_str().unwrap()), stream_kat::NONCE.to_vec());
+        let primes: Vec<u64> = s002["primes"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
+        assert_eq!(primes, stream_kat::PRIMES);
+        assert_eq!(s002["message"], stream_kat::MESSAGE);
+        assert_eq!(s002["frame_codepoints"], stream_kat::FRAME);
+        assert_eq!(s002["aad_hex"], "");
+    }
+
+    #[test]
+    fn kat9_11_stream() {
+        kat_stream().expect("KAT-9..11 (v8 streaming) failed");
     }
 
     #[test]
