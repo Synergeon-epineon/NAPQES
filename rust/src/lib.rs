@@ -1168,7 +1168,13 @@ fn fixed_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
 
 // ─── Binary / string wrappers (v7 authenticated — CVF1 fix) ──────────────────
 
-
+/// Legacy v7 text encryptor (one token per codepoint).
+///
+/// **Convention confusion (CVF-14 / CVF-V5-25).** The codepoint convention is
+/// not bound into the tag: if every character is at most `U+00FF`, the
+/// ciphertext also opens without error under [`decrypt_raw`], which returns
+/// one byte per character (`"é"` becomes `[0xE9]`). Decrypt it only with
+/// [`decrypt_bytes`] or [`decrypt_str`].
 // CVF-V5-4 / CVF-V5-7: v7 encryptors are compiled only with `legacy-v7`.
 #[cfg(any(test, feature = "legacy-v7"))]
 #[deprecated(
@@ -1316,6 +1322,15 @@ fn open_v7(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u32>, Strin
 ///   produces them. [`decrypt_raw`] additionally rejects values above `0xFF`.
 /// * Everything else — every key produced by an in-tree generator of any
 ///   release, and every scalar-valued plaintext — decrypts as before.
+///
+/// # Byte/codepoint convention (CVF-14 / CVF-V5-25)
+///
+/// The v7 tag does not bind the plaintext convention. A ciphertext produced
+/// by `encrypt_raw` (feature `legacy-v7`; one token per byte) opens here **without error** and
+/// returns the bytes reinterpreted as codepoints `U+0000..U+00FF`
+/// (`encrypt_raw(&[0xC3, 0xA9])` decrypts to `"Ã©"`). Decrypt `encrypt_raw`
+/// output only with [`decrypt_raw`]. v8 has one normative (codepoint)
+/// convention and no such ambiguity.
 pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
     // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
     #[cfg(feature = "fips_gate")]
@@ -1383,8 +1398,13 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
 ///
 /// Each byte is treated as a codepoint in [0, 255].  Produces the same
 /// NAPQES v7 wire format as [`encrypt_bytes`], with the provided AAD bound
-/// into the authentication tag.  Intended for OT PDU framing where the
-/// payload is not valid UTF-8 text.
+/// into the authentication tag.
+///
+/// **Convention confusion (CVF-14 / CVF-V5-25).** The byte convention is
+/// not bound into the tag, so this ciphertext also opens without error under
+/// [`decrypt_bytes`], which returns the bytes reinterpreted as codepoints
+/// (`[0xC3, 0xA9]` comes back as `"Ã©"`, not `"é"`). Decrypt it only with
+/// [`decrypt_raw`].
 ///
 /// Deprecated per CVF-17: length depends on the nonce for v7. New callers
 /// should encode their bytes and use [`encrypt_bytes_v8`] instead.
@@ -1431,10 +1451,17 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
     Ok(payload)
 }
 
-/// Decrypt binary data previously encrypted with [`encrypt_raw`].
+/// Decrypt binary data previously encrypted with `encrypt_raw` (feature `legacy-v7`).
 ///
 /// Legacy v7 decryptor, kept for archived ciphertexts; see [`decrypt_bytes`]
-/// for the v7 caveats.
+/// for the v7 caveats and the compatibility envelope.
+///
+/// **Use only for ciphertexts produced by `encrypt_raw` (CVF-14 /
+/// CVF-V5-25).** v7 binds neither convention into the tag, so a ciphertext
+/// produced by `encrypt_bytes` (one codepoint per character) also opens
+/// here without error whenever every character is at most `U+00FF`: `"é"`
+/// comes back as the single byte `[0xE9]`, not its UTF-8 encoding. Values
+/// above `U+00FF` are rejected.
 ///
 /// Verifies the HMAC tag (constant-time) before decrypting.  Returns
 /// `Err` on authentication failure — the caller must never use the
@@ -3633,6 +3660,19 @@ mod v5_tests {
         for bad in [&[][..], &[1][..], &[7, 7][..], &[1u64 << 40][..]] {
             assert!(validate_key_v7_decrypt(bad).is_err(), "{:?} accepted", bad);
         }
+    }
+
+    // CVF-V5-25: the documented cross-convention behaviour, pinned.
+    #[test]
+    #[allow(deprecated)]
+    fn v5_25_v7_cross_convention_behaviour_is_as_documented() {
+        let key = [1_000_003u64, 1_000_033, 1_000_037, 1_000_039];
+        let ct = encrypt_bytes("é", &key, b"").unwrap();
+        assert_eq!(decrypt_raw(&ct, &key, b"").unwrap(), vec![0xE9]);
+        let ct = encrypt_raw(&[0xC3, 0xA9], &key, b"").unwrap();
+        assert_eq!(decrypt_bytes(&ct, &key, b"").unwrap(), "\u{C3}\u{A9}");
+        let ct = encrypt_bytes("€", &key, b"").unwrap();
+        assert!(decrypt_raw(&ct, &key, b"").is_err());
     }
 
     // CVF-V5-4: the v7 emission loop is bounded. With a forced threshold of
