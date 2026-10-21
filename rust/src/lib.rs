@@ -735,11 +735,15 @@ fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<
     out
 }
 
-/// HMAC-CTR keystream for masking the varint blob — domain byte 0x07.
+/// HMAC-CTR keystream (domain 0x07) that masks the serialised token blob.
 ///
-/// Each 32-byte block is `HMAC(key_bytes, 0x07 || nonce || uint32_be(block))`.  
-/// XOR-masking the raw LEB128 blob eliminates the 3:1 MSB continuation-bit
-/// bias that otherwise causes systematic NIST SP 800-22 failures.
+/// Each 32-byte block is `HMAC(kb, 0x07 || nonce || uint32_be(block))`.
+/// In the current fixed-width format the mask hides the token values, which
+/// are otherwise affine in the plaintext codepoints (`c * k + a`) and whose
+/// high-order bytes are always zero because tokens are far below 2^64; it
+/// is what makes the ciphertext bytes look uniform. (CVF-V5-22: the earlier
+/// LEB128 continuation-bit justification referred to a format that no longer
+/// exists; the function name keeps its historical `varint_` prefix.)
 fn varint_keystream(kb: &[u8], nonce: &[u8], length: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(length + 32);
     let mut block: u32 = 0;
@@ -1047,12 +1051,14 @@ fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Resu
 /// length guard was compiled out; both concerns are architecturally
 /// impossible under `subtle::ConstantTimeEq`).
 ///
-/// Used at the three tag verification sites (v7 `decrypt_bytes`,
-/// `decrypt_raw`, v8 `decrypt_bytes_v8`) on `[u8; TAG_SIZE]` operands, and
-/// once inside `generate_nonce_with_crng_check` on `[u8; NONCE_SIZE]`
-/// operands (CVF-35 flags that the latter compares public values — no
-/// constant-time requirement — but the comparator's uniform length handling
-/// makes it safe there too).
+/// Used (CVF-V5-22: list corrected) at every tag verification site — v7
+/// `open_v7` (`decrypt_bytes`, `decrypt_str`, `decrypt_raw`), v8
+/// `decrypt_bytes_v8_core_inner`, and the v8 streaming chunk and sentinel
+/// tags — on `[u8; TAG_SIZE]` operands; by the INT-2 integrity self-test on
+/// 32-byte digests; and inside `generate_nonce_with_crng_check` on
+/// `[u8; NONCE_SIZE]` operands (CVF-35 flags that the latter compares public
+/// values — no constant-time requirement — but the comparator's uniform
+/// length handling makes it safe there too).
 #[inline(never)]
 fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;

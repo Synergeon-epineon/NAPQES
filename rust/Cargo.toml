@@ -75,10 +75,10 @@ dudect-bencher = "0.6"
 
 # CVF-23: manifest hardening — release builds trap on integer overflow
 # (belt-and-braces backstop for CVF-16's checked_mul recommendation). Test
-# builds need no profile of their own: the default test profile already
-# keeps overflow checks and debug_assert! live, so CVF-12's ct_eq_bytes
-# length check fires in `cargo test` (CVF-V5-6 / CVF-V5-22: the redundant
-# [profile.test] block and its stale comment were removed).
+# builds use Cargo's default test profile, which already has overflow checks
+# and debug assertions on; no [profile.test] block is needed (CVF-V5-6 /
+# CVF-V5-22: the redundant block and its comment about a ct_eq_bytes length
+# check, which no longer exists, were removed).
 [profile.release]
 overflow-checks = true
 debug-assertions = false
