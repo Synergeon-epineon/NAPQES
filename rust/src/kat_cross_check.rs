@@ -18,6 +18,8 @@
 //! Run:
 //!   cargo test --lib kat_cross_check -- --nocapture
 
+#![allow(deprecated)] // cross-checks the deprecated bare-slice v8 entry points by design (CVF-V5-29)
+
 use crate::{
     decrypt_bytes, decrypt_bytes_v8, encrypt_bytes_v8_with_profile,
     encrypt_bytes_with_nonce, NONCE_SIZE, PadProfile,

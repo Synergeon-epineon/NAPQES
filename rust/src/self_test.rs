@@ -38,6 +38,8 @@
 //!
 //! Reference: NIST SP 800-140B §4.9.1 (power-on self-tests).
 
+#![allow(deprecated)] // the KATs exercise the deprecated bare-slice v8 entry points by design (CVF-V5-29)
+
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fmt;

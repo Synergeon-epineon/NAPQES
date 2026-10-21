@@ -22,6 +22,7 @@
 //! ```
 
 #![no_main]
+#![allow(deprecated)] // fuzzes the bare-slice v8 entry points (CVF-V5-29)
 
 use libfuzzer_sys::fuzz_target;
 use napqes::{

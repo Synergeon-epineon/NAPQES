@@ -1677,12 +1677,24 @@ fn synthetic_nonce(sk_fmt: &[u8], aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE
 ///
 /// Uses the default [`PadProfile::Bucket`] padding profile; see
 /// [`encrypt_bytes_v8_with_profile`] to select another.
+///
+/// **Per-call key validation (CVF-29 / CVF-V5-29).** This bare-slice entry
+/// point runs full key validation (trial division) on every call, and its
+/// running time depends on the secret primes. Construct a [`NapqesKey`] once
+/// and use the `_key` variant instead.
+#[deprecated(
+    since = "0.3.0",
+    note = "validates the key by trial division on every call, with timing that \
+            depends on the secret primes (CVF-29 / CVF-V5-29); construct a \
+            NapqesKey once and use the _key variant"
+)]
 pub fn encrypt_bytes_v8(
     message: &str,
     primes: &[u64],
     sk: &[u8; SK_SIZE],
     aad: &[u8],
 ) -> Result<Vec<u8>, String> {
+    #[allow(deprecated)]
     encrypt_bytes_v8_with_profile(message, primes, sk, aad, PadProfile::Bucket)
 }
 
@@ -1693,6 +1705,17 @@ pub fn encrypt_bytes_v8(
 /// [`PadProfile::Bucket`] leaks at most ~3.70 bits, [`PadProfile::Frame`]
 /// exactly zero. It is a sender-side parameter, never transmitted;
 /// [`decrypt_bytes_v8`] needs no matching argument.
+///
+/// **Per-call key validation (CVF-29 / CVF-V5-29).** This bare-slice entry
+/// point runs full key validation (trial division) on every call, and its
+/// running time depends on the secret primes. Construct a [`NapqesKey`] once
+/// and use the `_key` variant instead.
+#[deprecated(
+    since = "0.3.0",
+    note = "validates the key by trial division on every call, with timing that \
+            depends on the secret primes (CVF-29 / CVF-V5-29); construct a \
+            NapqesKey once and use the _key variant"
+)]
 pub fn encrypt_bytes_v8_with_profile(
     message: &str,
     primes: &[u64],
@@ -1753,6 +1776,17 @@ fn encrypt_bytes_v8_core_inner(
 }
 
 /// Misuse-resistant v8 decryption — inverse of [`encrypt_bytes_v8`].
+///
+/// **Per-call key validation (CVF-29 / CVF-V5-29).** This bare-slice entry
+/// point runs full key validation (trial division) on every call, and its
+/// running time depends on the secret primes. Construct a [`NapqesKey`] once
+/// and use the `_key` variant instead.
+#[deprecated(
+    since = "0.3.0",
+    note = "validates the key by trial division on every call, with timing that \
+            depends on the secret primes (CVF-29 / CVF-V5-29); construct a \
+            NapqesKey once and use the _key variant"
+)]
 pub fn decrypt_bytes_v8(
     ciphertext: &[u8],
     primes: &[u64],
@@ -2291,6 +2325,33 @@ pub fn encrypt_stream_ae_v8(
     encrypt_stream_ae_v8_with_nonce(plaintext, primes, sk, &nonce, aad, frame_codepoints)
 }
 
+/// [`encrypt_stream_ae_v8`] taking a validated [`NapqesKey`]: no per-call
+/// key validation (CVF-V5-29).
+#[cfg(any(test, feature = "experimental-stream"))]
+pub fn encrypt_stream_ae_v8_key(
+    plaintext: &str,
+    key: &NapqesKey,
+    aad: &[u8],
+    frame_codepoints: u32,
+) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
+    validate_stream_v8_frame(frame_codepoints)?;
+    let nonce = generate_nonce_with_crng_check()?;
+    let sk_fmt = Secret32::new(derive_format_subkey(key.sk(), FORMAT_STREAM_AE_V8));
+    encrypt_stream_ae_v8_inner(plaintext, key.primes(), sk_fmt.as_ref(), &nonce, aad, frame_codepoints)
+}
+
+/// [`decrypt_stream_ae_v8`] taking a validated [`NapqesKey`]: no per-call
+/// key validation (CVF-V5-29).
+#[cfg(any(test, feature = "experimental-stream"))]
+pub fn decrypt_stream_ae_v8_key(stream: &[u8], key: &NapqesKey, aad: &[u8]) -> Result<String, String> {
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
+    let sk_fmt = Secret32::new(derive_format_subkey(key.sk(), FORMAT_STREAM_AE_V8));
+    decrypt_stream_ae_v8_inner(stream, key.primes(), sk_fmt.as_ref(), aad)
+}
+
 /// v8 streaming-AE decryption -- consumes the full ciphertext byte stream.
 ///
 /// **Not incremental (CVF-V5-10).** Rust streaming is incremental on the
@@ -2480,6 +2541,9 @@ impl StreamV8Encryptor {
     /// Create a new encryptor and return `(self, header_bytes)`. `header_bytes`
     /// is exactly 21 B (0x02 || be4(F) || nonce). The nonce is drawn from a
     /// CSPRNG with the FIPS CRNG self-test.
+    ///
+    /// Validates the prime tuple by trial division on every call, with timing
+    /// that depends on the secret primes (CVF-V5-29); prefer [`Self::new_key`].
     pub fn new(
         primes: &[u64],
         sk: &[u8; SK_SIZE],
@@ -2490,6 +2554,23 @@ impl StreamV8Encryptor {
         #[cfg(feature = "fips_gate")]
         crate::self_test::require_post().map_err(|e| e.to_string())?;
         validate_key(primes)?;
+        Self::new_validated(primes, sk, aad, frame_codepoints)
+    }
+
+    /// [`Self::new`] taking a validated [`NapqesKey`]: no per-call key
+    /// validation (CVF-V5-29).
+    pub fn new_key(key: &NapqesKey, aad: &[u8], frame_codepoints: u32) -> Result<(Self, Vec<u8>), String> {
+        #[cfg(feature = "fips_gate")]
+        crate::self_test::require_post().map_err(|e| e.to_string())?;
+        Self::new_validated(key.primes(), key.sk(), aad, frame_codepoints)
+    }
+
+    fn new_validated(
+        primes: &[u64],
+        sk: &[u8; SK_SIZE],
+        aad: &[u8],
+        frame_codepoints: u32,
+    ) -> Result<(Self, Vec<u8>), String> {
         validate_stream_v8_frame(frame_codepoints)?;
         let nonce = generate_nonce_with_crng_check()?;
         let sk_fmt = Box::new(Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8)));
@@ -2596,6 +2677,7 @@ impl Drop for StreamV8Encryptor {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(deprecated)] // exercises the deprecated bare-slice and v7 entry points
 mod tests {
     // CVF-17: these tests exercise the v7 legacy encryptors that are now
     // #[deprecated]. The deprecation is a message to external consumers to
@@ -3646,6 +3728,7 @@ mod tests {
 // --- Round-5 audit regression tests (CVF-V5-*) ------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod v5_tests {
     use super::*;
 
@@ -3754,6 +3837,24 @@ mod v5_tests {
         let err = emit_tokens_v7(&[0x41], &kb, &nonce, 1.0, &key).unwrap_err();
         assert!(err.contains("CVF-V5-4"), "{}", err);
         assert!(emit_tokens_v7(&[0x41], &kb, &nonce, derive_noise_p(&kb, &nonce), &key).is_ok());
+    }
+
+    // CVF-V5-29: NapqesKey streaming variants agree with the bare-slice ones
+    // and skip per-call validation.
+    #[test]
+    fn v5_29_stream_key_variants_roundtrip() {
+        let key = NapqesKey::generate().unwrap();
+        let ct = encrypt_stream_ae_v8_key("stream via NapqesKey", &key, b"a", 4).unwrap();
+        assert_eq!(decrypt_stream_ae_v8_key(&ct, &key, b"a").unwrap(), "stream via NapqesKey");
+        assert_eq!(decrypt_stream_ae_v8(&ct, key.primes(), key.sk(), b"a").unwrap(), "stream via NapqesKey");
+        let (mut enc, mut out) = StreamV8Encryptor::new_key(&key, b"a", 4).unwrap();
+        for c in "incremental".chars() {
+            if let Some(frame) = enc.push(c).unwrap() {
+                out.extend_from_slice(&frame);
+            }
+        }
+        out.extend_from_slice(&enc.finish().unwrap());
+        assert_eq!(decrypt_stream_ae_v8_key(&out, &key, b"a").unwrap(), "incremental");
     }
 
     // CVF-V5-14: key generation refuses counts validate_key would reject.

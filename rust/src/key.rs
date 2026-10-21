@@ -11,9 +11,10 @@
 //! zeroization helpers were never called from anywhere in the library.
 //!
 //! The bare-slice entry points (`encrypt_bytes_v8(&[u64], &[u8; SK_SIZE])`
-//! etc.) are retained (not deprecated) and still validate on every call;
-//! new code should construct a `NapqesKey` once and pass it to the
-//! `_key`-suffixed entry points.
+//! etc.) still validate on every call, with timing that depends on the
+//! secret primes, and are `#[deprecated]` (CVF-V5-29): construct a
+//! `NapqesKey` once and pass it to the `_key`-suffixed entry points
+//! (including the streaming ones under `experimental-stream`).
 
 use std::fmt;
 

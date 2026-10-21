@@ -245,6 +245,7 @@ fn generate_bits(n: usize) -> Vec<u8> {
         // The corpus offset repeats every 19 chunks and v8 is deterministic, so
         // a per-chunk AAD keeps repeated plaintexts from repeating ciphertexts.
         let aad = (chunk_num as u64).to_be_bytes();
+        #[allow(deprecated)]
         let ct = napqes::encrypt_bytes_v8(msg, &STS_KEY, &STS_SK, &aad)
             .expect("NAPQES v8 encrypt failed during STS bitstream generation");
         raw.extend_from_slice(&ct);

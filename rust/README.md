@@ -32,10 +32,13 @@ let pt = decrypt_bytes_v8_key(&ct, &key, b"aad").unwrap();
 assert_eq!(pt, "hello");
 ```
 
-The bare-slice entry points take the two key components directly and
-re-validate the prime tuple on every call:
+The bare-slice entry points take the two key components directly,
+re-validate the prime tuple by trial division on every call (timing that
+depends on the secret primes) and are therefore `#[deprecated]`
+(CVF-V5-29); prefer `NapqesKey` and the `_key` variants:
 
 ```rust
+#![allow(deprecated)]
 use napqes::{
     generate_v8_key, encrypt_bytes_v8, decrypt_bytes_v8,
     zeroize_key, zeroize_sk,
@@ -159,12 +162,17 @@ binaries and examples run POST at start-up.
 **Recommended (v8):**
 `NapqesKey` with `encrypt_bytes_v8_key`, `decrypt_bytes_v8_key`,
 `encrypt_bytes_v8_with_profile_key` (validates once, wipes on drop);
-`encrypt_bytes_v8`, `encrypt_bytes_v8_with_profile`, `decrypt_bytes_v8`,
 `generate_v8_key`, `zeroize_key`, `zeroize_sk`.
 
 **Experimental (`--features experimental-stream`, outside the audited
 claims):** `encrypt_stream_ae_v8`, `decrypt_stream_ae_v8`,
-`StreamV8Encryptor`.
+`StreamV8Encryptor::new`, and their `NapqesKey` variants
+`encrypt_stream_ae_v8_key`, `decrypt_stream_ae_v8_key`,
+`StreamV8Encryptor::new_key` (CVF-V5-29).
+
+**Deprecated bare-slice v8 (CVF-V5-29):** `encrypt_bytes_v8`,
+`encrypt_bytes_v8_with_profile`, `decrypt_bytes_v8` — per-call key
+validation with secret-dependent timing; use the `_key` variants.
 
 **Key-generation helpers:** `generate_prime_numbers`, `is_prime`.
 
