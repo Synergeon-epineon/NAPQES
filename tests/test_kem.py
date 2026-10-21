@@ -111,6 +111,16 @@ class TestCrossLanguageVector:
         result = napqes_kem._derive_napqes_key(bytes(16))
         assert result == expected, f"cross-language mismatch: {result}"
 
+    def test_derive_v8_sk_known_vector(self):
+        # CVF-V5-7: the v8 sk used by the OT gateway after a KEM exchange.
+        # Rust: kem::tests::test_derive_v8_sk_cross_language_vector
+        assert napqes_kem.derive_v8_sk(bytes(range(16))).hex() == (
+            "7f73b293ead8a33c31bcab44d159e16dd4f12dcc89ba35877f21a75cbd42b9db"
+        )
+        primes, sk = napqes_kem.derive_v8_key(bytes(range(16)))
+        assert primes == napqes_kem._derive_napqes_key(bytes(range(16)))
+        assert sk == napqes_kem.derive_v8_sk(bytes(range(16)))
+
     def test_derive_known_vector_hybrid(self):
         # Known-answer vector for the hybrid derivation, pinned so that the
         # Rust port cannot silently diverge on HKDF salt/info, secret

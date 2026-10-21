@@ -2190,12 +2190,15 @@ ciphertext-length determinism across varied AAD and keys
 the key on drop.
 
 The crate additionally exports the legacy v7 format: decryptors kept for
-archived ciphertexts, and \texttt{\#[deprecated]} encryptors that draw a
+archived ciphertexts, and \texttt{\#[deprecated]} encryptors, compiled only
+with the \texttt{legacy-v7} feature, that draw a
 CSPRNG nonce, use an uncapped noise loop (so ciphertext length varies with
 the nonce) and an IEEE-754 \texttt{f64} noise threshold. None of the
 results of Section~\ref{sec:security} apply to v7. The crate's OT-frame
-wrapper (\texttt{rust/src/ot\_frame.rs}) still encrypts with the v7
-\texttt{encrypt\_raw}.
+wrapper (\texttt{rust/src/ot\_frame.rs}) seals every frame with the v8 block
+format under a validated key whose prime tuple and $\mathsf{sk}$ are
+derived from the key-establishment shared secret with distinct HKDF labels
+(CVF-V5-7); no in-tree component encrypts with v7.
 
 \subsection{C Implementation}
 

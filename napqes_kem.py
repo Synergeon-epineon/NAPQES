@@ -192,6 +192,31 @@ def _derive_napqes_key(shared_secret: bytes,
     return _expand_seed_to_primes(seed, count)
 
 
+#: HKDF-Expand label for the v8 ``sk`` (CVF-V5-7). Same salt as the prime
+#: tuple, distinct label, so ``sk`` and the prime seed are independent.
+_HKDF_INFO_V8_SK = b"v1-sk-v8"
+
+
+def derive_v8_sk(shared_secret: bytes) -> bytes:
+    """Derive the 32-byte v8 ``sk`` from a KEM shared secret (CVF-V5-7).
+
+    Matches ``rust/src/kem.rs::derive_v8_sk``. Together with
+    ``_derive_napqes_key`` it yields a complete v8 key ``(primes, sk)``.
+    """
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=_HKDF_SALT,
+        info=_HKDF_INFO_V8_SK,
+    )
+    return hkdf.derive(shared_secret)
+
+
+def derive_v8_key(shared_secret: bytes) -> tuple[list[int], bytes]:
+    """Derive the v8 key ``(primes, sk)`` from a KEM shared secret."""
+    return _derive_napqes_key(shared_secret), derive_v8_sk(shared_secret)
+
+
 def _expand_seed_to_primes(seed: bytes, count: int) -> list[int]:
     """Counter-mode HMAC-SHA256 expansion of *seed* into *count* distinct primes.
 

@@ -11,7 +11,9 @@
 //!
 //! On startup the two gateways run a **FrodoKEM-640-AES** (IND-CCA2) exchange
 //! over a dedicated management TCP port.  Neither side needs a pre-shared secret;
-//! the session key is derived from the KEM shared secret via HKDF-SHA256.
+//! the session key — a v8 key: the prime tuple and an independent `sk`, each
+//! from its own HKDF-SHA256 label (CVF-V5-7) — is derived from the KEM
+//! shared secret. Every frame is sealed with the v8 format.
 //!
 //! - Egress gateway (`mode = "egress"`) acts as KEM **responder**:
 //!   generates a fresh keypair, sends the public key, receives the ciphertext,
@@ -23,7 +25,8 @@
 //!
 //! ## Pre-shared key mode (fallback / offline environments)
 //!
-//! If `kem` is not configured, keys are loaded from the JSON file at
+//! If `kem` is not configured, v8 keys (`{"primes": [...], "sk_hex": "..."}`
+//! per device) are loaded and validated from the JSON file at
 //! `key_store_path` (see `FileKeyStore`).
 //!
 //! # Config file schema (`gateway_config.json`)
@@ -274,18 +277,37 @@ async fn handle_egress(
     state:      Arc<GatewayState>,
     protocol:   ProtocolId,
 ) {
-    let mut buf = vec![0u8; 65536];
+    // CVF-V5-7: v8 frames can exceed any fixed read buffer (a 256-byte PDU
+    // pads to bucket 512, about 82 KB), so read exactly one envelope per
+    // iteration: the 23-byte header, then the declared blob length.
+    const MAX_BLOB: usize = 48 + 160 * ((1 << 16) + 2); // largest v8 bucket ciphertext
+    let mut buf: Vec<u8> = Vec::new();
     loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
+        let mut header = [0u8; napqes::ot_frame::ENVELOPE_HEADER_SIZE];
+        match stream.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
                 eprintln!("[egress][{}] read error from {}: {}", protocol.as_str(), peer, e);
                 break;
             }
-        };
+        }
+        let blob_len = u32::from_be_bytes(header[19..23].try_into().unwrap()) as usize;
+        if blob_len > MAX_BLOB {
+            eprintln!("[egress][{}] oversized envelope ({} B) from {}", protocol.as_str(), blob_len, peer);
+            emit_siem(&state, "PARSE_ERR", 5,
+                &format!("proto={} src={}", protocol.as_str(), peer)).await;
+            break;
+        }
+        buf.clear();
+        buf.extend_from_slice(&header);
+        buf.resize(header.len() + blob_len, 0);
+        if let Err(e) = stream.read_exact(&mut buf[header.len()..]).await {
+            eprintln!("[egress][{}] read error from {}: {}", protocol.as_str(), peer, e);
+            break;
+        }
 
-        let envelope = &buf[..n];
+        let envelope = &buf[..];
 
         let device_id = match peek_device_id(envelope) {
             Some(id) => id,

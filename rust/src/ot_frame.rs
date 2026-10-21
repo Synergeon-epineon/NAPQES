@@ -1,10 +1,17 @@
-//! OT framing layer — NAPQES v6 AEAD wrapper for industrial protocol PDUs.
+//! OT framing layer — NAPQES v8 AEAD wrapper for industrial protocol PDUs.
 //!
 //! Every PDU is wrapped as:
 //!
 //! ```text
-//! NAPQES_ciphertext(pdu, aad = protocol_id(1) || device_id(8 BE) || seq(8 BE))
+//! NAPQES_v8_ciphertext(latin1(pdu), aad = protocol_id(1) || device_id(8 BE) || seq(8 BE))
 //! ```
+//!
+//! **CVF-V5-7 / CVF-V5-4:** frames are sealed with the v8 block format under
+//! a validated [`NapqesKey`] (prime tuple plus an independent `sk`), so every
+//! frame is covered by the paper's theorems; the v7 encryptors are no longer
+//! used. The PDU bytes are carried as the codepoints `U+0000..U+00FF`
+//! (`latin1`), which `unwrap_pdu` maps back and rejects anything above
+//! `U+00FF`.
 //!
 //! The AAD binds each frame to its originating device and sequence number,
 //! so cross-device replay and sequence-rollback attacks are detected and
@@ -18,7 +25,7 @@
 //! [8 bytes] device_id       : u64 big-endian
 //! [8 bytes] seq             : u64 big-endian
 //! [4 bytes] napqes_len      : u32 big-endian, length of following NAPQES blob
-//! [N bytes] napqes_blob     : output of encrypt_raw()
+//! [N bytes] napqes_blob     : output of encrypt_bytes_v8_key()
 //! ```
 //!
 //! The envelope fields are NOT encrypted (they are visible to the network
@@ -31,13 +38,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-// CVF-17: ot_frame is the current in-tree consumer of the v7 raw API and
-// remains on the deprecated encryptor until it is either migrated to a v8
-// byte-oriented entry point or the module is itself retired. The
-// #[allow(deprecated)] scoping is deliberately narrow — the import and the
-// two call sites — so a future migration surfaces immediately.
-#[allow(deprecated)]
-use crate::{decrypt_raw, encrypt_raw};
+use crate::{decrypt_bytes_v8_key, encrypt_bytes_v8_key, NapqesKey, SK_SIZE};
 
 // ─── Protocol identifiers ─────────────────────────────────────────────────────
 
@@ -189,43 +190,69 @@ impl Default for SequenceCounter {
 
 // ─── Key store ───────────────────────────────────────────────────────────────
 
-/// Map a device_id to its NAPQES key (list of primes).
+/// Map a device_id to its validated v8 key.
+///
+/// Keys are validated once, when the store loads or installs them, so the
+/// per-frame path never runs key validation (CVF-29, CVF-V5-12).
 pub trait KeyStore: Send + Sync {
-    fn load(&self, device_id: u64) -> Result<Vec<u64>, String>;
+    fn load(&self, device_id: u64) -> Result<Arc<NapqesKey>, String>;
 }
 
 /// Loads keys from a JSON file.
 ///
-/// Expected format:
+/// Expected format (CVF-V5-7: each entry is a complete v8 key):
 /// ```json
 /// {
-///   "1": [1000003, 1000033, 1000037, ...],
-///   "2": [1000099, 1000117, 1000121, ...]
+///   "1": {"primes": [1000003, 1000033, 1000037, ...], "sk_hex": "<64 hex chars>"},
+///   "2": {"primes": [1000099, 1000117, 1000121, ...], "sk_hex": "<64 hex chars>"}
 /// }
 /// ```
-/// Keys are indexed by the decimal string representation of device_id.
+/// Keys are indexed by the decimal string representation of device_id. The
+/// file holds secret key material: keep it out of version control.
 pub struct FileKeyStore {
-    data: HashMap<u64, Vec<u64>>,
+    data: HashMap<u64, Arc<NapqesKey>>,
+}
+
+#[derive(Deserialize)]
+struct FileKeyEntry {
+    primes: Vec<u64>,
+    sk_hex: String,
+}
+
+fn parse_sk_hex(hex: &str) -> Result<[u8; SK_SIZE], String> {
+    if hex.len() != 2 * SK_SIZE || !hex.is_ascii() {
+        return Err(format!("sk_hex must be {} hex characters", 2 * SK_SIZE));
+    }
+    let mut sk = [0u8; SK_SIZE];
+    for (i, b) in sk.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+            .map_err(|_| "sk_hex is not valid hex".to_string())?;
+    }
+    Ok(sk)
 }
 
 impl FileKeyStore {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("key store read '{}': {}", path, e))?;
-        let raw: HashMap<String, Vec<u64>> = serde_json::from_str(&content)
+        let raw: HashMap<String, FileKeyEntry> = serde_json::from_str(&content)
             .map_err(|e| format!("key store JSON parse '{}': {}", path, e))?;
         let mut data = HashMap::new();
         for (k, v) in raw {
             let id: u64 = k.parse()
                 .map_err(|_| format!("key store: device id '{}' is not a u64", k))?;
-            data.insert(id, v);
+            let sk = parse_sk_hex(&v.sk_hex)
+                .map_err(|e| format!("key store: device {}: {}", id, e))?;
+            let key = NapqesKey::new(v.primes, sk)
+                .map_err(|e| format!("key store: device {}: {}", id, e))?;
+            data.insert(id, Arc::new(key));
         }
         Ok(Self { data })
     }
 }
 
 impl KeyStore for FileKeyStore {
-    fn load(&self, device_id: u64) -> Result<Vec<u64>, String> {
+    fn load(&self, device_id: u64) -> Result<Arc<NapqesKey>, String> {
         self.data.get(&device_id)
             .cloned()
             .ok_or_else(|| format!("no key for device_id {}", device_id))
@@ -247,7 +274,7 @@ impl KeyStore for FileKeyStore {
 /// update is immediately visible to all threads holding an `Arc<SessionKeyStore>`.
 #[derive(Default)]
 pub struct SessionKeyStore {
-    inner: RwLock<HashMap<u64, Vec<u64>>>,
+    inner: RwLock<HashMap<u64, Arc<NapqesKey>>>,
 }
 
 /// Sentinel device_id meaning "apply to all devices" (wildcard).
@@ -262,8 +289,8 @@ impl SessionKeyStore {
     ///
     /// Use `WILDCARD_DEVICE_ID` to apply the key to every device not
     /// individually registered.
-    pub fn insert(&self, device_id: u64, key: Vec<u64>) {
-        self.inner.write().unwrap().insert(device_id, key);
+    pub fn insert(&self, device_id: u64, key: NapqesKey) {
+        self.inner.write().unwrap().insert(device_id, Arc::new(key));
     }
 
     /// Return `true` if at least one key (including wildcard) is loaded.
@@ -273,10 +300,10 @@ impl SessionKeyStore {
 }
 
 impl KeyStore for SessionKeyStore {
-    fn load(&self, device_id: u64) -> Result<Vec<u64>, String> {
+    fn load(&self, device_id: u64) -> Result<Arc<NapqesKey>, String> {
         let map = self.inner.read().unwrap();
         if let Some(k) = map.get(&device_id) {
-            return Ok(k.clone());
+            return Ok(Arc::clone(k));
         }
         map.get(&WILDCARD_DEVICE_ID)
             .cloned()
@@ -287,22 +314,22 @@ impl KeyStore for SessionKeyStore {
 }
 
 impl KeyStore for Arc<SessionKeyStore> {
-    fn load(&self, device_id: u64) -> Result<Vec<u64>, String> {
+    fn load(&self, device_id: u64) -> Result<Arc<NapqesKey>, String> {
         self.as_ref().load(device_id)
     }
 }
 
 // ─── Wrap / unwrap ────────────────────────────────────────────────────────────
 
-/// Seal a raw PDU into an OT envelope.
+/// Seal a raw PDU into an OT envelope with the v8 format (CVF-V5-7).
 ///
 /// Returns the full envelope bytes (header + NAPQES blob) ready to write to
 /// the secure-side TCP connection.
-pub fn wrap_pdu(pdu: &[u8], aad: OtAad, key: &[u64]) -> Result<Vec<u8>, FrameError> {
+pub fn wrap_pdu(pdu: &[u8], aad: OtAad, key: &NapqesKey) -> Result<Vec<u8>, FrameError> {
     let aad_bytes = aad.to_bytes();
-    #[allow(deprecated)] // CVF-17: see module-level note on ot_frame
-    let napqes_blob = encrypt_raw(pdu, key, &aad_bytes)
-        .map_err(|e| FrameError::CryptoError(e))?;
+    let latin1: String = pdu.iter().map(|&b| b as char).collect();
+    let napqes_blob = encrypt_bytes_v8_key(&latin1, key, &aad_bytes)
+        .map_err(FrameError::CryptoError)?;
 
     let mut envelope = Vec::with_capacity(ENVELOPE_HEADER_SIZE + napqes_blob.len());
     envelope.extend_from_slice(&ENVELOPE_MAGIC);
@@ -347,7 +374,7 @@ pub fn parse_envelope_header(buf: &[u8]) -> Result<(ProtocolId, u64, u64, usize,
 /// Verifies the HMAC tag, rejects replays, and returns the decrypted PDU bytes.
 pub fn unwrap_pdu(
     buf:      &[u8],
-    key:      &[u64],
+    key:      &NapqesKey,
     counters: &SequenceCounter,
 ) -> Result<Vec<u8>, FrameError> {
     let (protocol, device_id, seq, blob_start, blob_len) = parse_envelope_header(buf)?;
@@ -356,9 +383,12 @@ pub fn unwrap_pdu(
     let aad = OtAad { protocol, device_id, seq };
     let aad_bytes = aad.to_bytes();
 
-    let pdu = decrypt_raw(napqes_blob, key, &aad_bytes).map_err(|_| {
-        FrameError::AuthenticationFailed { device_id, protocol, seq }
-    })?;
+    let auth_failed = || FrameError::AuthenticationFailed { device_id, protocol, seq };
+    let latin1 = decrypt_bytes_v8_key(napqes_blob, key, &aad_bytes).map_err(|_| auth_failed())?;
+    let pdu = latin1
+        .chars()
+        .map(|c| u8::try_from(c as u32).map_err(|_| auth_failed()))
+        .collect::<Result<Vec<u8>, FrameError>>()?;
     // Only an authenticated seq may advance the replay window.
     counters.validate_recv(protocol, device_id, seq)?;
     Ok(pdu)
@@ -370,11 +400,15 @@ pub fn unwrap_pdu(
 mod tests {
     use super::*;
 
-    fn test_key() -> Vec<u64> {
-        vec![
-            1_000_003, 1_000_033, 1_000_037, 1_000_039, 1_000_081,
-            1_000_099, 1_000_117, 1_000_121, 1_000_133, 1_000_151,
-        ]
+    fn test_key() -> NapqesKey {
+        NapqesKey::new(
+            vec![
+                1_000_003, 1_000_033, 1_000_037, 1_000_039, 1_000_081,
+                1_000_099, 1_000_117, 1_000_121, 1_000_133, 1_000_151,
+            ],
+            [0x11; SK_SIZE],
+        )
+        .unwrap()
     }
 
     fn make_aad(protocol: ProtocolId, device_id: u64, seq: u64) -> OtAad {
@@ -458,10 +492,14 @@ mod tests {
     #[test]
     fn wrong_key_rejected() {
         let key1     = test_key();
-        let key2     = vec![
-            1_000_159, 1_000_171, 1_000_183, 1_000_187, 1_000_193,
-            1_000_199, 1_000_211, 1_000_223, 1_000_231, 1_000_249,
-        ];
+        let key2     = NapqesKey::new(
+            vec![
+                1_000_159, 1_000_171, 1_000_183, 1_000_187, 1_000_193,
+                1_000_199, 1_000_211, 1_000_213, 1_000_231, 1_000_249,
+            ],
+            [0x22; SK_SIZE],
+        )
+        .unwrap();
         let counters = SequenceCounter::new();
         let pdu      = b"\x01\x03\x00\x00\x00\x0a";
         let aad      = make_aad(ProtocolId::ModbusTcp, 1, 1);
@@ -492,11 +530,34 @@ mod tests {
     fn file_key_store_roundtrip() {
         // Write a temp JSON key file and load it
         let dir  = std::env::temp_dir();
-        let path = dir.join("test_keys.json");
-        let json = r#"{"1":[1000003,1000033,1000037,1000039,1000081,1000099,1000117,1000121,1000133,1000151]}"#;
+        let path = dir.join("test_keys_v8.json");
+        let json = format!(
+            r#"{{"1":{{"primes":[1000003,1000033,1000037,1000039,1000081,1000099,1000117,1000121,1000133,1000151],"sk_hex":"{}"}}}}"#,
+            "ab".repeat(SK_SIZE)
+        );
         std::fs::write(&path, json).unwrap();
         let ks  = FileKeyStore::load_from_file(path.to_str().unwrap()).unwrap();
         let key = ks.load(1).unwrap();
-        assert_eq!(key[0], 1_000_003);
+        assert_eq!(key.primes()[0], 1_000_003);
+        assert_eq!(key.sk(), &[0xab; SK_SIZE]);
+        // A store entry with an invalid key is refused at load time.
+        std::fs::write(&path, r#"{"1":{"primes":[4],"sk_hex":"00"}}"#).unwrap();
+        assert!(FileKeyStore::load_from_file(path.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // CVF-V5-7: every byte value survives the latin1 mapping, and the frame
+    // is a v8 ciphertext (it opens with decrypt_bytes_v8_key directly).
+    #[test]
+    fn all_byte_values_roundtrip_through_v8() {
+        let key      = test_key();
+        let counters = SequenceCounter::new();
+        let pdu: Vec<u8> = (0u8..=255).collect();
+        let aad      = make_aad(ProtocolId::ModbusTcp, 9, 1);
+        let aad_bytes = aad.to_bytes();
+        let envelope = wrap_pdu(&pdu, aad, &key).unwrap();
+        let blob = &envelope[ENVELOPE_HEADER_SIZE..];
+        assert!(decrypt_bytes_v8_key(blob, &key, &aad_bytes).is_ok());
+        assert_eq!(unwrap_pdu(&envelope, &key, &counters).unwrap(), pdu);
     }
 }

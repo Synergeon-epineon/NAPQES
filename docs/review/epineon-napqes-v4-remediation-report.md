@@ -396,7 +396,7 @@ A last pass re-ran the full matrix and re-checked every finding of both audit ro
 
 ### 8.4 Open (not claimed closed)
 
-- **CVF-17 / CVF-28:** `ot_frame` still encrypts with v7 `encrypt_raw` (disclosed in paper §8.2). Moving it to v8 needs the KEM to derive `sk` as well as the prime tuple, a protocol change across the Rust and Python KEMs.
+- **CVF-17 / CVF-28:** `ot_frame` still encrypts with v7 `encrypt_raw` (disclosed in paper §8.2). Moving it to v8 needs the KEM to derive `sk` as well as the prime tuple, a protocol change across the Rust and Python KEMs. *(Done in round 5, CVF-V5-7: `kem::derive_v8_sk` / `napqes_kem.derive_v8_sk` add the `sk` derivation and `ot_frame` seals with v8.)*
 - **CVF-14:** v7 byte and codepoint encodings stay indistinguishable for values ≤ U+00FF; separating them would change the archived v7 format.
 - **CVF-18:** binary-HMAC integrity check (INT-1 remains a build-provenance check). **CVF-26:** comparator-only dudect harness.
 - **CVF-22:** no recorded run of the re-tagging fuzz target (stated in paper §11).

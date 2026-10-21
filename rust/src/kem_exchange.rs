@@ -45,7 +45,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 
-use crate::kem::{decapsulate, encapsulate, keygen};
+use crate::kem::{decapsulate_v8, encapsulate_v8, keygen};
+use crate::NapqesKey;
 use crate::ot_frame::{SessionKeyStore, WILDCARD_DEVICE_ID};
 
 // ─── Wire constants ───────────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ async fn send_framed(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> 
 ///
 /// The caller is responsible for calling this function again to handle the next
 /// re-key request (see `run_responder_loop`).
-pub async fn run_responder_once(listener: &TcpListener) -> Result<Vec<u64>, String> {
+pub async fn run_responder_once(listener: &TcpListener) -> Result<NapqesKey, String> {
     let (mut stream, peer) = listener.accept().await
         .map_err(|e| format!("KEM accept: {}", e))?;
     eprintln!("[kem-responder] incoming exchange from {}", peer);
@@ -97,15 +98,15 @@ pub async fn run_responder_once(listener: &TcpListener) -> Result<Vec<u64>, Stri
     let ct = recv_framed(&mut stream).await?;
 
     // Decapsulate → session key
-    let session_key = decapsulate(&ct, &sk)
+    let session_key = decapsulate_v8(&ct, &sk)
         .map_err(|e| format!("KEM decapsulate: {}", e))?;
 
     // ACK
     stream.write_all(&[ACK]).await
         .map_err(|e| format!("KEM ACK send: {}", e))?;
 
-    eprintln!("[kem-responder] exchange complete with {}; session key derived ({} primes)",
-        peer, session_key.len());
+    eprintln!("[kem-responder] exchange complete with {}; v8 session key derived (K = {})",
+        peer, session_key.k());
     Ok(session_key)
 }
 
@@ -139,7 +140,7 @@ pub async fn run_responder_loop(
 
 /// Connect to the egress gateway, complete one KEM exchange, and return the
 /// derived NAPQES session key.
-pub async fn run_initiator_once(peer_addr: &str) -> Result<Vec<u64>, String> {
+pub async fn run_initiator_once(peer_addr: &str) -> Result<NapqesKey, String> {
     let mut stream = TcpStream::connect(peer_addr).await
         .map_err(|e| format!("KEM connect to {}: {}", peer_addr, e))?;
     eprintln!("[kem-initiator] connected to {}", peer_addr);
@@ -148,7 +149,7 @@ pub async fn run_initiator_once(peer_addr: &str) -> Result<Vec<u64>, String> {
     let pk = recv_framed(&mut stream).await?;
 
     // Encapsulate → (ciphertext, session key)
-    let (ct, session_key) = encapsulate(&pk)
+    let (ct, session_key) = encapsulate_v8(&pk)
         .map_err(|e| format!("KEM encapsulate: {}", e))?;
 
     // Send ciphertext
@@ -162,8 +163,8 @@ pub async fn run_initiator_once(peer_addr: &str) -> Result<Vec<u64>, String> {
         return Err(format!("KEM: unexpected ACK byte 0x{:02x}", ack[0]));
     }
 
-    eprintln!("[kem-initiator] exchange complete; session key derived ({} primes)",
-        session_key.len());
+    eprintln!("[kem-initiator] exchange complete; v8 session key derived (K = {})",
+        session_key.k());
     Ok(session_key)
 }
 
@@ -202,6 +203,10 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    fn test_key(primes: &[u64]) -> NapqesKey {
+        NapqesKey::new(primes.to_vec(), [0x5a; crate::SK_SIZE]).unwrap()
+    }
+
     #[tokio::test]
     async fn kem_exchange_derives_same_key() {
         // Bind on a random port
@@ -217,11 +222,12 @@ mod tests {
         let init_key = run_initiator_once(&addr).await.unwrap();
         let resp_key = responder.await.unwrap().unwrap();
 
-        assert_eq!(init_key, resp_key, "KEM exchange must produce equal keys on both sides");
-        assert!(!init_key.is_empty(), "session key must not be empty");
+        assert_eq!(init_key.primes(), resp_key.primes(), "KEM exchange must produce equal keys on both sides");
+        assert_eq!(init_key.sk(), resp_key.sk(), "both sides must derive the same v8 sk");
+        assert!(init_key.k() > 0, "session key must not be empty");
         // All elements must be distinct primes
         let mut seen = std::collections::HashSet::new();
-        for &p in &init_key {
+        for &p in init_key.primes() {
             assert!(crate::is_prime(p), "{} must be prime", p);
             assert!(seen.insert(p), "{} appears twice", p);
         }
@@ -234,24 +240,24 @@ mod tests {
         let store = Arc::new(SessionKeyStore::new());
         assert!(!store.is_ready());
 
-        store.insert(WILDCARD_DEVICE_ID, vec![1_000_003, 1_000_033]);
+        store.insert(WILDCARD_DEVICE_ID, test_key(&[1_000_003, 1_000_033]));
         assert!(store.is_ready());
 
         // Any device_id falls back to wildcard
         let k1 = store.load(1).unwrap();
         let k2 = store.load(42).unwrap();
-        assert_eq!(k1, k2);
-        assert_eq!(k1[0], 1_000_003);
+        assert!(Arc::ptr_eq(&k1, &k2));
+        assert_eq!(k1.primes()[0], 1_000_003);
     }
 
     #[tokio::test]
     async fn session_key_store_per_device_overrides_wildcard() {
         use crate::ot_frame::{SessionKeyStore, WILDCARD_DEVICE_ID, KeyStore};
         let store = Arc::new(SessionKeyStore::new());
-        store.insert(WILDCARD_DEVICE_ID, vec![1_000_003]);
-        store.insert(7, vec![1_000_033]);
+        store.insert(WILDCARD_DEVICE_ID, test_key(&[1_000_003]));
+        store.insert(7, test_key(&[1_000_033]));
 
-        assert_eq!(store.load(7).unwrap()[0], 1_000_033); // device-specific
-        assert_eq!(store.load(1).unwrap()[0], 1_000_003); // wildcard fallback
+        assert_eq!(store.load(7).unwrap().primes()[0], 1_000_033); // device-specific
+        assert_eq!(store.load(1).unwrap().primes()[0], 1_000_003); // wildcard fallback
     }
 }

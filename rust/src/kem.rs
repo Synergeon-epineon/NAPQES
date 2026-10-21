@@ -36,6 +36,11 @@ pub const MAX_PRIME: u64 = 15_000_000;
 
 const HKDF_SALT: &[u8] = b"NAPQES-v6-FrodoKEM-640-prime-key";
 const HKDF_INFO: &[u8] = b"v1";
+/// HKDF-Expand label for the v8 `sk` (CVF-V5-7). Same extract step as the
+/// prime tuple, distinct expand label, so `sk` and the prime seed are
+/// independent PRF outputs of the shared secret and neither is a function of
+/// the other.
+const HKDF_INFO_V8_SK: &[u8] = b"v1-sk-v8";
 
 /// Generate a FrodoKEM-640-AES keypair.
 ///
@@ -79,6 +84,45 @@ pub fn decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> Result<Vec<u64>, Str
         .map_err(|_| "invalid FrodoKEM-640-AES secret key".to_string())?;
     let ss = frodokem640aes::decapsulate(&ct, &sk);
     Ok(derive_napqes_key(ss.as_bytes()))
+}
+
+/// Derive the v8 `sk` from a KEM shared secret (CVF-V5-7).
+///
+/// HKDF-SHA256 with the same salt as [`derive_napqes_key`] and the distinct
+/// expand label `"v1-sk-v8"`. Matches `napqes_kem.derive_v8_sk`.
+pub fn derive_v8_sk(shared_secret: &[u8]) -> [u8; crate::SK_SIZE] {
+    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), shared_secret);
+    let mut sk = [0u8; crate::SK_SIZE];
+    hk.expand(HKDF_INFO_V8_SK, &mut sk).expect("32 bytes fits HKDF-SHA256 output");
+    sk
+}
+
+/// Derive a complete, validated v8 key (prime tuple and independent `sk`)
+/// from a KEM shared secret (CVF-V5-7).
+pub fn derive_v8_key(shared_secret: &[u8]) -> Result<crate::NapqesKey, String> {
+    crate::NapqesKey::new(derive_napqes_key(shared_secret), derive_v8_sk(shared_secret))
+}
+
+/// [`encapsulate`] for the v8 format: returns `(kem_ciphertext, NapqesKey)`.
+pub fn encapsulate_v8(public_key: &[u8]) -> Result<(Vec<u8>, crate::NapqesKey), String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
+    let pk = PublicKey::from_bytes(public_key)
+        .map_err(|_| "invalid FrodoKEM-640-AES public key".to_string())?;
+    let (ss, ct) = frodokem640aes::encapsulate(&pk);
+    Ok((ct.as_bytes().to_vec(), derive_v8_key(ss.as_bytes())?))
+}
+
+/// [`decapsulate`] for the v8 format: returns the encapsulator's `NapqesKey`.
+pub fn decapsulate_v8(ciphertext: &[u8], secret_key: &[u8]) -> Result<crate::NapqesKey, String> {
+    #[cfg(feature = "fips_gate")]
+    crate::self_test::require_post().map_err(|e| e.to_string())?;
+    let ct = Ciphertext::from_bytes(ciphertext)
+        .map_err(|_| "invalid FrodoKEM-640-AES ciphertext".to_string())?;
+    let sk = SecretKey::from_bytes(secret_key)
+        .map_err(|_| "invalid FrodoKEM-640-AES secret key".to_string())?;
+    let ss = frodokem640aes::decapsulate(&ct, &sk);
+    derive_v8_key(ss.as_bytes())
 }
 
 /// Deterministically derive a NAPQES prime-list key from a KEM shared secret.
@@ -497,6 +541,27 @@ mod tests {
         assert_eq!(pk.len(), 9616);   // FrodoKEM-640-AES spec
         assert_eq!(sk.len(), 19888);  // FrodoKEM-640-AES spec
         assert_eq!(ct.len(), 9720);   // FrodoKEM-640-AES spec
+    }
+
+    #[test]
+    fn test_derive_v8_sk_cross_language_vector() {
+        // CVF-V5-7. Python: napqes_kem.derive_v8_sk(bytes(range(16))).
+        let secret: Vec<u8> = (0u8..16).collect();
+        let sk = derive_v8_sk(&secret);
+        let hex: String = sk.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(hex, "7f73b293ead8a33c31bcab44d159e16dd4f12dcc89ba35877f21a75cbd42b9db");
+        assert_ne!(sk[..], derive_v8_sk(&[0u8; 16])[..]);
+    }
+
+    #[test]
+    fn test_v8_encapsulate_decapsulate_agree() {
+        let (pk, sk) = keygen();
+        let (ct, key_a) = encapsulate_v8(&pk).expect("encapsulate_v8");
+        let key_b = decapsulate_v8(&ct, &sk).expect("decapsulate_v8");
+        assert_eq!(key_a.primes(), key_b.primes());
+        assert_eq!(key_a.sk(), key_b.sk());
+        let msg = crate::encrypt_bytes_v8_key("frame", &key_a, b"").unwrap();
+        assert_eq!(crate::decrypt_bytes_v8_key(&msg, &key_b, b"").unwrap(), "frame");
     }
 
     #[test]
