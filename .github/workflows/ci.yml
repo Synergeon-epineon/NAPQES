@@ -126,6 +126,14 @@ jobs:
         working-directory: rust/fuzz/
         run: cargo check --bins
 
+      # CVF-V5-27: constant-time gate on the tag comparator alone (TVLA |t| < 4.5).
+      - name: Constant-time comparator gate (dudect)
+        working-directory: rust/
+        run: |
+          cargo build --release --features ct_bench --example dudect_harness
+          timeout 120 ./target/release/examples/dudect_harness --continuous bench_ct_eq_bytes > dudect.log || true
+          python3 -c "import re,sys; m=re.findall(r'n == \+([0-9.]+)M, max t = ([-+0-9.]+)', open('dudect.log').read()); n,t=float(m[-1][0]),float(m[-1][1]); print(f'n={n}M max|t|={abs(t)}'); sys.exit(0 if n >= 0.5 and abs(t) < 4.5 else 1)"
+
       - name: Run Rust STS (1M bits, exit 1 on any FAIL)
         working-directory: rust/
         run: cargo run --release --bin sts -- --bits 1000000 --out ../tests/sts_report_rust.json

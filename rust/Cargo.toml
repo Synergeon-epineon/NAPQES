@@ -45,6 +45,8 @@ experimental-stream = []
 soft_sha = ["sha2/force-soft"]
 # Exposes a v8 re-tag hook so cargo-fuzz can reach post-authentication paths.
 fuzzing = []
+# CVF-V5-27: exposes the tag comparator to examples/dudect_harness.rs.
+ct_bench = []
 
 [dependencies]
 hmac = "0.12"
@@ -99,6 +101,10 @@ path = "src/bin/ls_gateway.rs"
 [[bin]]
 name = "napqes_integrity"
 path = "src/bin/napqes_integrity.rs"
+
+[[example]]
+name = "dudect_harness"
+required-features = ["ct_bench"]
 
 [[example]]
 name = "file_bench"

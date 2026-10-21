@@ -1885,6 +1885,14 @@ pub fn fuzz_retag_block_v8(payload: &[u8], sk: &[u8; SK_SIZE], aad: &[u8]) -> [u
     retag_block_v8(payload, sk, aad)
 }
 
+/// Timing-harness hook (CVF-V5-27): the tag comparator alone, so
+/// `examples/dudect_harness.rs` can measure it without the surrounding HMAC.
+#[cfg(feature = "ct_bench")]
+#[doc(hidden)]
+pub fn ct_bench_eq(a: &[u8], b: &[u8]) -> bool {
+    ct_eq_bytes(a, b)
+}
+
 /// Fuzzing hook (CVF-V5-26): the v7 token stream `encrypt` would emit for
 /// `message` under a caller-chosen nonce, so the unauthenticated-decode
 /// target starts from structurally valid `c * k + a` tokens and perturbs
