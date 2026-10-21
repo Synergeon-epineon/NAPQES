@@ -495,3 +495,20 @@ Every command above completes clean in the tested environment.
 ---
 
 **End of report.**
+
+---
+
+## Round 5 remediation (report draft v0.2, Chapter 6)
+
+All 31 Chapter 6 findings (CVF-V5-1 to CVF-V5-31) are addressed by
+one or more commits whose messages start `fix(CVF-V5-n)`; the finding ->
+commit table and the per-finding Client Comments are in
+[epineon-napqes-v4-round5-client-comments.md](epineon-napqes-v4-round5-client-comments.md).
+Statements in this report that round 5 found inaccurate were corrected in
+place and marked "corrected in round 5" (CVF-17 / `encrypt_bytes_with_nonce`,
+the CVF-47 test list, the section 7 coverage claim, the v7 compatibility
+claim). The `Secret32` coverage statement is superseded by CVF-V5-11.
+
+The audited commit `f6ced5d` is `acbf9d0` in the published history (the
+history was rewritten to remove a committed key tuple, CVF-V5-15; the
+trees differ only by `meta.json`).
