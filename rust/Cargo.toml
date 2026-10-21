@@ -91,6 +91,11 @@ name = "fips_gate"
 path = "tests/fips_gate.rs"
 required-features = ["fips_gate", "fault_injection"]
 
+[[test]]
+name = "fips_crng"
+path = "tests/fips_crng.rs"
+required-features = ["fips_gate", "fault_injection"]
+
 [lib]
 name = "napqes"
 path = "src/lib.rs"

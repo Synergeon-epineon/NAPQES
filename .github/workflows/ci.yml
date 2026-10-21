@@ -93,7 +93,7 @@ jobs:
       # fault_injection feature refuses to compile in release mode).
       - name: FIPS gate refusal tests
         working-directory: rust/
-        run: cargo test --features fips_gate,fault_injection --test fips_gate
+        run: cargo test --features fips_gate,fault_injection --test fips_gate --test fips_crng
 
       # ── STS gate (all 15 NIST SP 800-22 Rev 1a tests, no nistrng) ──────────
       - name: Run Rust STS (1M bits, exit 1 on any FAIL)

@@ -104,6 +104,10 @@ fn generate_nonce_with_crng_check() -> Result<[u8; NONCE_SIZE], String> {
     let mut nonce = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut nonce);
     let mut prev = PREV_NONCE.lock().map_err(|_| "CRNG mutex poisoned".to_string())?;
+    #[cfg(feature = "fault_injection")]
+    if self_test::fault_injection::CRNG_STUCK.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        *prev = Some(nonce);
+    }
     if let Some(prev_nonce) = *prev {
         if ct_eq_bytes(&nonce, &prev_nonce) {
             // CVF-35: SP 800-140B §4.9.2 "stuck-generator" check. The
@@ -111,7 +115,11 @@ fn generate_nonce_with_crng_check() -> Result<[u8; NONCE_SIZE], String> {
             // uniqueness guarantee — it catches only an immediately-stuck
             // DRBG, not restart-and-replay across processes or per-key
             // reuse across time. The previous message overstated the scope.
-            return Err("CRNG stuck-generator check failed: consecutive draws matched (SP 800-140B §4.9.2)".into());
+            // CVF-V5-19: a conditional self-test failure enters the sticky
+            // module error state, so every gated entry point refuses until
+            // the process restarts — not just this call.
+            self_test::enter_error_state();
+            return Err("CRNG stuck-generator check failed: consecutive draws matched (SP 800-140B §4.9.2); module entered the error state".into());
         }
     }
     *prev = Some(nonce);

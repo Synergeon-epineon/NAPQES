@@ -119,8 +119,9 @@ call has returned `Ok(())`:
 `ot_frame`/`protocols` framing code, which reaches crypto only through the
 gated entry points above.
 
-A failed POST, or a failed conditional self-test, puts the module in the
-error state. **The error state is sticky:** a later call to
+A failed POST, or a failed conditional self-test (the CRNG continuous
+test run on every CSPRNG nonce draw, see `rust/tests/fips_crng.rs`), puts
+the module in the error state. **The error state is sticky:** a later call to
 `run_power_on_self_tests()` returns `Err(NotOperational)` without
 re-running, and the module stays refused until the process restarts.
 `rust/tests/fips_gate.rs` (`cargo test --features fips_gate,fault_injection
