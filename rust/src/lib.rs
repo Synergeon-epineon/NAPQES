@@ -1119,26 +1119,25 @@ fn emit_tokens_v7(
     for &c in padded {
         let mut run: u64 = 0;
         loop {
-            if is_noise_pos(kb, nonce, ct_pos, noise_p) {
-                run += 1;
-                if run > V7_NOISE_RUN_GUARD {
-                    return Err(format!(
-                        "v7 emission aborted: more than {} consecutive noise positions (CVF-V5-4)",
-                        V7_NOISE_RUN_GUARD
-                    ));
-                }
-                let k = key[(real_idx % kk) as usize];
-                let nc = derive_noise_char(kb, nonce, ct_pos);
-                let na = derive_noise_token_addend(kb, nonce, ct_pos, k);
-                cypher.push(nc * k + na);
-                ct_pos += 1;
+            // CVF-V5-31: statements common to both branches are hoisted.
+            let k = key[(real_idx % kk) as usize];
+            let is_noise = is_noise_pos(kb, nonce, ct_pos, noise_p);
+            cypher.push(if is_noise {
+                noise_token(kb, nonce, ct_pos, k)
             } else {
-                let k = key[(real_idx % kk) as usize];
-                let addend = derive_addend(kb, nonce, real_idx, k);
-                cypher.push(c as u64 * k + addend);
-                ct_pos += 1;
+                c as u64 * k + derive_addend(kb, nonce, real_idx, k)
+            });
+            ct_pos += 1;
+            if !is_noise {
                 real_idx += 1;
                 break;
+            }
+            run += 1;
+            if run > V7_NOISE_RUN_GUARD {
+                return Err(format!(
+                    "v7 emission aborted: more than {} consecutive noise positions (CVF-V5-4)",
+                    V7_NOISE_RUN_GUARD
+                ));
             }
         }
     }
@@ -1202,19 +1201,7 @@ pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, 
     }
     let nonce = generate_nonce_with_crng_check()?;
     let codepoints: Vec<u32> = message.chars().map(|c| c as u32).collect();
-    let kb = key_bytes(key);
-    let noise_p = derive_noise_p(&kb, &nonce);
-    let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)?; // CVF-46
-    let blob = fixed_encode_tokens(&cypher);
-    let ks = varint_keystream(&kb, &nonce, blob.len());
-    let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
-    let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
-    payload.extend_from_slice(&nonce);
-    payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
-    payload.extend_from_slice(&tag);
-    Ok(payload)
+    seal_v7(&codepoints, key, &nonce, aad)
 }
 
 /// Encrypt with a caller-supplied nonce — for deterministic KAT verification
@@ -1249,21 +1236,32 @@ pub(crate) fn encrypt_bytes_with_nonce(
         message.chars().count() <= MAX_PLAINTEXT_CODEPOINTS,
         "encrypt_bytes_with_nonce called with message > MAX_PLAINTEXT_CODEPOINTS"
     );
-    let kb = key_bytes(key);
-    let noise_p = derive_noise_p(&kb, &nonce);
     let codepoints: Vec<u32> = message.chars().map(|c| c as u32).collect();
-    let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)
-        .expect("v7 KAT emission exceeded the CVF-V5-4 noise-run guard"); // CVF-46
+    seal_v7(&codepoints, key, &nonce, aad)
+        .expect("v7 KAT emission exceeded the CVF-V5-4 noise-run guard")
+}
+
+/// The v7 sealing pipeline shared by every v7 encryptor (CVF-V5-31):
+/// pad, emit tokens, fixed-width encode, mask, tag. Callers have validated
+/// the key and the length and drawn (or been given) the nonce.
+fn seal_v7(
+    codepoints: &[u32],
+    key: &[u64],
+    nonce: &[u8; NONCE_SIZE],
+    aad: &[u8],
+) -> Result<Vec<u8>, String> {
+    let kb = key_bytes(key);
+    let noise_p = derive_noise_p(&kb, nonce);
+    let padded = pad_message(codepoints, &kb, nonce);
+    let cypher = emit_tokens_v7(&padded, &kb, nonce, noise_p, key)?;
     let blob = fixed_encode_tokens(&cypher);
-    let ks = varint_keystream(&kb, &nonce, blob.len());
-    let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
-    let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
-    payload.extend_from_slice(&nonce);
-    payload.extend_from_slice(&masked);
+    let ks = varint_keystream(&kb, nonce, blob.len());
+    let mut payload = Vec::with_capacity(NONCE_SIZE + blob.len() + TAG_SIZE);
+    payload.extend_from_slice(nonce);
+    payload.extend(blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b));
     let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
     payload.extend_from_slice(&tag);
-    payload
+    Ok(payload)
 }
 
 /// Shared v7 open path of [`decrypt_bytes`] and [`decrypt_raw`] (CVF-V5-12).
@@ -1436,19 +1434,7 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
     }
     let nonce = generate_nonce_with_crng_check()?;
     let codepoints: Vec<u32> = data.iter().map(|&b| b as u32).collect();
-    let kb = key_bytes(key);
-    let noise_p = derive_noise_p(&kb, &nonce);
-    let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)?; // CVF-46
-    let blob = fixed_encode_tokens(&cypher);
-    let ks = varint_keystream(&kb, &nonce, blob.len());
-    let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
-    let mut payload = Vec::with_capacity(NONCE_SIZE + masked.len());
-    payload.extend_from_slice(&nonce);
-    payload.extend_from_slice(&masked);
-    let tag = compute_auth_tag(&kb, aad, &payload, AAD_LEN_WIDTH_V7);
-    payload.extend_from_slice(&tag);
-    Ok(payload)
+    seal_v7(&codepoints, key, &nonce, aad)
 }
 
 /// Decrypt binary data previously encrypted with `encrypt_raw` (feature `legacy-v7`).
@@ -1749,43 +1735,9 @@ fn encrypt_bytes_v8_core_inner(
             codepoints.len(), MAX_PLAINTEXT_CODEPOINTS
         ));
     }
-    let noise_theta = derive_noise_threshold_v8(sk_fmt, &nonce);
     let block_size = pad_profile.block_size(codepoints.len())?;
     let padded = pad_to_block(&codepoints, sk_fmt, &nonce, block_size);
-    let kk = primes.len() as u64;
-    let mut cypher: Vec<u64> = Vec::new();
-    let mut real_idx: u64 = 0;
-    let mut ct_pos: u64 = 0;
-    for &c in &padded {
-        let mut noise_run: u64 = 0;
-        loop {
-            if noise_run < MAX_NOISE_RUN && is_noise_pos_v8(sk_fmt, &nonce, ct_pos, noise_theta) {
-                let k = primes[(real_idx % kk) as usize];
-                let nc = derive_noise_char(sk_fmt, &nonce, ct_pos);
-                let na = derive_noise_token_addend(sk_fmt, &nonce, ct_pos, k);
-                cypher.push(nc * k + na);
-                ct_pos += 1;
-                noise_run += 1;
-            } else {
-                let k = primes[(real_idx % kk) as usize];
-                let addend = derive_addend(sk_fmt, &nonce, real_idx, k);
-                cypher.push(c as u64 * k + addend);
-                ct_pos += 1;
-                real_idx += 1;
-                break;
-            }
-        }
-    }
-    // V2-CVF2 fix: pad up to the fixed, bucket-only ceiling so ciphertext
-    // length never depends on the message-derived nonce's noise realisation.
-    let ceiling = (padded.len() as u64) * (MAX_NOISE_RUN + 1);
-    while (cypher.len() as u64) < ceiling {
-        let k = primes[(real_idx % kk) as usize];
-        let nc = derive_noise_char(sk_fmt, &nonce, ct_pos);
-        let na = derive_noise_token_addend(sk_fmt, &nonce, ct_pos, k);
-        cypher.push(nc * k + na);
-        ct_pos += 1;
-    }
+    let cypher = emit_tokens_v8(&padded, primes, sk_fmt, &nonce);
     let blob = fixed_encode_tokens(&cypher);
     let ks = varint_keystream(sk_fmt, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
@@ -1997,45 +1949,52 @@ fn encrypt_v8_stream_chunk_core(
     sk_fmt: &[u8; 32],
     sub_nonce: &[u8; NONCE_SIZE],
 ) -> Vec<u64> {
-    let noise_theta = derive_noise_threshold_v8(sk_fmt, sub_nonce);
-    let f = chunk_cps.len() as u64;
+    emit_tokens_v8(chunk_cps, primes, sk_fmt, sub_nonce)
+}
+
+/// The v8 token-emission loop, shared by the block format and every
+/// streaming chunk (CVF-V5-31). `nonce` is the block nonce or the chunk's
+/// sub-nonce. Emits exactly `padded.len() * (MAX_NOISE_RUN + 1)` tokens:
+/// runs of noise are capped at `MAX_NOISE_RUN`, and the tail is topped up
+/// with noise to that fixed ceiling (V2-CVF2) so the length never depends on
+/// the noise realisation.
+fn emit_tokens_v8(padded: &[u32], primes: &[u64], sk_fmt: &[u8; 32], nonce: &[u8]) -> Vec<u64> {
+    let noise_theta = derive_noise_threshold_v8(sk_fmt, nonce);
     let kk = primes.len() as u64;
-    let mut cypher: Vec<u64> = Vec::with_capacity((f * (MAX_NOISE_RUN + 1)) as usize);
+    let ceiling = (padded.len() as u64) * (MAX_NOISE_RUN + 1);
+    let mut cypher: Vec<u64> = Vec::with_capacity(ceiling as usize);
     let mut real_idx: u64 = 0;
     let mut ct_pos: u64 = 0;
-
-    for &c in chunk_cps {
+    for &c in padded {
         let mut noise_run: u64 = 0;
         loop {
-            if noise_run < MAX_NOISE_RUN
-                && is_noise_pos_v8(sk_fmt, sub_nonce, ct_pos, noise_theta)
-            {
-                let k = primes[(real_idx % kk) as usize];
-                let nc = derive_noise_char(sk_fmt, sub_nonce, ct_pos);
-                let na = derive_noise_token_addend(sk_fmt, sub_nonce, ct_pos, k);
-                cypher.push(nc * k + na);
-                ct_pos += 1;
-                noise_run += 1;
+            let k = primes[(real_idx % kk) as usize];
+            let is_noise =
+                noise_run < MAX_NOISE_RUN && is_noise_pos_v8(sk_fmt, nonce, ct_pos, noise_theta);
+            cypher.push(if is_noise {
+                noise_token(sk_fmt, nonce, ct_pos, k)
             } else {
-                let k = primes[(real_idx % kk) as usize];
-                let addend = derive_addend(sk_fmt, sub_nonce, real_idx, k);
-                cypher.push(c as u64 * k + addend);
-                ct_pos += 1;
+                c as u64 * k + derive_addend(sk_fmt, nonce, real_idx, k)
+            });
+            ct_pos += 1;
+            if !is_noise {
                 real_idx += 1;
                 break;
             }
+            noise_run += 1;
         }
     }
-
-    let ceiling = f * (MAX_NOISE_RUN + 1);
     while (cypher.len() as u64) < ceiling {
         let k = primes[(real_idx % kk) as usize];
-        let nc = derive_noise_char(sk_fmt, sub_nonce, ct_pos);
-        let na = derive_noise_token_addend(sk_fmt, sub_nonce, ct_pos, k);
-        cypher.push(nc * k + na);
+        cypher.push(noise_token(sk_fmt, nonce, ct_pos, k));
         ct_pos += 1;
     }
     cypher
+}
+
+/// A noise token at position `ct_pos`: `noise_char * k + noise_addend`.
+fn noise_token(kb: &[u8], nonce: &[u8], ct_pos: u64, k: u64) -> u64 {
+    derive_noise_char(kb, nonce, ct_pos) * k + derive_noise_token_addend(kb, nonce, ct_pos, k)
 }
 
 /// Recover exactly F codepoints from a streaming chunk's token stream.
