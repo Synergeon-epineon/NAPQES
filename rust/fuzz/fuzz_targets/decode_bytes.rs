@@ -16,6 +16,9 @@
 //! passes authentication and drives the post-authentication checks in
 //! `decrypt_core_v8` (bucket check, addend/range check, length prefix).
 //!
+//! CVF-V5-26: all three padding profiles (bucket, coarse(g), frame(F)) are
+//! selected by the fuzzer, and the nonce can be mutated before re-tagging.
+//!
 //! Build and run (nightly required):
 //! ```
 //! cargo +nightly fuzz run decode_bytes -- -max_total_time=300
@@ -26,8 +29,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use napqes::{
-    decrypt_bytes_v8, encrypt_bytes_v8, fuzz_retag_block_v8, MAX_NOISE_RUN, MIN_KEY_PRIME,
-    NONCE_SIZE, SK_SIZE, TAG_SIZE,
+    decrypt_bytes_v8, encrypt_bytes_v8_with_profile, fuzz_retag_block_v8, PadProfile,
+    MAX_NOISE_RUN, MIN_KEY_PRIME, NONCE_SIZE, SK_SIZE, TAG_SIZE,
 };
 
 const TOKEN_GROUP: usize = 8 * (MAX_NOISE_RUN as usize + 1);
@@ -66,11 +69,26 @@ fn sk_for(selector: u8) -> [u8; SK_SIZE] {
     sk
 }
 
+/// CVF-V5-26: every padding profile, chosen by the fuzzer. Parameters may be
+/// invalid (non-divisor stride, non-power-of-two frame, n >= F); encryption
+/// must then refuse cleanly.
+fn profile_for(selector: u8, param: u8) -> PadProfile {
+    match selector % 3 {
+        0 => PadProfile::Bucket,
+        // Strides 0..=4 (0 is invalid) and frames up to 2^10 keep each run
+        // fast; coarse(12) and frame(65536) cost ~10 MB per ciphertext.
+        1 => PadProfile::Coarse(u32::from(param % 5)),
+        _ => PadProfile::Frame(1u32 << (param % 11)),
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Header: [key_sel, aad_sel, sk_sel, flags, mutate_index_lo,
-    //          mutate_index_hi, mutate_xor_byte, msg_len, ..msg..]
-    // flags bit0: flip a byte; bits1..3: drop that many token groups.
-    if data.len() < 8 {
+    //          mutate_index_hi, mutate_xor_byte, msg_len, profile_sel,
+    //          profile_param, ..msg..]
+    // flags bit0: flip a masked-blob byte; bits1..3: drop that many token
+    // groups; bit4: flip a nonce byte (CVF-V5-26).
+    if data.len() < 10 {
         return;
     }
     let key = key_for(data[0]);
@@ -85,8 +103,10 @@ fuzz_target!(|data: &[u8]| {
     let mut_lo = data[4] as usize;
     let mut_hi = data[5] as usize;
     let mut_xor = data[6];
-    let msg_len = (data[7] as usize).min(data.len() - 8);
-    let msg_bytes = &data[8..8 + msg_len];
+    let flip_nonce = data[3] & 0x10 != 0;
+    let profile = profile_for(data[8], data[9]);
+    let msg_len = (data[7] as usize).min(data.len() - 10);
+    let msg_bytes = &data[10..10 + msg_len];
 
     // Restrict to valid UTF-8 slices — v8 encrypts &str. Fall back to a
     // trivial ASCII message on invalid UTF-8 to keep coverage on the
@@ -98,7 +118,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Encrypt once — the fuzzer proves this cannot panic on any
     // validate_key-accepting key with any UTF-8 message.
-    let ct = match encrypt_bytes_v8(message, &key, &sk, aad) {
+    let ct = match encrypt_bytes_v8_with_profile(message, &key, &sk, aad, profile) {
         Ok(ct) => ct,
         Err(_) => return, // e.g. message too long — accepted refusal
     };
@@ -108,7 +128,7 @@ fuzz_target!(|data: &[u8]| {
     let rt = decrypt_bytes_v8(&ct, &key, &sk, aad).expect("v8 round trip failed");
     assert_eq!(rt, message);
 
-    if !flip && drop_groups == 0 {
+    if !flip && !flip_nonce && drop_groups == 0 {
         return;
     }
     let mut payload = ct[..ct.len() - TAG_SIZE].to_vec();
@@ -118,6 +138,11 @@ fuzz_target!(|data: &[u8]| {
     if flip && payload.len() > NONCE_SIZE {
         let idx = NONCE_SIZE + ((mut_hi << 8 | mut_lo) % (payload.len() - NONCE_SIZE));
         payload[idx] ^= mut_xor;
+    }
+    if flip_nonce {
+        // The nonce keys every derivation: a re-tagged ciphertext with a
+        // changed nonce reaches token inversion under the wrong schedule.
+        payload[mut_lo % NONCE_SIZE] ^= mut_xor | 1;
     }
     let tag = fuzz_retag_block_v8(&payload, &sk, aad);
     payload.extend_from_slice(&tag);

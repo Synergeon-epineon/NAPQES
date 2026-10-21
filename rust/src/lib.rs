@@ -1885,6 +1885,68 @@ pub fn fuzz_retag_block_v8(payload: &[u8], sk: &[u8; SK_SIZE], aad: &[u8]) -> [u
     retag_block_v8(payload, sk, aad)
 }
 
+/// Fuzzing hook (CVF-V5-26): the v7 token stream `encrypt` would emit for
+/// `message` under a caller-chosen nonce, so the unauthenticated-decode
+/// target starts from structurally valid `c * k + a` tokens and perturbs
+/// them, instead of feeding random tokens that fail the first check.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_v7_tokens(message: &[u32], key: &[u64], nonce: &[u8; NONCE_SIZE]) -> Result<Vec<u64>, String> {
+    validate_key(key)?;
+    let kb = key_bytes(key);
+    let padded = pad_message(message, &kb, nonce);
+    emit_tokens_v7(&padded, &kb, nonce, derive_noise_p(&kb, nonce), key)
+}
+
+/// Fuzzing hook (CVF-V5-26): deterministic stream encryption.
+#[cfg(all(feature = "fuzzing", feature = "experimental-stream"))]
+#[doc(hidden)]
+pub fn fuzz_encrypt_stream_v8_with_nonce(
+    plaintext: &str,
+    primes: &[u64],
+    sk: &[u8; SK_SIZE],
+    nonce: &[u8; NONCE_SIZE],
+    aad: &[u8],
+    frame_codepoints: u32,
+) -> Result<Vec<u8>, String> {
+    encrypt_stream_ae_v8_with_nonce(plaintext, primes, sk, nonce, aad, frame_codepoints)
+}
+
+/// Fuzzing hook (CVF-V5-26): recompute every chunk tag and the sentinel tag of
+/// a (possibly mutated) v8 stream in place, so that mutations reach the
+/// post-authentication decode paths. Frames are located by the header's `F`;
+/// the sentinel is the last 44 bytes; the count it carries is kept.
+#[cfg(all(feature = "fuzzing", feature = "experimental-stream"))]
+#[doc(hidden)]
+pub fn fuzz_retag_stream_v8(stream: &mut [u8], sk: &[u8; SK_SIZE], aad: &[u8]) {
+    const SENTINEL: usize = 4 + 8 + TAG_SIZE;
+    if stream.len() < 21 + SENTINEL {
+        return;
+    }
+    let f = u32::from_be_bytes([stream[1], stream[2], stream[3], stream[4]]);
+    if f == 0 || f > STREAM_AE_V8_MAX_FRAME {
+        return;
+    }
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce.copy_from_slice(&stream[5..21]);
+    let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8));
+    let body = (f as usize) * 160;
+    let frame = 4 + body + TAG_SIZE;
+    let frames_end = stream.len() - SENTINEL;
+    let mut pos = 21;
+    let mut idx: u32 = 0;
+    while pos + frame <= frames_end {
+        let tag = compute_stream_v8_chunk_tag(sk_fmt.as_ref(), f, &nonce, idx, aad, &stream[pos + 4..pos + 4 + body]);
+        stream[pos + 4 + body..pos + frame].copy_from_slice(&tag);
+        pos += frame;
+        idx += 1;
+    }
+    let s = stream.len() - SENTINEL;
+    let n = u64_from_be8(&stream[s + 4..s + 12]) ^ stream_v8_count_mask(sk_fmt.as_ref(), f, &nonce, idx);
+    let tag = compute_stream_v8_sentinel_tag(sk_fmt.as_ref(), f, &nonce, idx, aad, n);
+    stream[s + 12..].copy_from_slice(&tag);
+}
+
 // ─── Key zeroization ─────────────────────────────────────────────────────────
 
 /// Securely erase key material by overwriting each element with zero.

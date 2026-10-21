@@ -121,6 +121,11 @@ jobs:
           printf '\x00' >> /tmp/tampered
           if /tmp/tampered; then echo 'tampered binary passed INT-2'; exit 1; fi
 
+      # CVF-V5-26: the fuzz crate must keep building (targets run under cargo-fuzz).
+      - name: Build fuzz targets
+        working-directory: rust/fuzz/
+        run: cargo check --bins
+
       - name: Run Rust STS (1M bits, exit 1 on any FAIL)
         working-directory: rust/
         run: cargo run --release --bin sts -- --bits 1000000 --out ../tests/sts_report_rust.json

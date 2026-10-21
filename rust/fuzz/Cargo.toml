@@ -12,12 +12,13 @@ libfuzzer-sys = "0.4"
 
 [dependencies.napqes]
 path = ".."
-features = ["fuzzing", "legacy-v7"]
+features = ["fuzzing", "legacy-v7", "experimental-stream"]
 
 # Cargo-fuzz requires nightly.  Build with:
 #   cargo +nightly fuzz run decode_bytes  -- -max_total_time=300
 #   cargo +nightly fuzz run validate_key  -- -max_total_time=60
 #   cargo +nightly fuzz run unauth_decode -- -max_total_time=120
+#   cargo +nightly fuzz run stream_decode -- -max_total_time=300
 # Corpus is stored in fuzz/corpus/<target>/ (created on first run).
 
 [[bin]]
@@ -41,5 +42,12 @@ doc = false
 [[bin]]
 name = "unauth_decode"
 path = "fuzz_targets/unauth_decode.rs"
+test = false
+doc = false
+
+# CVF-V5-26: the v8 streaming decryptor, with chunks and sentinel re-tagged.
+[[bin]]
+name = "stream_decode"
+path = "fuzz_targets/stream_decode.rs"
 test = false
 doc = false
