@@ -209,7 +209,9 @@ pub fn is_prime(n: u64) -> bool {
 /// not require enumerating `P` up front.
 ///
 /// Returns `Err` (CVF-20) if the range is empty or if `count` distinct primes
-/// are not found within [`KEYGEN_DRAWS_PER_PRIME`] draws per requested prime.
+/// are not found within [`KEYGEN_DRAWS_PER_PRIME`] draws per requested prime,
+/// and (CVF-V5-14) if `count` is `0` or above [`MAX_KEY_ELEMENTS`], so it
+/// never produces a tuple that `validate_key` would reject for its length.
 /// At the normative interval's prime density (about 1 in 16) that cap is
 /// roughly 250 times the expected number of draws, so a prime-poor range is
 /// diagnosed in milliseconds instead of after `4·span` primality tests.
@@ -218,6 +220,13 @@ pub fn generate_prime_numbers(count: usize, min_val: u64, max_val: u64) -> Resul
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
     use rand::distributions::{Distribution, Uniform};
+    // CVF-V5-14: generate only what validate_key will accept.
+    if count == 0 || count > MAX_KEY_ELEMENTS {
+        return Err(format!(
+            "generate_prime_numbers: count {} is outside [1, MAX_KEY_ELEMENTS = {}]",
+            count, MAX_KEY_ELEMENTS
+        ));
+    }
     if max_val <= min_val {
         return Err(format!(
             "generate_prime_numbers: empty range [{}, {}]",
@@ -1489,7 +1498,8 @@ fn derive_format_subkey(sk: &[u8], format_id: u8) -> [u8; 32] {
 ///
 /// Returns `Err` (CVF-20) if `[min_val, max_val]` is not a sub-range of the
 /// normative interval `[MIN_KEY_PRIME, MAX_KEY_PRIME]` (such a key would fail
-/// `validate_key`), or if `count` distinct primes cannot be drawn from it.
+/// `validate_key`), if `count` is `0` or above [`MAX_KEY_ELEMENTS`]
+/// (CVF-V5-14), or if `count` distinct primes cannot be drawn from it.
 ///
 /// The returned `sk` is `Copy`: wipe every copy (see [`zeroize_sk`]), or use
 /// [`crate::NapqesKey::generate`], which owns both components and wipes them
@@ -3436,6 +3446,17 @@ mod v5_tests {
     fn v5_11_validate_key_reports_duplicate_indices() {
         let err = validate_key(&[1_000_003, 1_000_033, 1_000_003]).unwrap_err();
         assert!(err.contains("index 2 duplicates index 0"), "{}", err);
+    }
+
+    // CVF-V5-14: key generation refuses counts validate_key would reject.
+    #[test]
+    fn v5_14_keygen_rejects_zero_and_oversized_count() {
+        assert!(generate_prime_numbers(0, MIN_KEY_PRIME, MAX_KEY_PRIME).is_err());
+        assert!(generate_prime_numbers(MAX_KEY_ELEMENTS + 1, MIN_KEY_PRIME, MAX_KEY_PRIME).is_err());
+        assert!(generate_v8_key(0, MIN_KEY_PRIME, MAX_KEY_PRIME).is_err());
+        assert!(generate_v8_key(MAX_KEY_ELEMENTS + 1, MIN_KEY_PRIME, MAX_KEY_PRIME).is_err());
+        let ps = generate_prime_numbers(MAX_KEY_ELEMENTS, MIN_KEY_PRIME, MAX_KEY_PRIME).unwrap();
+        assert!(validate_key(&ps).is_ok());
     }
 
     // CVF-V5-17: encrypt rejects exactly what decrypt rejects, so the pair
