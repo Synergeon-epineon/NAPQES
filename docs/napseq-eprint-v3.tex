@@ -946,10 +946,7 @@ this scheme, throughout Section~\ref{sec:security}.
         excluded because the synthetic-nonce derivation
         (Definition~\ref{def:synthnonce}) hashes the UTF-8 encoding of $M$,
         and UTF-8 is undefined on unpaired surrogates; $\mathcal{M}$ is thus
-        exactly the set of strings that admit a UTF-8 encoding. Nothing
-        weaker is needed and nothing stronger is assumed: the arithmetic
-        layer itself operates on the integer codepoint values and is
-        indifferent to which subset of $[0,2^{21})$ they range over.
+        exactly the set of strings that admit a UTF-8 encoding.
   \item Ciphertext space $\mathcal{C}=\{0,1\}^{*}$: every output of
         $\mathsf{Enc}$ has length $16+8R(\mathrm{MAX\_NOISE\_RUN}+1)+32$
         bytes for $R=B(|M|)+2$ (Lemma~\ref{lem:length-det}), that is, in
@@ -1028,20 +1025,17 @@ $\mathsf{Enc}$ step (6) computes (Definition~\ref{def:taginput});
 (Remark~\ref{rem:dec-structural});
 (7) else unmask $B=\widetilde{B}\oplus\mathrm{ks}(N)$, deserialise the
 $N_{\mathrm{tok}}$ fixed-width tokens, and invert the token-emission loop
-using the same $(\mathsf{sk}_{\mathrm{fmt}},N)$-derived noise-position oracle: skip at most
-$\mathrm{MAX\_NOISE\_RUN}$ consecutive noise positions, then read one real
-token $t$; if $t<a$ or $(t-a)\not\equiv 0\pmod{k}$ output $\bot$
-(CVF-27: totality preconditions on the recovery); otherwise recover the
-padded codepoint as
-$(t-a)/k_{(\mathrm{real\_idx}\bmod K)+1}$; if the recovered value exceeds
-$\mathtt{0x10FFFF}$ or is a Unicode surrogate output $\bot$
-(also CVF-27, matching the codepoint-range check the reference
-implementations perform), where $a$ is the
-$\mathrm{real\_idx}$-th addend
-$\mathrm{Derive}_{0x01}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{real\_idx})$ and
-$\mathrm{real\_idx}$ counts real tokens from $0$ — exactly the prime and
-addend $\mathsf{Enc}$ used at that index; stop once $R$ real tokens have
-been extracted, discarding any trailing filler; (8) read the 2-codepoint
+using the same $(\mathsf{sk}_{\mathrm{fmt}},N)$-derived noise-position oracle,
+with $\mathrm{real\_idx}$ counting real tokens from $0$. For each real
+token, first bind (CVF-V5-28) the key element
+$k=k_{(\mathrm{real\_idx}\bmod K)+1}$ and the \emph{reduced} addend
+$a=(\mathrm{Derive}_{0x01}(\mathsf{sk}_{\mathrm{fmt}},N,\mathrm{be5}(\mathrm{real\_idx}))[0{:}4]_{\mathrm{be32}}\bmod(k-1))+1\in[1,k-1]$
+— exactly the prime and addend $\mathsf{Enc}$ used at that index; then skip
+at most $\mathrm{MAX\_NOISE\_RUN}$ consecutive noise positions and read one
+real token $t$; if $t<a$ or $(t-a)\not\equiv 0\pmod{k}$ output $\bot$;
+otherwise set $c=(t-a)/k$, and if $c>\mathtt{0x10FFFF}$ or $c$ is a Unicode
+surrogate output $\bot$ (CVF-27: these guards make step (7) total); stop
+once $R$ real tokens have been extracted, discarding any trailing filler; (8) read the 2-codepoint
 big-endian length prefix $(p_0,p_1)$; if $p_0>255$ or $p_1>255$ output
 $\bot$ (CVF-43: canonical, byte-valued prefix), else set $n=256p_0+p_1$
 and, if $n>R-2$, output $\bot$
@@ -1055,19 +1049,26 @@ Step (3) depends only on $|C|$, a public quantity, and is performed
 \emph{before} the tag is computed, so a ciphertext of illegal length is
 rejected without an HMAC evaluation and the rejection reveals nothing the
 adversary did not already know.
-Steps (6) and (8) are performed \emph{after} the tag comparison of step (5),
-so they are never reachable on an input an adversary without $\mathsf{sk}$
-could construct, and they play no part in the INT-CTXT argument. They are
-specified nonetheless because step (7) is not total without them: $R$ is
-recovered from $|C|$ and $n$ from the decrypted buffer, so a malformed but
-correctly tagged ciphertext — which a key holder can trivially produce —
-would otherwise drive an out-of-range read or an allocation sized by a field
-the caller did not choose. Divisibility by $\mathrm{MAX\_NOISE\_RUN}+1$
-alone does not imply step (6): $R=20$ passes step (3) and fails step (6).
+Steps (6), (7) and (8) are performed \emph{after} the tag comparison of
+step (5), so they are never reachable on an input an adversary without
+$\mathsf{sk}$ could construct, and they play no part in the INT-CTXT
+argument. They are specified nonetheless because a malformed but correctly
+tagged ciphertext — which a key holder can trivially produce — must be
+rejected rather than drive an out-of-range read, an allocation sized by a
+field the caller did not choose, or an arithmetic failure. Totality comes
+from the explicit guards of each step, not from one step implying another
+(corrected in round 5, CVF-V5-28: an earlier version of this remark said
+steps (6) and (8) make step (7) total, which is false): step (6) fixes $R$
+to a reachable bucket; the guards of step (7) — $t\ge a$,
+$(t-a)\equiv0\pmod k$, and a scalar-value range check on $c$ — make every
+token inversion defined; and step (8) bounds $n$ by the buffer actually
+recovered. Divisibility by $\mathrm{MAX\_NOISE\_RUN}+1$ alone does not imply
+step (6): $R=20$ passes step (3) and fails step (6).
 All three reference implementations enforce these checks in this order;
 vector \texttt{W-N06} of Section~\ref{sec:kats} pins step (3),
-\texttt{W-N07} step (6), \texttt{W-N09}--\texttt{W-N10} the per-token
-checks of step (7), and \texttt{W-N08} and \texttt{W-N11} step (8).
+\texttt{W-N07} step (6), \texttt{W-N09}, \texttt{W-N10} and \texttt{W-N12}
+the per-token guards of step (7) ($t<a$, non-divisibility, and a recovered
+surrogate), and \texttt{W-N08} and \texttt{W-N11} step (8).
 \end{remark}
 
 \begin{proposition}[Correctness]\label{prop:correctness}
@@ -2282,8 +2283,10 @@ the usual caveat for hand-rolled constant-time C and is not addressed here.
   \item The Python reference implementation offers no timing guarantees of
         any kind: it uses \texttt{int}, list resizing, and dictionary
         lookups throughout.
-  \item The structural checks added at $\mathsf{Dec}$ steps (6) and (8)
-        (Remark~\ref{rem:dec-structural}) reject at different points and in
+  \item The structural checks at $\mathsf{Dec}$ steps (6), (7) and (8)
+        (Remark~\ref{rem:dec-structural}) — the bucket check, the per-token
+        guards $t\ge a$, $(t-a)\equiv0\pmod k$ and the scalar-value check,
+        and the length-prefix checks — reject at different points and in
         different time. They are reachable only after the tag has verified,
         i.e.\ only by a party already holding $\mathsf{sk}$, so this
         difference is not an oracle for an outside adversary.
