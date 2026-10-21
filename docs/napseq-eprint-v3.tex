@@ -2244,7 +2244,10 @@ the usual caveat for hand-rolled constant-time C and is not addressed here.
         distinctness checks) runs in time that depends on the secret key
         elements. The bare-slice entry points of all three ports repeat it
         on every call; the Rust \texttt{NapqesKey} wrapper performs it once,
-        at construction.
+        at construction. The Rust v7 decryptors perform it once per call and
+        only \emph{after} the tag has verified, so a forged or truncated
+        ciphertext is rejected after one HMAC evaluation and never reaches
+        the key-dependent validation (CVF-V5-12).
   \item The retained v7 encryptors (Section~\ref{sec:implementation})
         compute their noise threshold in IEEE-754 \texttt{f64}; they are
         outside $\Pi$ and carry no timing or reproducibility claim.

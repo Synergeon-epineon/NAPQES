@@ -1195,14 +1195,14 @@ pub(crate) fn encrypt_bytes_with_nonce(
     payload
 }
 
-/// Legacy v7 decryptor, kept for archived ciphertexts. v7 keys every
-/// derivation by the serialised prime tuple rather than an independent `sk`,
-/// and no theorem of the NAPQES v4 paper applies to it (CVF-28).
-pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
-    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
-    #[cfg(feature = "fips_gate")]
-    self_test::require_post().map_err(|e| e.to_string())?;
-    validate_key(key)?; // CVF-15
+/// Shared v7 open path of [`decrypt_bytes`] and [`decrypt_raw`] (CVF-V5-12).
+///
+/// Order: AAD-length and parse-floor checks, then the tag, and only then key
+/// validation and token inversion. `key_bytes` and HMAC are defined for any
+/// key, so a forged or truncated input is rejected after one HMAC and never
+/// reaches the key-dependent validation, and validation runs once per call
+/// (previously two or three times, before authentication).
+fn open_v7(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u32>, String> {
     check_v7_aad_len(aad.len())?;
     if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
         return Err(format!(
@@ -1219,13 +1219,24 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
     if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
+    validate_key(key)?; // CVF-15, after authentication (CVF-V5-12)
     let nonce = &payload[..NONCE_SIZE];
     let masked = &payload[NONCE_SIZE..];
     let ks = varint_keystream(&kb, nonce, masked.len());
     let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
     let tokens = fixed_decode_tokens(&blob)
         .map_err(|e| format!("varint decode error: {}", e))?;
-    let codepoints = decrypt(nonce, &tokens, key)?;
+    decrypt_core(nonce, &tokens, key, &kb)
+}
+
+/// Legacy v7 decryptor, kept for archived ciphertexts. v7 keys every
+/// derivation by the serialised prime tuple rather than an independent `sk`,
+/// and no theorem of the NAPQES v4 paper applies to it (CVF-28).
+pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
+    // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
+    #[cfg(feature = "fips_gate")]
+    self_test::require_post().map_err(|e| e.to_string())?;
+    let codepoints = open_v7(ciphertext, key, aad)?;
     // CVF-14: the previous body was `filter_map(char::from_u32)`, which
     // silently dropped every recovered value that was not a Unicode scalar
     // (surrogates, > 0x10FFFF). That turned a malformed ciphertext into a
@@ -1272,7 +1283,8 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
     // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
-    validate_key(key)?; // CVF-15 — reject before base64 decode
+    // CVF-V5-12: no key validation here; decrypt_bytes validates once,
+    // after the tag check.
     let bytes = STANDARD
         .decode(cypher.as_bytes())
         .map_err(|e| format!("base64 decode error: {}", e))?;
@@ -1343,30 +1355,7 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
     // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
-    validate_key(key)?; // CVF-15
-    check_v7_aad_len(aad.len())?;
-    if ciphertext.len() < NONCE_SIZE + TAG_SIZE {
-        return Err(format!(
-            "Ciphertext too short: {} bytes; header+tag require at least {}.",
-            ciphertext.len(),
-            NONCE_SIZE + TAG_SIZE
-        ));
-    }
-    let kb = key_bytes(key);
-    let split = ciphertext.len() - TAG_SIZE;
-    let payload = &ciphertext[..split];
-    let recv_tag = &ciphertext[split..];
-    let calc_tag = compute_auth_tag(&kb, aad, payload, AAD_LEN_WIDTH_V7);
-    if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
-        return Err("Authentication failed: invalid HMAC tag.".into());
-    }
-    let nonce = &payload[..NONCE_SIZE];
-    let masked = &payload[NONCE_SIZE..];
-    let ks = varint_keystream(&kb, nonce, masked.len());
-    let blob: Vec<u8> = masked.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
-    let tokens = fixed_decode_tokens(&blob)
-        .map_err(|e| format!("varint decode error: {}", e))?;
-    let codepoints = decrypt(nonce, &tokens, key)?;
+    let codepoints = open_v7(ciphertext, key, aad)?;
     // CVF-14: the previous body was `.map(|c| (c & 0xFF) as u8)` — a silent
     // narrowing that discarded every recovered codepoint above 255 without
     // signalling. A ciphertext produced by `encrypt_bytes` (codepoint-oriented,
@@ -2681,10 +2670,22 @@ mod tests {
         assert!(err.contains("non-empty"), "expected empty-key error, got: {}", err);
     }
 
+    /// A v7 ciphertext whose tag verifies under `key` regardless of whether
+    /// `key` passes validation (key_bytes and HMAC are defined for any key).
+    fn v7_tagged_under(key: &[u64]) -> Vec<u8> {
+        let mut ct = vec![0u8; NONCE_SIZE + 8 * 20];
+        let tag = compute_auth_tag(&key_bytes(key), b"", &ct, AAD_LEN_WIDTH_V7);
+        ct.extend_from_slice(&tag);
+        ct
+    }
+
     #[test]
     fn cvf15_v7_decrypt_bytes_rejects_empty_key() {
-        // Ciphertext content doesn't matter — validation must fire first.
+        // CVF-V5-12: a forged ciphertext fails the tag before validation runs;
+        // a correctly tagged one still reaches validation, which rejects.
         let err = decrypt_bytes(&[0u8; 100], &[], b"").unwrap_err();
+        assert!(err.contains("Authentication failed"), "got: {}", err);
+        let err = decrypt_bytes(&v7_tagged_under(&[]), &[], b"").unwrap_err();
         assert!(err.contains("non-empty"), "expected empty-key error, got: {}", err);
     }
 
@@ -2717,9 +2718,10 @@ mod tests {
     }
 
     #[test]
-    fn cvf15_v7_decrypt_str_rejects_bad_key_before_base64() {
-        let err = decrypt_str("YQ==", &[], b"").unwrap_err();
-        assert!(err.contains("non-empty"), "expected empty-key error, got: {}", err);
+    fn cvf15_v7_decrypt_str_rejects_bad_key() {
+        let ct = STANDARD.encode(v7_tagged_under(&[3]));
+        let err = decrypt_str(&ct, &[3], b"").unwrap_err();
+        assert!(err.contains("minimum"), "expected minimum-size error, got: {}", err);
     }
 
     #[test]
@@ -2731,7 +2733,9 @@ mod tests {
     #[test]
     fn cvf15_v7_decrypt_raw_rejects_bad_key() {
         let err = decrypt_raw(&[0u8; 100], &[], b"").unwrap_err();
-        assert!(err.contains("non-empty"), "expected empty-key error, got: {}", err);
+        assert!(err.contains("Authentication failed"), "got: {}", err);
+        let err = decrypt_raw(&v7_tagged_under(&[1_000_000]), &[1_000_000], b"").unwrap_err();
+        assert!(err.contains("not prime"), "expected primality error, got: {}", err);
     }
 
     #[test]
