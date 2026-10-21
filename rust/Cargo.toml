@@ -20,6 +20,11 @@ fips_gate = []
 # CRNG continuous-test failure can be exercised (rust/tests/fips_gate.rs).
 # Refuses to compile in release mode.
 fault_injection = []
+# CVF-V5-4 / CVF-V5-7: the deprecated v7 encryptors (`encrypt`,
+# `encrypt_bytes`, `encrypt_str`, `encrypt_raw`). Off by default: nothing in
+# the crate encrypts with v7 any more; the v7 decryptors stay available for
+# archived ciphertexts without this feature.
+legacy-v7 = []
 # Requires the unpublished rust/src/vale sources (gitignored).
 vale = []
 # Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
@@ -94,7 +99,7 @@ required-features = ["fips_gate", "fault_injection"]
 [[test]]
 name = "fips_crng"
 path = "tests/fips_crng.rs"
-required-features = ["fips_gate", "fault_injection"]
+required-features = ["fips_gate", "fault_injection", "legacy-v7"]
 
 [lib]
 name = "napqes"

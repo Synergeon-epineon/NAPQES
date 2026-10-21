@@ -27,7 +27,8 @@
 //! * **v7 (legacy — decryptors retained for archived ciphertexts).**
 //!   Fixed-width tokens (CVF1 fix). Wire layout same shape, but no
 //!   `MAX_NOISE_RUN` cap, so ciphertext length varies with the nonce.
-//!   Encryptors are `#[deprecated]` per CVF-17; decryptors ([`decrypt_bytes`],
+//!   Encryptors are `#[deprecated]` per CVF-17 and compiled only with the
+//!   `legacy-v7` feature (CVF-V5-4); decryptors ([`decrypt_bytes`],
 //!   [`decrypt_str`], [`decrypt_raw`]) remain to decode existing traffic
 //!   within the compatibility envelope documented on [`decrypt_bytes`]
 //!   (CVF-V5-16): keys with an element of 0, 1 or `>= 2^40`, or a repeated
@@ -790,6 +791,8 @@ fn unpad_message(padded: &[u32]) -> Result<Vec<u32>, String> {
 
 // ─── Core encrypt / decrypt ──────────────────────────────────────────────────
 
+// CVF-V5-4 / CVF-V5-7: v7 encryptors are compiled only with `legacy-v7`.
+#[cfg(any(test, feature = "legacy-v7"))]
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
@@ -828,7 +831,7 @@ pub fn encrypt(message: &[u32], key: &[u64]) -> Result<([u8; NONCE_SIZE], Vec<u6
     let kb = key_bytes(key);
     let noise_p = derive_noise_p(&kb, &nonce);
     let padded = pad_message(message, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key);
+    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)?;
     Ok((nonce, cypher))
 }
 
@@ -1096,20 +1099,34 @@ fn fixed_encode_tokens(tokens: &[u64]) -> Vec<u8> {
 /// the original nonce-dependent length. v7 encryptors are `#[deprecated]`
 /// per CVF-17; the v8 path (`encrypt_bytes_v8_core_inner`) has its own
 /// capped-and-ceilinged loop.
+///
+/// **Robustness bound (CVF-V5-4).** The loop is no longer unbounded: a run of
+/// more than [`V7_NOISE_RUN_GUARD`] consecutive noise positions returns `Err`
+/// instead of looping on. With the v7 threshold `p <= 0.99` such a run has
+/// probability below `0.99^4096 < 2^-59` per real token, so the bound never
+/// changes a ciphertext a v7 decryptor could have to read.
 fn emit_tokens_v7(
     padded: &[u32],
     kb: &[u8],
     nonce: &[u8],
     noise_p: f64,
     key: &[u64],
-) -> Vec<u64> {
+) -> Result<Vec<u64>, String> {
     let kk = key.len() as u64;
     let mut cypher: Vec<u64> = Vec::with_capacity(padded.len() * 4);
     let mut real_idx: u64 = 0;
     let mut ct_pos: u64 = 0;
     for &c in padded {
+        let mut run: u64 = 0;
         loop {
             if is_noise_pos(kb, nonce, ct_pos, noise_p) {
+                run += 1;
+                if run > V7_NOISE_RUN_GUARD {
+                    return Err(format!(
+                        "v7 emission aborted: more than {} consecutive noise positions (CVF-V5-4)",
+                        V7_NOISE_RUN_GUARD
+                    ));
+                }
                 let k = key[(real_idx % kk) as usize];
                 let nc = derive_noise_char(kb, nonce, ct_pos);
                 let na = derive_noise_token_addend(kb, nonce, ct_pos, k);
@@ -1125,8 +1142,12 @@ fn emit_tokens_v7(
             }
         }
     }
-    cypher
+    Ok(cypher)
 }
+
+/// Upper bound on consecutive noise positions in the v7 emission loop
+/// (CVF-V5-4). See [`emit_tokens_v7`].
+const V7_NOISE_RUN_GUARD: u64 = 4096;
 
 fn fixed_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
     if data.len() % TOKEN_WIDTH != 0 {
@@ -1148,6 +1169,8 @@ fn fixed_decode_tokens(data: &[u8]) -> Result<Vec<u64>, String> {
 // ─── Binary / string wrappers (v7 authenticated — CVF1 fix) ──────────────────
 
 
+// CVF-V5-4 / CVF-V5-7: v7 encryptors are compiled only with `legacy-v7`.
+#[cfg(any(test, feature = "legacy-v7"))]
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
@@ -1176,7 +1199,7 @@ pub fn encrypt_bytes(message: &str, key: &[u64], aad: &[u8]) -> Result<Vec<u8>, 
     let kb = key_bytes(key);
     let noise_p = derive_noise_p(&kb, &nonce);
     let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key); // CVF-46
+    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)?; // CVF-46
     let blob = fixed_encode_tokens(&cypher);
     let ks = varint_keystream(&kb, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
@@ -1224,7 +1247,8 @@ pub(crate) fn encrypt_bytes_with_nonce(
     let noise_p = derive_noise_p(&kb, &nonce);
     let codepoints: Vec<u32> = message.chars().map(|c| c as u32).collect();
     let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key); // CVF-46
+    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)
+        .expect("v7 KAT emission exceeded the CVF-V5-4 noise-run guard"); // CVF-46
     let blob = fixed_encode_tokens(&cypher);
     let ks = varint_keystream(&kb, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
@@ -1320,6 +1344,8 @@ pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Strin
         .collect::<Result<String, String>>()
 }
 
+// CVF-V5-4 / CVF-V5-7: v7 encryptors are compiled only with `legacy-v7`.
+#[cfg(any(test, feature = "legacy-v7"))]
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
@@ -1362,6 +1388,8 @@ pub fn decrypt_str(cypher: &str, key: &[u64], aad: &[u8]) -> Result<String, Stri
 ///
 /// Deprecated per CVF-17: length depends on the nonce for v7. New callers
 /// should encode their bytes and use [`encrypt_bytes_v8`] instead.
+// CVF-V5-4 / CVF-V5-7: v7 encryptors are compiled only with `legacy-v7`.
+#[cfg(any(test, feature = "legacy-v7"))]
 #[deprecated(
     since = "0.2.0",
     note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket \
@@ -1391,7 +1419,7 @@ pub fn encrypt_raw(data: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>, Stri
     let kb = key_bytes(key);
     let noise_p = derive_noise_p(&kb, &nonce);
     let padded = pad_message(&codepoints, &kb, &nonce);
-    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key); // CVF-46
+    let cypher = emit_tokens_v7(&padded, &kb, &nonce, noise_p, key)?; // CVF-46
     let blob = fixed_encode_tokens(&cypher);
     let ks = varint_keystream(&kb, &nonce, blob.len());
     let masked: Vec<u8> = blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b).collect();
@@ -3589,7 +3617,7 @@ mod v5_tests {
         let kb = key_bytes(&key);
         let msg: Vec<u32> = "archived".chars().map(|c| c as u32).collect();
         let padded = pad_message(&msg, &kb, &nonce);
-        let tokens = emit_tokens_v7(&padded, &kb, &nonce, derive_noise_p(&kb, &nonce), &key);
+        let tokens = emit_tokens_v7(&padded, &kb, &nonce, derive_noise_p(&kb, &nonce), &key).unwrap();
         let blob = fixed_encode_tokens(&tokens);
         let ks = varint_keystream(&kb, &nonce, blob.len());
         let mut ct = nonce.to_vec();
@@ -3605,6 +3633,18 @@ mod v5_tests {
         for bad in [&[][..], &[1][..], &[7, 7][..], &[1u64 << 40][..]] {
             assert!(validate_key_v7_decrypt(bad).is_err(), "{:?} accepted", bad);
         }
+    }
+
+    // CVF-V5-4: the v7 emission loop is bounded. With a forced threshold of
+    // 1.0 every position is noise; the pre-fix loop never terminated.
+    #[test]
+    fn v5_4_v7_emission_loop_is_bounded() {
+        let key = [1_000_003u64, 1_000_033];
+        let kb = key_bytes(&key);
+        let nonce = [3u8; NONCE_SIZE];
+        let err = emit_tokens_v7(&[0x41], &kb, &nonce, 1.0, &key).unwrap_err();
+        assert!(err.contains("CVF-V5-4"), "{}", err);
+        assert!(emit_tokens_v7(&[0x41], &kb, &nonce, derive_noise_p(&kb, &nonce), &key).is_ok());
     }
 
     // CVF-V5-14: key generation refuses counts validate_key would reject.

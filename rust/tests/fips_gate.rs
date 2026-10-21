@@ -43,12 +43,16 @@ fn assert_all_refused() {
     refused("encrypt_stream_ae_v8", encrypt_stream_ae_v8("m", PRIMES, &SK, b"", 16));
     refused("decrypt_stream_ae_v8", decrypt_stream_ae_v8(&[0u8; 64], PRIMES, &SK, b""));
     refused("StreamV8Encryptor::new", StreamV8Encryptor::new(PRIMES, &SK, b"", 16));
+    #[cfg(feature = "legacy-v7")]
     refused("encrypt", encrypt(&[0x41], PRIMES));
     refused("decrypt", decrypt(&[0u8; NONCE_SIZE], &[0u64; 20], PRIMES));
+    #[cfg(feature = "legacy-v7")]
     refused("encrypt_bytes", encrypt_bytes("m", PRIMES, b""));
     refused("decrypt_bytes", decrypt_bytes(&[0u8; 64], PRIMES, b""));
+    #[cfg(feature = "legacy-v7")]
     refused("encrypt_str", encrypt_str("m", PRIMES, b""));
     refused("decrypt_str", decrypt_str("AAAA", PRIMES, b""));
+    #[cfg(feature = "legacy-v7")]
     refused("encrypt_raw", encrypt_raw(b"m", PRIMES, b""));
     refused("decrypt_raw", decrypt_raw(&[0u8; 64], PRIMES, b""));
     refused("kem::encapsulate", kem::encapsulate(&pk));

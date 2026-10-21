@@ -120,7 +120,7 @@ call has returned `Ok(())`:
 gated entry points above.
 
 A failed POST, or a failed conditional self-test (the CRNG continuous
-test run on every CSPRNG nonce draw, see `rust/tests/fips_crng.rs`), puts
+test run on every CSPRNG nonce draw, see `rust/tests/fips_crng.rs`, which needs `legacy-v7`), puts
 the module in the error state. **The error state is sticky:** a later call to
 `run_power_on_self_tests()` returns `Err(NotOperational)` without
 re-running, and the module stays refused until the process restarts.
@@ -155,12 +155,15 @@ binaries and examples run POST at start-up.
 `kem`, `kem_exchange`, `ot_frame`, `protocols`; `vale` only with
 `--features vale` (its sources are not published).
 
-**Deprecated (v7 legacy — kept only for archived ciphertexts):**
+**Deprecated (v7 legacy — compiled only with `--features legacy-v7`):**
 `encrypt`, `encrypt_bytes`, `encrypt_str`, `encrypt_raw` — audit finding
 CVF-17 (length not a function of the padding bucket alone; the
 length-hiding property Corollary 4.14 proves for v8 does not hold), and v7
 is keyed by the prime tuple rather than `sk`, so no theorem of the paper
-applies (CVF-28). The corresponding decryptors (`decrypt`, `decrypt_bytes`,
+applies (CVF-28). No in-tree component encrypts with v7: the OT gateway
+(`ot_frame`) seals with v8 (CVF-V5-7). The v7 emission loop aborts with an
+error after 4096 consecutive noise positions instead of looping without
+bound (CVF-V5-4). The corresponding decryptors (`decrypt`, `decrypt_bytes`,
 `decrypt_str`, `decrypt_raw`) remain to decrypt existing v7 ciphertexts and
 are not deprecated. **Compatibility envelope (CVF-V5-16):** they accept any
 key of 1–128 distinct elements in `[2, 2^40 - 1]` (no primality or interval

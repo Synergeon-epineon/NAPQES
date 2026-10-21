@@ -64,7 +64,7 @@ Legend: **C** = closed in this pass; **C+D** = closed with follow-up items expli
 | 14 | Mod | behavior | C | `decrypt_bytes`/`decrypt_raw` no longer silently truncate or drop non-scalar codepoints; `decrypt_core` returns `Result` |
 | 15 | Major | flaw | C | `validate_key(key)?` at head of every v7 entry (8 sites); `#[deprecated]` on encrypt-side raw-slice API |
 | 16 | Mod | over-underflow | C | `MAX_KEY_PRIME` upper-bound enforced by `validate_key`; `MAX_SAFE_KEY_PRIME` compile-time assertion; `debug_assert!` in `derive_addend` / `derive_noise_token_addend` |
-| 17 | Mod | flaw | C | `#[deprecated]` on all v7 encryptors (encrypt, encrypt_bytes, encrypt_str, encrypt_raw, encrypt_bytes_with_nonce); v7 decryptors retained for archived ciphertexts |
+| 17 | Mod | flaw | C | `#[deprecated]` on the four public v7 encryptors (encrypt, encrypt_bytes, encrypt_str, encrypt_raw); v7 decryptors retained for archived ciphertexts. *(Corrected in round 5, CVF-V5-4: `encrypt_bytes_with_nonce` was not deprecated — it was already `pub(crate)` in v4. Round 5 moves the four encryptors behind the `legacy-v7` feature, bounds the v7 emission loop and moves `ot_frame` to v8.)* |
 | 18 | Major | procedural | C+D | Three new v8 KATs (`kat_v8_encrypt`, `kat_v8_decrypt`, `kat_v8_structural_reject`) wired into `run_power_on_self_tests`; INT-1 renamed to `BuildProvenanceMismatch` and made opt-in via `NAPQES_ATTESTED_VERSION`. **Deferred:** full binary HMAC (`build.rs`) route-b. |
 | 19 | Minor | procedural | C | Two toothless guards (`tested == 0 && skipped == 0`) replaced with `assert!(tested > 0, ...)`; negative-KAT hard-fails on zero tampered submissions |
 | 20 | Mod | algorithm | C | `generate_prime_numbers` uses `rand::distributions::Uniform` (Lemire rejection); modulo bias removed; regression asserts sampler output passes `validate_key` |
@@ -181,7 +181,7 @@ These five findings resolve to one architectural improvement, `NapqesKey`, plus 
 
 ### 5.2 v7 hygiene (CVF-17, 30, 34, 35, 42, 43, 44, 45, 46)
 
-**CVF-17 — v7 encryptors deprecated.** `#[deprecated(since = "0.2.0", note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket ceiling ...")]` on `encrypt`, `encrypt_bytes`, `encrypt_str`, `encrypt_raw`, and `encrypt_bytes_with_nonce`. v7 decryptors are **not** deprecated (retained for archived-ciphertext readers, per the auditor's explicit guidance). Internal call sites (`ot_frame`, `src/main.rs`, `src/bin/sts.rs`, tests, self-test) use narrow `#[allow(deprecated)]` scopes with comments explaining why.
+**CVF-17 — v7 encryptors deprecated.** `#[deprecated(since = "0.2.0", note = "v7 legacy format lacks the MAX_NOISE_RUN cap and per-bucket ceiling ...")]` on `encrypt`, `encrypt_bytes`, `encrypt_str` and `encrypt_raw` (*corrected in round 5: `encrypt_bytes_with_nonce` was never deprecated; it is `pub(crate)`*). v7 decryptors are **not** deprecated (retained for archived-ciphertext readers, per the auditor's explicit guidance). Internal call sites (`ot_frame`, `src/main.rs`, `src/bin/sts.rs`, tests, self-test) use narrow `#[allow(deprecated)]` scopes with comments explaining why.
 
 **CVF-30 — v7 float paths accepted as backward-compat.** Paper §3.4 sentence "no floating-point representation is used anywhere in this construction" now qualified to "in the v8 construction $\Pi$ specified by this paper", with a footnote naming the v7 f64 `derive_noise_p` as retained for backward compatibility with archived v7 ciphertexts, and citing `docs/CAVEATS.md` under CVF-30 for the full documentation.
 
