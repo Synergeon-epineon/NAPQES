@@ -111,6 +111,20 @@ class TestCrossLanguageVector:
         result = napqes_kem._derive_napqes_key(bytes(16))
         assert result == expected, f"cross-language mismatch: {result}"
 
+    def test_frodo_decap_kat_matches_rust_post(self):
+        # CVF-V5-5: the FrodoKEM-640-AES decapsulation KAT pinned in the Rust
+        # POST (rust/src/kat/frodo640aes_decap_kat.bin = sk || ct) decapsulates
+        # to the same key under liboqs. Rust: self_test::KAT_FRODO_EXPECTED_KEY.
+        import pathlib
+        blob = (pathlib.Path(__file__).resolve().parents[1]
+                / "rust" / "src" / "kat" / "frodo640aes_decap_kat.bin").read_bytes()
+        sk = blob[:napqes_kem.FRODO_SECRET_KEY_SIZE]
+        ct = blob[napqes_kem.FRODO_SECRET_KEY_SIZE:]
+        assert napqes_kem.decapsulate(ct, sk) == [
+            5767087, 9638897, 6364217, 9305771, 14328571, 9326249, 14992633,
+            4658327, 5481323, 4521743, 1356431, 7343653, 12284017,
+        ]
+
     def test_derive_v8_sk_known_vector(self):
         # CVF-V5-7: the v8 sk used by the OT gateway after a KEM exchange.
         # Rust: kem::tests::test_derive_v8_sk_cross_language_vector

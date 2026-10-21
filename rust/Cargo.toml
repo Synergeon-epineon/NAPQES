@@ -31,6 +31,11 @@ fault_injection = []
 # the crate encrypts with v7 any more; the v7 decryptors stay available for
 # archived ciphertexts without this feature.
 legacy-v7 = []
+# CVF-V5-5: FIPS builds. The INT-2 software-integrity self-test fails if the
+# executable has no `<executable>.hmac` reference value (written after
+# linking by the `napqes_integrity` tool). Without this feature a missing
+# reference value skips INT-2; a present but wrong one always fails.
+fips_integrity = []
 # CVF-V5-2: the v8 streaming format (`encrypt_stream_ae_v8`,
 # `decrypt_stream_ae_v8`, `StreamV8Encryptor`). Experimental: it has no
 # security model or proof in the paper and is outside the audited claims.
@@ -89,6 +94,11 @@ path = "src/bin/sts.rs"
 [[bin]]
 name = "ls_gateway"
 path = "src/bin/ls_gateway.rs"
+
+# CVF-V5-5: writes the INT-2 reference value `<executable>.hmac`.
+[[bin]]
+name = "napqes_integrity"
+path = "src/bin/napqes_integrity.rs"
 
 [[example]]
 name = "file_bench"

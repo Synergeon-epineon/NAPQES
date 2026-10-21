@@ -159,9 +159,14 @@ The module operates correctly and securely when:
 ## 6. Firmware / Software Loading
 
 The module is loaded by the host OS dynamic linker. Module integrity is
-verified at load time by `run_power_on_self_tests` (step 4 of the POST
-sequence: software integrity HMAC). The reference HMAC digest is embedded
-in the module at compile time by `build.rs`.
+verified at start-up by `run_power_on_self_tests` (INT-2, software
+integrity HMAC, CVF-V5-5): HMAC-SHA256 under the public key
+`self_test::INTEGRITY_KEY` over the executable that contains the module,
+compared with the reference value in `<executable>.hmac`. That file is
+produced after linking by the `napqes_integrity` tool (a binary cannot
+embed its own digest at compile time, so no `build.rs` is involved) and
+must be installed next to the executable; builds with the `fips_integrity`
+feature refuse to operate without it.
 
 ---
 

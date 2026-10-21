@@ -110,6 +110,17 @@ jobs:
           cargo test --features fips_gate,fault_injection,legacy-v7 --test fips_gate --test fips_crng
 
       # ── STS gate (all 15 NIST SP 800-22 Rev 1a tests, no nistrng) ──────────
+      # CVF-V5-5: INT-2 end to end — a signed binary starts, a modified one does not.
+      - name: Software integrity (INT-2)
+        working-directory: rust/
+        run: |
+          cargo build --release --features fips_integrity --bin napqes_demo --bin napqes_integrity
+          ./target/release/napqes_integrity target/release/napqes_demo
+          ./target/release/napqes_demo
+          cp target/release/napqes_demo /tmp/tampered && cp target/release/napqes_demo.hmac /tmp/tampered.hmac
+          printf '\x00' >> /tmp/tampered
+          if /tmp/tampered; then echo 'tampered binary passed INT-2'; exit 1; fi
+
       - name: Run Rust STS (1M bits, exit 1 on any FAIL)
         working-directory: rust/
         run: cargo run --release --bin sts -- --bits 1000000 --out ../tests/sts_report_rust.json
