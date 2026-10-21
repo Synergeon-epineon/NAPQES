@@ -187,8 +187,9 @@ validation with secret-dependent timing; use the `_key` variants.
 **Padding profile:** `PadProfile` (Bucket / Coarse / Frame).
 
 **Modules:** `self_test` (FIPS 140-3 SP 800-140B §4.9.1 power-on tests),
-`kem`, `kem_exchange`, `ot_frame`, `protocols`; `vale` only with
-`--features vale` (its sources are not published).
+`kem`, `kem_exchange`, `ot_frame`, `protocols`. (The unpublished `vale`
+module and its SPHINCS+ dependency are no longer part of this crate,
+CVF-V5-6.)
 
 **Deprecated (v7 legacy — compiled only with `--features legacy-v7`):**
 `encrypt`, `encrypt_bytes`, `encrypt_str`, `encrypt_raw` — audit finding

@@ -2,6 +2,12 @@
 name = "napqes"
 version = "0.1.0"
 edition = "2021"
+# CVF-V5-6: minimum supported Rust version (the locked `time` dependency
+# requires 1.88); CI checks the crate builds with it.
+rust-version = "1.88"
+# Binaries are listed explicitly below; a stray file in src/bin (for example
+# the unpublished vale_demo.rs) is not built.
+autobins = false
 
 # CVF-47 / CVF-V5-8: opt-in FIPS 140-3 self-test gating. When enabled, every
 # public v8 and v7 encrypt/decrypt entry point, key generation
@@ -30,8 +36,6 @@ legacy-v7 = []
 # security model or proof in the paper and is outside the audited claims.
 # Off by default.
 experimental-stream = []
-# Requires the unpublished rust/src/vale sources (gitignored).
-vale = []
 # Benchmark-only: disable SHA-NI so HMAC-SHA256 runs in portable software.
 soft_sha = ["sha2/force-soft"]
 # Exposes a v8 re-tag hook so cargo-fuzz can reach post-authentication paths.
@@ -60,21 +64,19 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
 clap = { version = "4", features = ["derive"] }
 syslog = "6"
-pqcrypto-sphincsplus = { version = "0.7.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 dudect-bencher = "0.6"
 
-# CVF-23: manifest hardening — release builds now trap on integer overflow
-# (belt-and-braces backstop for CVF-16's checked_mul recommendation), and
-# test builds keep debug_assert! live so CVF-12's ct_eq_bytes length check
-# fires in `cargo test`.
+# CVF-23: manifest hardening — release builds trap on integer overflow
+# (belt-and-braces backstop for CVF-16's checked_mul recommendation). Test
+# builds need no profile of their own: the default test profile already
+# keeps overflow checks and debug_assert! live, so CVF-12's ct_eq_bytes
+# length check fires in `cargo test` (CVF-V5-6 / CVF-V5-22: the redundant
+# [profile.test] block and its stale comment were removed).
 [profile.release]
 overflow-checks = true
 debug-assertions = false
-
-[profile.test]
-overflow-checks = true
 
 [[bin]]
 name = "napqes_demo"
@@ -87,11 +89,6 @@ path = "src/bin/sts.rs"
 [[bin]]
 name = "ls_gateway"
 path = "src/bin/ls_gateway.rs"
-
-[[bin]]
-name = "vale_demo"
-path = "src/bin/vale_demo.rs"
-required-features = ["vale"]
 
 [[example]]
 name = "file_bench"

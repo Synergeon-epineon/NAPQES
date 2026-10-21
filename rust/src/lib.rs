@@ -57,9 +57,8 @@ pub mod kem;
 pub mod kem_exchange;
 pub mod ot_frame;
 pub mod protocols;
-// rust/src/vale is not published (gitignored); build it with `--features vale`.
-#[cfg(feature = "vale")]
-pub mod vale;
+// CVF-V5-6: the unpublished `vale` module, its feature and the SPHINCS+
+// dependency it pulled into every build were removed from this crate.
 
 // CVF-29 + CVF-37 + CVF-41: validated + auto-wiped v8 key wrapper.
 mod key;

@@ -90,6 +90,13 @@ jobs:
         working-directory: rust/
         run: cargo build --release --all-targets --features experimental-stream,legacy-v7
 
+      # CVF-V5-6: the declared rust-version must keep building.
+      - name: MSRV check (1.88)
+        working-directory: rust/
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          cargo +1.88 check --all-targets
+
       - name: Cargo test (includes KAT stubs)
         working-directory: rust/
         run: cargo test --release -- --nocapture
