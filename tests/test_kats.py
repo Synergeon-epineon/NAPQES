@@ -392,22 +392,25 @@ _V8_ENCRYPT_NEGATIVE = [v for v in _V8_ALL if v["kind"] == "encrypt_negative"]
 def test_v8_corpus_size_is_pinned():
     """CVF-19: a vector silently lost from the corpus must fail."""
     assert (len(_V8_ALL), len(_V8_POSITIVE), len(_V8_NEGATIVE),
-            len(_V8_ENCRYPT_NEGATIVE)) == (35, 22, 12, 1)
+            len(_V8_ENCRYPT_NEGATIVE)) == (37, 23, 12, 2)
 
 
 @pytest.mark.parametrize(
     "vec", _V8_ENCRYPT_NEGATIVE, ids=[v["id"] for v in _V8_ENCRYPT_NEGATIVE]
 )
 def test_v8_encrypt_negative_raises(vec):
-    """Inputs outside the profile's domain must be refused at encryption."""
-    ((kind, param),) = vec["pad_profile"].items()
+    """Inputs outside the profile's domain, or keys outside P, must be refused."""
+    kwargs = {}
+    if "pad_profile" in vec:
+        ((kind, param),) = vec["pad_profile"].items()
+        kwargs["pad_profile"] = (kind, param)
     with pytest.raises(ValueError, match=vec["expected_exception"]):
         napqes.encrypt_bytes_v8(
             vec["message"],
             vec["key"],
             bytes.fromhex(vec["sk_hex"]),
             aad=bytes.fromhex(vec["aad_hex"]),
-            pad_profile=(kind, param),
+            **kwargs,
         )
 
 

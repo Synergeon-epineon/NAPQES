@@ -279,9 +279,18 @@ Throughout this paper:
         composite). Implementations MUST use this interval:
         a different upper bound yields a different $\mathcal{P}$, a
         different canonical enumeration, and hence different keys.
-        This is the same prime set from which the key-establishment layer
-        (Section~\ref{sec:keygen}) draws, so the AEAD and the KEM share one
-        parameter set.
+        \textbf{This interval is new in revision v4.1} (parameter-set
+        identifier $\mathcal{P}_2$; see the revision history and
+        Remark~\ref{rem:pq128}). Revision v4 and earlier specified
+        $\mathcal{P}_1$, the primes in $[10^6, 9.9\times10^6]$; a port
+        implementing $\mathcal{P}_1$ must be updated, and vectors
+        \texttt{W023} (an element above $9.9\times10^6$, $K=13$) and
+        \texttt{W-E02} (the element $15{,}000{,}017$, rejected) of
+        Section~\ref{sec:kats} detect a port that has not been. The upper
+        bound was chosen to coincide with the interval from which the
+        reference implementations' key-establishment component
+        (\texttt{kem.rs}, \texttt{napqes\_kem.py}) derives key elements;
+        that component is not specified in this paper.
 \end{itemize}
 
 \subsection{Key Generation}
@@ -339,23 +348,32 @@ $2^{128.4855}$ against a Grover search. All figures
 here are computed from the exact $|\mathcal{P}|=892{,}206$, not from an
 approximation to it.
 
-\begin{remark}[Choice of the ``PQ-128'' parameter set]\label{rem:pq128}
-The default $(\mathcal{P},K)$ is the smallest parameter set in this family
-reaching the $128$-bit post-quantum target. Raising $K$ alone is not
-sufficient: over the earlier interval $[10^6,9.9\times10^6]$
-($|\mathcal{P}|=579{,}947$, $19.1456$ bits per element) one has
-$H_\infty=248.89$ bits at $K=13$, i.e.\ only $124.45$ bits post-Grover.
-Widening the interval to $[10^6,1.5\times10^7)$ raises the per-element
-contribution to $19.7670$ bits and clears the target at the same $K=13$,
-while simultaneously unifying $\mathcal{P}$ with the interval already used
-by the key-establishment layer. Since $K$ affects neither the wire format
-nor the ciphertext length (Proposition~\ref{prop:expansion-neutral}), the
-only cost of moving the default from $K=10$ to $K=13$ is stored key
-material, which grows from $5K+32=82$ to $97$ bytes; widening the interval
-changes no serialised size. Validation enforces the same interval: every reference
-implementation rejects a key element outside $\mathcal{P}$ and a tuple of
-more than $128$ elements. Keys provisioned under the earlier interval lie
-inside $\mathcal{P}$ and remain usable.
+\begin{remark}[Choice of the default parameter set, and what it does not claim]\label{rem:pq128}
+Revision v4.1 changed the normative interval from $\mathcal{P}_1$
+($[10^6,9.9\times10^6]$, $|\mathcal{P}_1|=579{,}947$) to $\mathcal{P}_2$
+($[10^6,1.5\times10^7)$, $|\mathcal{P}_2|=892{,}206$) and the default $K$
+from $10$ to $13$. The motive for the upper bound $1.5\times10^7$ is
+alignment with the interval the reference key-establishment component
+already used; it is \emph{not} the smallest interval meeting any target.
+At $K=13$ an inclusive upper bound of $14{,}257{,}301$
+($|\mathcal{P}|=847{,}186$) already gives $128$ bits against Grover
+search, and over $\mathcal{P}_1$ raising $K$ alone to $14$ gives
+$H_\infty(\mathbf{k})=268.04$ bits ($134.02$ post-Grover).
+The post-quantum figure for $\mathbf{k}$ is reported for completeness
+only. On v8, $\mathsf{sk}$ is the only HMAC key and no theorem of this
+paper depends on $H_\infty(\mathbf{k})$ (Remark~\ref{rem:key-roles}); such
+a figure is meaningful only for the legacy v7 format, where the prime tuple
+is the whole key and which no theorem of this paper covers. Since $K$
+affects neither the wire format nor the ciphertext length
+(Proposition~\ref{prop:expansion-neutral}), the only cost of moving the
+default from $K=10$ to $K=13$ is stored key material, which grows from
+$5K+32=82$ to $97$ bytes; widening the interval changes no serialised size.
+Validation enforces the same interval: every reference implementation
+rejects a key element outside $\mathcal{P}$ and a tuple of more than $128$
+elements. Keys provisioned under $\mathcal{P}_1$ lie inside $\mathcal{P}_2$
+and remain usable; conversely, a port still enforcing $\mathcal{P}_1$
+rejects $1-(579{,}947/892{,}206)^{13}\approx99.63\%$ of keys generated
+under the new default.
 \end{remark}
 
 \begin{remark}[The role of $\mathbf{k}$ and $\mathsf{sk}$ are not symmetric]
@@ -2281,10 +2299,12 @@ $p$-value was $0.016$. Results are reproducible with
 % ─────────────────────────────────────────────────────────────────────────────
 
 The corpus for the scheme specified in this paper is
-\texttt{tests/kat/v8\_vectors.json}. It contains 35 vectors: 22 positive
-(ids \texttt{W001}--\texttt{W022}) covering the empty message, a single
-character, the block boundaries at 15, 16 and 32 codepoints, 1-element and
-10-element prime tuples $\mathbf{k}$, empty, binary and 64-byte associated
+\texttt{tests/kat/v8\_vectors.json}. It contains 37 vectors: 23 positive
+(ids \texttt{W001}--\texttt{W023}) covering the empty message, a single
+character, the block boundaries at 15, 16 and 32 codepoints, 1-element,
+10-element and (\texttt{W023}) default 13-element prime tuples
+$\mathbf{k}$, the last with elements $9{,}900{,}047$, $12{,}000{,}017$
+and $14{,}999{,}981$ above the $\mathcal{P}_1$ bound, empty, binary and 64-byte associated
 data (the last pinning the 8-byte $\mathrm{be8}$ AAD length prefix of
 Definition~\ref{def:taginput}), mixed-case punctuation, the
 $\mathrm{coarse}(3)$, $\mathrm{coarse}(12)$ and $\mathrm{frame}(1024)$
@@ -2295,9 +2315,13 @@ stride boundary ($n=15\mapsto B=16$ and $n=16\mapsto B=128$,
 spanning U+0080--U+00FF, the BMP either side of the surrogate block, the
 supplementary planes up to U+10FFFF (\texttt{W016}--\texttt{W019}) and the
 top of the BMP, U+FFFE and U+FFFF (\texttt{W022}); 12
-negative; and one encryption-side negative, \texttt{W-E01}:
+negative; and two encryption-side negatives: \texttt{W-E01},
 $\mathrm{frame}(1024)$ at $n=1024$, which every port must refuse to
-encrypt, pinning the strict inequality $n<F$.
+encrypt, pinning the strict inequality $n<F$; and \texttt{W-E02}, a key
+containing $15{,}000{,}017$, the smallest prime above the bound of
+$\mathcal{P}$, which every port must reject. The corpus also records the
+inclusive interval of $\mathcal{P}$ it pins as a top-level
+\texttt{prime\_interval} field.
 Of the negative vectors, \texttt{W-N01}--\texttt{W-N05} exercise
 authentication (flipped tag byte, flipped masked-blob byte, wrong $A$,
 wrong $\mathsf{sk}$) and the 48-byte parse floor; \texttt{W-N06} has an

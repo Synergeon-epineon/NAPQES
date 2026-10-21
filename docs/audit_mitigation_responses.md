@@ -4603,8 +4603,10 @@ default key element count becomes `K = 13`.
 | `[10^6, 9.9 x 10^6]` | 579,947 | 13 | 248.8921 | 124.4461 | No |
 | `[10^6, 1.5 x 10^7)` | 892,206 | 13 | **256.9711** | **128.4855** | Yes |
 
-Raising `K` alone is not sufficient. At `K = 13` over the V3-CVF12 interval the
-tuple reaches only 124.4 bits post-Grover, short of the target. Key space is
+Raising `K` alone would also have been sufficient (`K = 14` over the
+V3-CVF12 interval gives 134.02 bits post-Grover); the interval was widened
+to match the key-establishment component. *(Corrected in round 5,
+CVF-V5-3; see `docs/CAVEATS.md` PQ-128.)* Key space is
 now `~2.27 x 10^77`.
 
 **Relationship to V3-CVF12.** V3-CVF12 unified all three languages at

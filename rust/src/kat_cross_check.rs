@@ -70,7 +70,7 @@ fn corpus_sizes_are_pinned() {
     let v8 = load_v8_vectors();
     assert_eq!(
         (v8.len(), count(&v8, "positive"), count(&v8, "negative"), count(&v8, "encrypt_negative")),
-        (35, 22, 12, 1)
+        (37, 23, 12, 2)
     );
     let stream = load_v8_stream_vectors();
     assert_eq!(

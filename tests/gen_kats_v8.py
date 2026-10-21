@@ -18,6 +18,10 @@ Run:
     python tests/gen_kats_v8.py                  # write tests/kat/v8_vectors.json
     python tests/gen_kats_v8.py --check          # regenerate and compare (CI mode)
 
+Top-level fields: ``spec_version`` ("v8") and ``prime_interval``
+([MIN_KEY_PRIME, MAX_KEY_PRIME], inclusive) — the normative prime interval
+the corpus pins (CVF-V5-3; W023 and W-E02 exercise both of its sides).
+
 Output schema per vector:
   id                  unique string identifier
   kind                "positive", "negative" (decrypt must fail) or
@@ -56,6 +60,14 @@ KEY_1 = [7_999_993]
 KEY_10 = [1_000_003, 1_000_033, 1_000_037, 1_000_039,
           1_000_081, 1_000_099, 1_000_117, 1_000_121,
           1_000_133, 1_000_151]
+# CVF-V5-3: the default K = 13 with elements above the round-4 bound 9.9e6,
+# pinning the widened interval P = [10^6, 1.5e7). A port still enforcing
+# the round-4 interval rejects this key and fails W023.
+KEY_13 = KEY_10 + [9_900_047, 12_000_017, 14_999_981]
+# CVF-V5-3: 15,000,017 is the smallest prime above MAX_KEY_PRIME.
+KEY_ABOVE_P = [1_000_003, 1_000_033, 1_000_037, 15_000_017]
+# Machine-readable marker of the normative prime interval the corpus pins.
+PRIME_INTERVAL = [napqes.MIN_KEY_PRIME, napqes.MAX_KEY_PRIME]
 
 
 def _sk(index: int) -> bytes:
@@ -244,16 +256,23 @@ def _build_encrypt_negative(
     pad_profile: tuple,
     expected_exception: str,
 ) -> dict:
-    """An input that every port must refuse to encrypt (no ciphertext exists)."""
+    """An input that every port must refuse to encrypt (no ciphertext exists).
+
+    ``pad_profile=None`` means the default bucket profile and is omitted
+    from the JSON (CVF-V5-3 key-rejection vectors).
+    """
     sk = _sk(sk_index)
     try:
-        napqes.encrypt_bytes_v8(message, key, sk, aad=b"", pad_profile=pad_profile)
+        if pad_profile is None:
+            napqes.encrypt_bytes_v8(message, key, sk, aad=b"")
+        else:
+            napqes.encrypt_bytes_v8(message, key, sk, aad=b"", pad_profile=pad_profile)
     except ValueError as exc:
         assert re.search(expected_exception, str(exc)), (
             f"{vec_id}: expected /{expected_exception}/, got: {exc}")
     else:
         raise AssertionError(f"{vec_id}: encrypt_negative vector encrypted successfully")
-    return {
+    vec = {
         "id": vec_id,
         "kind": "encrypt_negative",
         "description": description,
@@ -261,9 +280,13 @@ def _build_encrypt_negative(
         "sk_hex": sk.hex(),
         "message": message,
         "aad_hex": "",
-        "pad_profile": {pad_profile[0]: pad_profile[1]},
         "expected_exception": expected_exception,
     }
+    if pad_profile is not None:
+        vec["pad_profile"] = {pad_profile[0]: pad_profile[1]}
+        # keep the historical key order of W-E01
+        vec["expected_exception"] = vec.pop("expected_exception")
+    return vec
 
 
 def generate() -> list[dict]:
@@ -517,6 +540,18 @@ def generate() -> list[dict]:
         expected_exception="profile admits messages of at most",
     ))
 
+    # ── CVF-V5-3: pin the widened prime interval ────────────────────────
+    vectors.append(_build_positive(
+        "W023", "K=13 default with elements 9,900,047 / 12,000,017 / 14,999,981 "
+        "(above the round-4 bound 9.9e6)",
+        KEY_13, idx := idx + 1, "Hello, PQ-128!",
+    ))
+    vectors.append(_build_encrypt_negative(
+        "W-E02", "Key element 15,000,017 (smallest prime above MAX_KEY_PRIME) is rejected",
+        KEY_ABOVE_P, idx := idx + 1, "A", None,
+        expected_exception="exceeds MAX_KEY_PRIME",
+    ))
+
     return vectors
 
 
@@ -535,7 +570,10 @@ def main() -> None:
     args = parser.parse_args()
 
     vectors = generate()
-    blob = json.dumps({"spec_version": "v8", "vectors": vectors}, indent=2) + "\n"
+    blob = json.dumps(
+        {"spec_version": "v8", "prime_interval": PRIME_INTERVAL, "vectors": vectors},
+        indent=2,
+    ) + "\n"
 
     if args.check:
         if not os.path.exists(args.out):

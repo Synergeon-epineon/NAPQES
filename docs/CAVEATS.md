@@ -1188,11 +1188,27 @@ element count is now `K = 13` (`DEFAULT_KEY_COUNT` in Python and Rust,
 |---|---|---|---|---|---|
 | `[10^6, 9.9 x 10^6]` | 579,947 | 10 | 191.4555 | 95.7278 | No |
 | `[10^6, 9.9 x 10^6]` | 579,947 | 13 | 248.8921 | 124.4461 | **No** |
+| `[10^6, 9.9 x 10^6]` | 579,947 | 14 | 268.04 | 134.02 | Yes |
+| `[10^6, 14,257,301]` | 847,186 | 13 | 256.00 | 128.00 | Yes |
 | `[10^6, 1.5 x 10^7)` | 892,206 | 13 | **256.9711** | **128.4855** | **Yes** |
 
-Raising `K` alone is **not** sufficient: at `K = 13` over the previous
-interval the tuple reaches only 124.4 bits post-Grover. Both the interval
-and `K` had to change together. Key space is now `~2.27 x 10^77`.
+Raising `K` alone over the previous interval would also have reached the
+target: `K = 14` gives `H_inf = 268.04` bits (`134.02` post-Grover).
+*(Corrected in round 5, CVF-V5-3: an earlier version of this entry said
+raising `K` alone was not sufficient, and the paper called the new set
+"the smallest parameter set in this family"; both were wrong. At `K = 13`
+an inclusive upper bound of `14,257,301` already suffices.)* The upper
+bound `1.5 x 10^7` was chosen to align `P` with the interval the
+key-establishment component already used. On v8 no theorem depends on
+`H_inf(k)` (`sk` is the only HMAC key); the post-quantum figure matters
+only for legacy v7. Key space is now `~2.27 x 10^77`.
+
+**Versioning (CVF-V5-3).** This is a normative parameter change: the paper
+(revision v4.1) names it parameter set `P2`, the v8 corpus carries a
+top-level `"prime_interval": [1000000, 14999999]` marker, and vectors
+`W023` (`K = 13`, elements 9,900,047 / 12,000,017 / 14,999,981) and
+`W-E02` (element 15,000,017, rejected) fail on any port still enforcing
+the round-4 interval.
 
 **Secondary benefit.** `P` is now identical to the interval the
 key-establishment component (`napqes_kem.py`, `rust/src/kem.rs`) has always
