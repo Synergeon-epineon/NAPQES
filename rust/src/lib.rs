@@ -3037,11 +3037,13 @@ mod tests {
         assert_eq!(decrypt_bytes_v8(&ct, &primes, &sk, b"aad").unwrap(), msg);
     }
 
-    // CVF-20 regression: the sampler must be unbiased (via rand::Uniform),
-    // must accept the normative interval, and must produce validate_key-
-    // compatible output on every call.
+    // CVF-V5-20: this checks that sampler output is always a valid key. It
+    // cannot detect the modulo bias CVF-20 removed (that bias is about
+    // span / 2^64 per draw, far below any feasible sample size); the CVF-20
+    // fix itself - rand::Uniform instead of `% span` - is verified by
+    // inspection of generate_prime_numbers.
     #[test]
-    fn cvf20_generate_prime_numbers_produces_valid_key() {
+    fn generate_prime_numbers_output_passes_validate_key() {
         for _ in 0..8 {
             let ps = generate_prime_numbers(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
             assert_eq!(ps.len(), DEFAULT_KEY_COUNT);
@@ -3060,18 +3062,21 @@ mod tests {
 
     // ─── Phase B point-fix regressions ───
 
+    // CVF-V5-20: exercises unpad_message directly. Pre-CVF-43 code rejected
+    // these prefixes, if at all, only as over-length, so the "byte-valued"
+    // assertion fails on v4.
     #[test]
     fn cvf43_unpad_rejects_noncanonical_length_prefix() {
-        // Directly test unpad_message via decrypt_bytes_v8 with a hand-
-        // crafted padded buffer would require constructing a valid ciphertext;
-        // easier to exercise via a small helper. Instead, verify by proxy:
-        // any v8 round-trip must still succeed (byte-identical to before).
-        // The direct rejection path is covered by an internal test below via
-        // a helper that mimics decrypt_core_v8's final step.
-        let (primes, sk) = generate_v8_key(DEFAULT_KEY_COUNT, MIN_KEY_PRIME, MAX_KEY_PRIME);
-        let msg = "CVF-43 sanity";
-        let ct = encrypt_bytes_v8(msg, &primes, &sk, b"").unwrap();
-        assert_eq!(decrypt_bytes_v8(&ct, &primes, &sk, b"").unwrap(), msg);
+        let mut buf = vec![0x41u32; 18]; // B = 16 plus the 2-codepoint prefix
+        for (p0, p1) in [(0u32, 300u32), (1, 256), (0x100, 0)] {
+            buf[0] = p0;
+            buf[1] = p1;
+            let err = unpad_message(&buf[..]).unwrap_err();
+            assert!(err.contains("byte-valued"), "({}, {}): {}", p0, p1, err);
+        }
+        buf[0] = 0;
+        buf[1] = 3;
+        assert_eq!(unpad_message(&buf).unwrap(), vec![0x41; 3]);
     }
 
     #[test]
@@ -3139,11 +3144,11 @@ mod tests {
         let _ = be_len_prefix(1usize << 32, 4);
     }
 
+    // CVF-V5-20: renamed from cvf42_*; this only pins the constants to the
+    // paper's values. The evidence for the CVF-42 refactor is KAT byte parity
+    // (kat_cross_check), which would fail if a constant changed.
     #[test]
-    fn cvf42_named_alphabet_constants_are_correct() {
-        // Byte-parity check: existing KATs would fail if PAD_ALPHABET/
-        // NOISE_ALPHABET/ASCII_PRINTABLE_BASE were changed. This asserts
-        // the constants match the paper's numeric values.
+    fn alphabet_constants_match_paper() {
         assert_eq!(NOISE_ALPHABET, 96);
         assert_eq!(PAD_ALPHABET, 95);
         assert_eq!(ASCII_PRINTABLE_BASE, 32);
@@ -3212,17 +3217,21 @@ mod tests {
         assert_eq!(pt, msg);
     }
 
+    // CVF-V5-20: the NapqesKey path is checked against the corpus (vector
+    // W009, non-empty AAD), not against the bare-slice path, which shares
+    // its core and so could not disagree with it.
     #[test]
-    fn napqeskey_matches_bare_slice_api_byte_for_byte() {
-        // The NapqesKey path must produce byte-identical ciphertexts to the
-        // bare-slice path (CVF-29 fix skips validate_key but must not change
-        // the wire format).
-        let k = NapqesKey::generate().unwrap();
-        let msg = "byte parity check";
-        let via_key = encrypt_bytes_v8_key(msg, &k, b"aad").unwrap();
-        #[allow(deprecated)]
-        let via_slice = encrypt_bytes_v8(msg, k.primes(), k.sk(), b"aad").unwrap();
-        assert_eq!(via_key, via_slice);
+    fn napqeskey_reproduces_v8_corpus_vector() {
+        let corpus = crate::kat_cross_check::load_corpus("v8_vectors.json");
+        let w = corpus.iter().find(|v| v["id"] == "W009").expect("W009 missing");
+        let primes: Vec<u64> = w["key"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
+        let sk: [u8; SK_SIZE] = crate::kat_cross_check::hex_decode(w["sk_hex"].as_str().unwrap())
+            .try_into()
+            .unwrap();
+        let aad = crate::kat_cross_check::hex_decode(w["aad_hex"].as_str().unwrap());
+        let k = NapqesKey::new(primes, sk).unwrap();
+        let ct = encrypt_bytes_v8_key(w["message"].as_str().unwrap(), &k, &aad).unwrap();
+        assert_eq!(ct, crate::kat_cross_check::hex_decode(w["ciphertext_hex"].as_str().unwrap()));
     }
 
     #[test]

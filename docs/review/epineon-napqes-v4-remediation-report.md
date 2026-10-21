@@ -289,7 +289,7 @@ Two other small paper-side items also belong in the same paper pass:
 
 ## 7. Verification
 
-Every finding's fix is covered by at least one automated check named after it. This section documents the full verification.
+Every finding's fix has at least one automated check named after it; this section documents the full verification. *(Corrected in round 5, CVF-V5-20: for CVF-20, CVF-42, CVF-43 and CVF-29 the named test did not exercise the defect. CVF-43 now tests `unpad_message` directly; the CVF-42 constant test was renamed and the real evidence is KAT byte parity; the CVF-20 test checks key validity only and the bias fix is verified by inspection; the NapqesKey parity test now compares against corpus vector W009.)*
 
 ### 7.1 Build matrix
 
