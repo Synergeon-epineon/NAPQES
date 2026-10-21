@@ -103,6 +103,14 @@ fn bench_tag_comparison(runner: &mut CtRunner, rng: &mut BenchRng) {
     let key = fixed_key();
     let base = base_ct();
     let n = base.len();
+    // dudect-bencher fixes its crop percentiles from the first batch; warm
+    // the caches and clock first (unmeasured) so they reflect steady state.
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        for _ in 0..20_000 {
+            let _ = black_box(decrypt_bytes_v8_key(black_box(base), key, b""));
+        }
+    });
 
     let mut ct = base.clone();
 
