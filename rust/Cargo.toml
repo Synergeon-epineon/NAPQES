@@ -32,9 +32,6 @@ legacy-v7 = []
 experimental-stream = []
 # Requires the unpublished rust/src/vale sources (gitignored).
 vale = []
-# Demo-only: MAX_NOISE_RUN 19 -> 9 (x10 tokens per codepoint instead of x20).
-# Wire-incompatible with the default build and the Python/C KATs.
-noise_x10 = []
 # Benchmark-only: disable SHA-NI so HMAC-SHA256 runs in portable software.
 soft_sha = ["sha2/force-soft"]
 # Exposes a v8 re-tag hook so cargo-fuzz can reach post-authentication paths.

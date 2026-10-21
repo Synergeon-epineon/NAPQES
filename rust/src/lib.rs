@@ -1594,11 +1594,10 @@ pub const SK_SIZE: usize = 32;
 /// `[θ_min, θ_max]`, ranging from 3.99 at p=0.75 to 18.21 at p=0.99;
 /// without the run cap it would be about 13.4 (CVF-39 corrects the earlier
 /// "~13.4x average" phrasing which conflated the capped and uncapped means).
-#[cfg(not(feature = "noise_x10"))]
+///
+/// A fixed protocol constant (CVF-V5-13: the `noise_x10` feature that
+/// changed it to 9 without domain separation has been removed).
 pub const MAX_NOISE_RUN: u64 = 19;
-/// Demo-only x10 token budget; ciphertexts are NOT interoperable with the default build.
-#[cfg(feature = "noise_x10")]
-pub const MAX_NOISE_RUN: u64 = 9;
 
 /// Domain `0x0B` format-subkey identifier for v8 block mode.
 pub const FORMAT_BLOCK_V8: u8 = 0x01;
