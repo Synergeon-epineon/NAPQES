@@ -154,7 +154,7 @@ Even a perfectly secure cipher leaks **metadata** through ciphertext patterns:
 
 AES-GCM and ChaCha20-Poly1305 address none of this: ciphertext length equals plaintext length plus a small fixed overhead, so the plaintext length is disclosed in full.
 
-NAPQES pads every message into a size bucket before encryption. Ciphertext length is then a deterministic function of that bucket alone — provably independent of the message content and of the key (Theorem "LH-IND-CPA-det", `docs/napseq-eprint-v3.tex`). The result is a *bound*: at most 3.70 bits of length information per message under the default profile, and exactly zero under the fixed-frame profile.
+NAPQES pads every message into a size bucket before encryption. Ciphertext length is then a deterministic function of that bucket alone — provably independent of the message content and of the key (Theorem "LH-IND-CPA-det", `docs/napseq-eprint-v4.tex`). The result is a *bound*: at most 3.70 bits of length information per message under the default profile, and exactly zero under the fixed-frame profile.
 
 **What this is not.** The HMAC-derived noise tokens are not the source of this property, and neither is the ciphertext expansion. Length confidentiality comes from the coarseness of the padding ladder; the noise layer is padded to a fixed per-bucket ceiling precisely so that it *does not* leak. Timing and volume-over-time remain transport-layer concerns and are out of scope.
 

@@ -56,7 +56,7 @@ Keys are generated using `generate_prime_numbers(count, min_val, max_val)`,
 whose defaults are the normative interval of the "PQ-128" profile,
 `P = [MIN_KEY_PRIME, MAX_KEY_PRIME] = [1 000 000, 14 999 999]` — equivalently
 the half-open `[10^6, 1.5×10^7)` — specified in
-`docs/napseq-eprint-v3.tex` §Notation (`|P| = 892 206`, verified by sieve),
+`docs/napseq-eprint-v4.tex` §Notation (`|P| = 892 206`, verified by sieve),
 with `count` defaulting to `DEFAULT_KEY_COUNT = 13`
 (`H∞ = 256.9711` bits, `128.4855` bits post-Grover):
 

@@ -8,9 +8,8 @@
 //!
 //! Rust implementation of NAPQES, the paper-specified AEAD scheme.
 //!
-//! Specification: EPINeon NAPQES v4 (see `docs/napseq-eprint-v3.tex` — the
-//! filename lags the version tag one revision and will be renamed to
-//! `napseq-eprint-v4.tex` in a follow-up).
+//! Specification: EPINeon NAPQES, specification revision 4.2
+//! (`docs/napseq-eprint-v4.tex`; the revision history is in the paper).
 //!
 //! Two wire formats coexist in this crate:
 //!
@@ -439,7 +438,7 @@ fn derive_noise_p(kb: &[u8], nonce: &[u8]) -> f64 {
 }
 
 /// Endpoints of the v8 noise-threshold interval, as fixed-width 64-bit
-/// integers (docs/napseq-eprint-v3.tex, Section "Noise Probability").
+/// integers (docs/napseq-eprint-v4.tex, Section "Noise Probability").
 const THETA_MIN: u64 = ((75u128 << 64) / 100) as u64;
 const THETA_MAX: u64 = ((99u128 << 64) / 100) as u64;
 
@@ -611,7 +610,7 @@ const THETA_MIN_F64: f64 = 0.75;
 const THETA_MAX_F64: f64 = 0.99;
 
 /// The map from plaintext codepoint count to padded block size `B`
-/// (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+/// (docs/napseq-eprint-v4.tex, Section "Padding Profiles").
 ///
 /// This map is the *only* source of NAPQES's length-hiding property
 /// (Theorem `lh-ind-cpa`); the token expansion factor contributes none, since
@@ -1574,7 +1573,7 @@ pub fn decrypt_raw(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u8>
 // agree out-of-band on whether a given key/ciphertext pair uses the v7 or
 // v8 schedule.
 //
-// See the NAPQES v4 paper (`docs/napseq-eprint-v3.tex`, Sections 3.2-3.3
+// See the NAPQES v4 paper (`docs/napseq-eprint-v4.tex`, Sections 3.2-3.3
 // and 4) and `docs/CAVEATS.md` (CVF3/CVF8/CVF13 follow-ups) for the full
 // specification and security argument.
 
@@ -1703,7 +1702,7 @@ pub fn encrypt_bytes_v8(
 }
 
 /// [`encrypt_bytes_v8`] with an explicit padding profile
-/// (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+/// (docs/napseq-eprint-v4.tex, Section "Padding Profiles").
 ///
 /// The profile governs how much plaintext length the ciphertext size reveals:
 /// [`PadProfile::Bucket`] leaks at most ~3.70 bits, [`PadProfile::Frame`]

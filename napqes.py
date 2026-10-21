@@ -73,7 +73,7 @@ _TAG_SIZE = 32
 _AAD_LEN_WIDTH_V8 = 8
 
 #: Endpoints of the v8 noise-threshold interval, as fixed-width 64-bit
-#: integers (docs/napseq-eprint-v3.tex Section ``noiseprob``).  The v8 noise
+#: integers (docs/napseq-eprint-v4.tex Section ``noiseprob``).  The v8 noise
 #: schedule is specified entirely over these integers so that theta(N) is
 #: bit-identical across every conforming implementation; the legacy v7 path
 #: keeps the original IEEE-754 formulation and stays byte-compatible.
@@ -125,7 +125,7 @@ MAX_SERIALISABLE_KEY_PRIME = (1 << 40) - 1
 #: K < 7 gave H_inf(key) < 128 bits.  Under the v8/v3 schedule sk is sampled
 #: independently and is the sole HMAC key, so no theorem depends on
 #: H_inf(key) and K is an interoperability parameter rather than a security
-#: one (docs/napseq-eprint-v3.tex, Remark ``key-roles``).  The warning is
+#: one (docs/napseq-eprint-v4.tex, Remark ``key-roles``).  The warning is
 #: advisory, fires at key generation only, and matters for v7 callers only.
 MIN_KEY_COUNT = 7
 
@@ -135,7 +135,7 @@ def _warn_if_weak_key_count(count: int) -> None:
 
     Relevant to the v7 single-secret schedule only.  Under v8 the prime tuple
     never keys an HMAC call, so K carries no security-theorem-driven minimum
-    (docs/napseq-eprint-v3.tex, Remark ``key-roles``).
+    (docs/napseq-eprint-v4.tex, Remark ``key-roles``).
     """
     if count < MIN_KEY_COUNT:
         warnings.warn(
@@ -143,7 +143,7 @@ def _warn_if_weak_key_count(count: int) -> None:
             f"of {MIN_KEY_COUNT}. Under the v7 single-secret schedule this "
             "gives H_inf(key) < 128 bits, making offline exhaustive key "
             "search feasible. Under v8 no theorem depends on H_inf(key) "
-            "(docs/napseq-eprint-v3.tex, Remark 'key-roles'), so this "
+            "(docs/napseq-eprint-v4.tex, Remark 'key-roles'), so this "
             "warning is advisory for v8 callers.",
             category=UserWarning,
             stacklevel=3,
@@ -366,7 +366,7 @@ def _derive_noise_threshold_v8(kb: bytes, nonce: bytes) -> int:
     """Return the v8 noise threshold theta(N), a 64-bit integer.
 
     The integer counterpart of :func:`_derive_noise_p`, and the normative form
-    for the v8 block format (docs/napseq-eprint-v3.tex Section ``noiseprob``)::
+    for the v8 block format (docs/napseq-eprint-v4.tex Section ``noiseprob``)::
 
         theta(N) = theta_min + floor(tau * (theta_max - theta_min) / 2**64)
 
@@ -492,7 +492,7 @@ def _decode_v5_unauth(ciphertext: bytes, key: list[int]) -> str:
 # ─── Plaintext padding ───────────────────────────────────────────────────────
 
 #: A padding profile is the map from plaintext codepoint count to padded block
-#: size B (docs/napseq-eprint-v3.tex, Section "Padding Profiles").  It is the
+#: size B (docs/napseq-eprint-v4.tex, Section "Padding Profiles").  It is the
 #: only source of NAPQES's length-hiding property (Theorem ``lh-ind-cpa``); the
 #: token expansion factor contributes none (Proposition ``expansion-neutral``).
 #: Either the string ``"bucket"`` or a pair ``("coarse", g)`` / ``("frame", F)``.
@@ -1219,7 +1219,7 @@ def _validate_message_domain(message: str) -> None:
 
     M is the set of finite sequences of Unicode *scalar values* -- codepoints
     in [U+0000, U+10FFFF] excluding the surrogate range [U+D800, U+DFFF]
-    (docs/napseq-eprint-v3.tex, Section "The AEAD Triple").  Surrogates are
+    (docs/napseq-eprint-v4.tex, Section "The AEAD Triple").  Surrogates are
     excluded because the synthetic-nonce derivation hashes the UTF-8 encoding
     of the message and UTF-8 is undefined on unpaired surrogates.  Without
     this check Python raises a UnicodeEncodeError from deep inside the nonce
@@ -1231,7 +1231,7 @@ def _validate_message_domain(message: str) -> None:
             raise ValueError(
                 f"message contains a surrogate codepoint U+{ord(ch):04X} at "
                 f"position {i}; the message space excludes U+D800..U+DFFF "
-                f"(docs/napseq-eprint-v3.tex, message space M)."
+                f"(docs/napseq-eprint-v4.tex, message space M)."
             )
 
 
@@ -1261,7 +1261,7 @@ def encrypt_bytes_v8(message: str, primes: list[int], sk: bytes,
     must agree out-of-band on which schedule a given key/ciphertext pair
     uses (see docs/napseq-eprint-preprint.tex §"Format Applicability").
 
-    *pad_profile* selects the padding profile (docs/napseq-eprint-v3.tex,
+    *pad_profile* selects the padding profile (docs/napseq-eprint-v4.tex,
     Section "Padding Profiles"), which is what governs how much plaintext
     length the ciphertext size reveals: ``"bucket"`` (default) leaks at most
     ~3.70 bits, ``("frame", F)`` leaks exactly zero.  It is a sender-side

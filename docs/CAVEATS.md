@@ -542,7 +542,7 @@ therefore infer which power-of-two bucket `{16, 32, 64, …, 65536}` the
 plaintext length falls into. That is **at most `log₂13 ≈ 3.70` bits** per
 message — the set has 13 members — and at most `m · 3.70` bits over `m`
 messages, with no independence assumption (Corollary `cor:length-leak`,
-`docs/napseq-eprint-v3.tex`). An earlier revision of this entry quantified
+`docs/napseq-eprint-v4.tex`). An earlier revision of this entry quantified
 the leak as `⌈log₂(n)⌉` bits; that was backwards — it is the *bucket index*
 that leaks, not the length, and the bound is independent of `n`. This is a
 distinct, deliberate leak from **CVF1** (fixed): CVF1 was about ciphertext
@@ -941,7 +941,7 @@ recorded**.
 accepted and documented.
 
 The third-round audit (`docs/audit_mitigation_responses.md`, V3-CVF1) found
-that `docs/napseq-eprint-v3.tex` tagged over `be8(|A|)` on encryption but
+that `docs/napseq-eprint-v4.tex` tagged over `be8(|A|)` on encryption but
 `be4(|A|)` on decryption. The document has been corrected to `be8`
 everywhere (the tag input is now stated once, as `TagIn(A, B~)`), and the
 v8 block-mode code in `napqes.py`, `rust/src/lib.rs` and `C/napqes.c` has
@@ -1048,7 +1048,7 @@ relies on it.
 | **ID** | V3-CVF2 (third-round ABDK Consulting audit, 2026-08-08, "NAPQES v3 — AEAD Scheme Audit," Report 0.2) |
 | **Category** | Documentation / Algorithm |
 | **Severity** | Medium |
-| **Affects** | `rem:key-roles`, `tab:comparison` and the caveats section of `docs/napseq-eprint-v3.tex`; `CAV-003` and `CAV-004` above; `docs/SECURITY_TARGET.md` 2.2; `comparator.py`; all commercial collateral asserting traffic-analysis resistance |
+| **Affects** | `rem:key-roles`, `tab:comparison` and the caveats section of `docs/napseq-eprint-v4.tex`; `CAV-003` and `CAV-004` above; `docs/SECURITY_TARGET.md` 2.2; `comparator.py`; all commercial collateral asserting traffic-analysis resistance |
 | **Owner** | TBD |
 | **Status** | **Fixed** (2026-08-13) — property restated and proved; residual disclosed below |
 | **Risk retired** | Partially — the *claim* is now correct; the *cost* remains |

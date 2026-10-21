@@ -187,8 +187,8 @@ const KAT_MESSAGE: &str = "A";
 
 // Reference ciphertext hex, v7 wire format (fixed-width tokens, CVF1 fix),
 // regenerated under the unified domain-first HMAC derivation layout
-// introduced by the CVF2 fix (see SPEC.md §3 and docs/napseq-eprint-preprint.tex
-// rem:domsep). Every derivation input changed shape (`d || N || ctx` instead
+// introduced by the CVF2 fix (see SPEC.md §3 and docs/napseq-eprint-v4.tex
+// lem:domsep). Every derivation input changed shape (`d || N || ctx` instead
 // of the previous mixed nonce-first/domain-first layouts), so this constant
 // is not byte-compatible with any pre-CVF2 vector for the same key/nonce/message.
 // Decoded once at test time; storing as hex avoids large byte literals.

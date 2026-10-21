@@ -111,7 +111,7 @@ _PROPERTIES = [
             "token as 8 fixed-width bytes, so |C| = 48 + 160·(B+2) bytes. This is the cost "
             "of the arithmetic/noise layer and it buys no theorem: length hiding comes from "
             "the coarseness of the padding bucket alone, and a public constant multiplier "
-            "leaks exactly as much as no multiplier (docs/napseq-eprint-v3.tex, "
+            "leaks exactly as much as no multiplier (docs/napseq-eprint-v4.tex, "
             "Proposition 'Expansion is length-neutral')."
         ),
     },

@@ -120,7 +120,7 @@ uint8_t *napqes_encrypt_bytes_with_nonce(const char *message,
 
 /* ── Padding profiles (audit finding V3-CVF2) ─────────────────────────────
  * A padding profile is the map from plaintext codepoint count to padded
- * block size B (docs/napseq-eprint-v3.tex, Section "Padding Profiles").
+ * block size B (docs/napseq-eprint-v4.tex, Section "Padding Profiles").
  * This map is the *only* source of NAPQES's length-hiding property
  * (Theorem "lh-ind-cpa"); the token expansion factor contributes none,
  * since |C| = 48 + 160*(B+2) is a public injective function of B

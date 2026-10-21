@@ -1,7 +1,7 @@
 # NAPQES — dudect constant-time timing attestation
 
 **Status.** Attestation document for the `dudect_harness` example in the
-Rust reference implementation. Referenced by `docs/napseq-eprint-v3.tex`
+Rust reference implementation. Referenced by `docs/napseq-eprint-v4.tex`
 Section 8.4 (constant-time claims).
 
 **Created.** 2026-09-22, in response to audit finding CVF-26 which noted

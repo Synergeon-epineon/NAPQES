@@ -2,7 +2,7 @@
 """Length-leakage benchmark: what a passive length observer learns.
 
 Measures the quantity bounded by Corollary ``length-leak`` of
-``docs/napseq-eprint-v3.tex`` -- the mutual information between the plaintext
+``docs/napseq-eprint-v4.tex`` -- the mutual information between the plaintext
 codepoint count and the ciphertext byte length -- for NAPQES under each padding
 profile, and for AES-GCM and ChaCha20-Poly1305.
 

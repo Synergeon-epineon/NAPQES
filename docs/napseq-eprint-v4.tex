@@ -45,7 +45,9 @@ Built from HMAC-SHA256}}
 \author[1]{Abdeslam Jakjoud}
 \author[1]{Karim Amor}
 \affil[1]{QAegis, France}
-\date{July 2026}
+\date{Specification revision 4.2 --- October 2026\\
+\small (file \texttt{docs/napseq-eprint-v4.tex}; revision history in
+Section~\ref{sec:revisions})}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \begin{document}
@@ -118,6 +120,45 @@ harnesses are published at \url{https://github.com/Synergeon-epineon/NAPQES}.
 
 \tableofcontents
 \clearpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section*{Revision history}
+\label{sec:revisions}
+\addcontentsline{toc}{section}{Revision history}
+% ─────────────────────────────────────────────────────────────────────────────
+
+Each revision lists the changes that affect interoperability first
+(\emph{normative}), then corrections to the text. A port written against an
+earlier revision must apply every normative change listed after it.
+
+\begin{description}
+  \item[4.0 (September 2026; fourth audit round).] The v8 block format
+        $\Pi$ as audited in round 4. Prime interval $\mathcal{P}_1$, the
+        primes in $[10^6, 9.9\times10^6]$; default $K=10$.
+  \item[4.1 (October 2026; commit \texttt{f6ced5d}, fifth audit round).]
+        \emph{Normative:} prime interval widened to $\mathcal{P}_2$, the
+        primes in $[10^6,1.5\times10^7)$, and default $K=13$
+        (Remark~\ref{rem:pq128}); $\mathsf{Dec}$ step (7) gains the
+        $t\ge a$, divisibility and scalar-value guards; the length prefix
+        must be byte-valued (step (8)). \emph{Text:} remediation of the
+        round-4 findings. This revision was filed as
+        \texttt{napseq-eprint-v3.tex} and carried no version marker.
+  \item[4.2 (this revision; round-5 remediation).] \emph{Normative for the
+        block format:} none — the bytes of every v8 block ciphertext and
+        every KAT vector of 4.1 are unchanged; vectors \texttt{W023} and
+        \texttt{W-E02} were added to pin $\mathcal{P}_2$.
+        \emph{Experimental streaming format} (outside this paper,
+        \texttt{SPEC.md} \S 8.2): the sentinel count is masked and the
+        tags bind the full stream header, so streams written under 4.1 do
+        not verify. \emph{Text:} the interval change is disclosed and
+        Remark~\ref{rem:pq128} corrected; $\mathsf{Dec}$ gains step (0) and
+        step (7) binds $k$ and the reduced addend before its guards;
+        Remark~\ref{rem:dec-structural}, the correctness proof, the
+        security preamble and Lemma~\ref{lem:nonce-collision} are stated
+        in terms of $\mathsf{sk}_{\mathrm{fmt}}$; the domain table lists the
+        streaming domains $\texttt{0x0C}$--$\texttt{0x0F}$; the file is
+        renamed \texttt{napseq-eprint-v4.tex}.
+\end{description}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Introduction}

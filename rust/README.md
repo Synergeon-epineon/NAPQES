@@ -1,8 +1,7 @@
 # napqes (Rust)
 
 Rust implementation of NAPQES, the paper-specified AEAD scheme
-(EPINeon NAPQES v4 — see `docs/napseq-eprint-v3.tex`; the filename lags the
-version tag one revision).
+(EPINeon NAPQES specification revision 4.2 — see `docs/napseq-eprint-v4.tex`).
 
 ## Build / run
 
@@ -221,7 +220,7 @@ or prime-poor range instead of panicking (CVF-20).
 
 ## Specification and caveats
 
-* Paper: EPINeon NAPQES v4 (`docs/napseq-eprint-v3.tex`; will be renamed
-  to `napseq-eprint-v4.tex` in the next revision).
+* Paper: EPINeon NAPQES specification revision 4.2
+  (`docs/napseq-eprint-v4.tex`, with a revision history).
 * Known caveats: `docs/CAVEATS.md`.
 * Wire format details: `SPEC.md`.

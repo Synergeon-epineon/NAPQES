@@ -230,7 +230,7 @@ static double derive_noise_p(const uint8_t *kb, size_t klen, const uint8_t *nonc
 }
 
 /* Endpoints of the v8 noise-threshold interval, as fixed-width 64-bit
- * integers (docs/napseq-eprint-v3.tex, Section "Noise Probability"):
+ * integers (docs/napseq-eprint-v4.tex, Section "Noise Probability"):
  * floor(0.75 * 2^64) and floor(0.99 * 2^64). */
 #define THETA_MIN 13835058055282163712ULL
 #define THETA_MAX 18262276632972456099ULL
@@ -1146,7 +1146,7 @@ char *napqes_decrypt_bytes_v8(const uint8_t *ciphertext, size_t ct_len,
      * represent what it encoded. Rejecting anything wider is honest about
      * that limit; truncating to the low byte would silently return a
      * plaintext different from the one the Python and Rust ports recover
-     * (docs/napseq-eprint-v3.tex, Remark "Implementation domains"). */
+     * (docs/napseq-eprint-v4.tex, Remark "Implementation domains"). */
     for (size_t i = 0; i < out_len; ++i) {
         if (cp[i] > 0xFFu) { free(s); free(cp); return NULL; }
         s[i] = (char)cp[i];
