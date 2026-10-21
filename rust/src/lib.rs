@@ -28,7 +28,10 @@
 //!   Fixed-width tokens (CVF1 fix). Wire layout same shape, but no
 //!   `MAX_NOISE_RUN` cap, so ciphertext length varies with the nonce.
 //!   Encryptors are `#[deprecated]` per CVF-17; decryptors ([`decrypt_bytes`],
-//!   [`decrypt_str`], [`decrypt_raw`]) remain to decode existing traffic.
+//!   [`decrypt_str`], [`decrypt_raw`]) remain to decode existing traffic
+//!   within the compatibility envelope documented on [`decrypt_bytes`]
+//!   (CVF-V5-16): keys with an element of 0, 1 or `>= 2^40`, or a repeated
+//!   element, and plaintexts containing non-scalar values, are rejected.
 //!
 //! # Key ordering is a security parameter
 //!
@@ -38,11 +41,13 @@
 //!
 //! # Validation
 //!
-//! Every entry point that accepts a `&[u64]` key runs [`validate_key`]
-//! (private) as its first statement, per CVF-15. A key that is empty,
-//! composite, below [`MIN_KEY_PRIME`], above [`MAX_KEY_PRIME`], or contains
-//! duplicates is rejected with a descriptive `String` error before any
-//! HMAC or arithmetic runs — no panic path is reachable from `&[u64]` input.
+//! Every encrypt entry point and every v8 decrypt entry point that accepts a
+//! `&[u64]` key runs [`validate_key`] (private) before any arithmetic, per
+//! CVF-15. A key that is empty, composite, below [`MIN_KEY_PRIME`], above
+//! [`MAX_KEY_PRIME`], contains duplicates or has more than
+//! [`MAX_KEY_ELEMENTS`] elements is rejected with a descriptive `String`
+//! error. The v7 decryptors apply a relaxed policy once, after the tag has
+//! verified (CVF-V5-12, CVF-V5-16; see [`decrypt_bytes`]).
 
 pub mod self_test;
 pub mod kem;
@@ -873,16 +878,52 @@ fn decrypt_core(
     unpad_message(&padded)
 }
 
+/// Key policy of the v7 **decryptors** (CVF-V5-16): the minimum the
+/// arithmetic needs, not the v8 key policy. Non-empty, at most
+/// [`MAX_KEY_ELEMENTS`] elements, each in `[2, MAX_SERIALISABLE_KEY_PRIME]`
+/// (so `k - 1 >= 1` and `0x10FFFF * k + addend` cannot wrap `u64`), and
+/// pairwise distinct. No primality test and no interval check, so keys
+/// provisioned outside the current normative interval still open archived
+/// v7 ciphertexts, and no trial division runs on the decrypt path.
+fn validate_key_v7_decrypt(key: &[u64]) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("Key must be a non-empty list of primes.".into());
+    }
+    if key.len() > MAX_KEY_ELEMENTS {
+        return Err(format!(
+            "Key has {} elements, exceeding MAX_KEY_ELEMENTS ({}).",
+            key.len(),
+            MAX_KEY_ELEMENTS
+        ));
+    }
+    for (i, &k) in key.iter().enumerate() {
+        if !(2..=MAX_SERIALISABLE_KEY_PRIME).contains(&k) {
+            return Err(format!(
+                "Key element at index {} ({}) is outside [2, {}].",
+                i, k, MAX_SERIALISABLE_KEY_PRIME
+            ));
+        }
+        if key[..i].contains(&k) {
+            return Err(format!(
+                "Key element at index {} duplicates an earlier element; all elements must be distinct.",
+                i
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// v7 low-level decrypt entry point. Returns the recovered codepoint sequence,
 /// or an error if the token stream is malformed. Prior to CVF-14 this returned
 /// `Vec<u32>` and panicked on a malformed padded buffer (see V3-CVF8); the
 /// new signature propagates the error like every other decryption path.
-/// Legacy v7: see [`decrypt_bytes`] for the caveats.
+/// Legacy v7: see [`decrypt_bytes`] for the caveats and the compatibility
+/// envelope (CVF-V5-16).
 pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Result<Vec<u32>, String> {
     // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
-    validate_key(key)?; // CVF-15
+    validate_key_v7_decrypt(key)?; // CVF-V5-16
     let kb = key_bytes(key);
     decrypt_core(nonce, cypher, key, &kb)
 }
@@ -1219,7 +1260,7 @@ fn open_v7(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u32>, Strin
     if !ct_eq_bytes(recv_tag, calc_tag.as_ref()) {
         return Err("Authentication failed: invalid HMAC tag.".into());
     }
-    validate_key(key)?; // CVF-15, after authentication (CVF-V5-12)
+    validate_key_v7_decrypt(key)?; // CVF-V5-16 relaxed policy, after authentication (CVF-V5-12)
     let nonce = &payload[..NONCE_SIZE];
     let masked = &payload[NONCE_SIZE..];
     let ks = varint_keystream(&kb, nonce, masked.len());
@@ -1232,6 +1273,25 @@ fn open_v7(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<Vec<u32>, Strin
 /// Legacy v7 decryptor, kept for archived ciphertexts. v7 keys every
 /// derivation by the serialised prime tuple rather than an independent `sk`,
 /// and no theorem of the NAPQES v4 paper applies to it (CVF-28).
+///
+/// # Compatibility envelope (CVF-V5-16)
+///
+/// Not every v7 ciphertext written by an earlier release decrypts:
+///
+/// * **Keys.** Accepted: 1 to [`MAX_KEY_ELEMENTS`] pairwise-distinct
+///   elements, each in `[2, 2^40 - 1]` — no primality or interval check, so
+///   keys provisioned under any earlier interval still work. Rejected: an
+///   empty key, more than 128 elements, a repeated element, or an element
+///   of 0, 1 or `>= 2^40` (which the 5-byte key serialisation of every
+///   release truncated anyway).
+/// * **Plaintexts.** A ciphertext whose recovered plaintext contains a value
+///   that is not a Unicode scalar value (a surrogate `U+D800..U+DFFF` or a
+///   value above `U+10FFFF`) is rejected. Such ciphertexts could be produced
+///   by the v4 `encrypt` (any `u32`) and by the Python v7 `encrypt_bytes`
+///   (lone surrogates in a `str`); no Rust encryptor of this release
+///   produces them. [`decrypt_raw`] additionally rejects values above `0xFF`.
+/// * Everything else — every key produced by an in-tree generator of any
+///   release, and every scalar-valued plaintext — decrypts as before.
 pub fn decrypt_bytes(ciphertext: &[u8], key: &[u64], aad: &[u8]) -> Result<String, String> {
     // CVF-V5-8: FIPS 140-3 gate (opt-in via the `fips_gate` feature).
     #[cfg(feature = "fips_gate")]
@@ -2719,9 +2779,9 @@ mod tests {
 
     #[test]
     fn cvf15_v7_decrypt_str_rejects_bad_key() {
-        let ct = STANDARD.encode(v7_tagged_under(&[3]));
-        let err = decrypt_str(&ct, &[3], b"").unwrap_err();
-        assert!(err.contains("minimum"), "expected minimum-size error, got: {}", err);
+        let ct = STANDARD.encode(v7_tagged_under(&[1]));
+        let err = decrypt_str(&ct, &[1], b"").unwrap_err();
+        assert!(err.contains("outside [2,"), "expected range error, got: {}", err);
     }
 
     #[test]
@@ -2734,8 +2794,8 @@ mod tests {
     fn cvf15_v7_decrypt_raw_rejects_bad_key() {
         let err = decrypt_raw(&[0u8; 100], &[], b"").unwrap_err();
         assert!(err.contains("Authentication failed"), "got: {}", err);
-        let err = decrypt_raw(&v7_tagged_under(&[1_000_000]), &[1_000_000], b"").unwrap_err();
-        assert!(err.contains("not prime"), "expected primality error, got: {}", err);
+        let err = decrypt_raw(&v7_tagged_under(&[5, 5]), &[5, 5], b"").unwrap_err();
+        assert!(err.contains("duplicates"), "expected duplicate error, got: {}", err);
     }
 
     #[test]
@@ -3516,6 +3576,34 @@ mod v5_tests {
         for n in [0u64, 1, 3, 4, 15, 16, 17, 1 << 32, u64::MAX] {
             let r = isqrt_u64(n);
             assert!(r as u128 * r as u128 <= n as u128 && (r as u128 + 1).pow(2) > n as u128);
+        }
+    }
+
+    // CVF-V5-16: archived v7 ciphertexts under keys outside the current
+    // interval (composite, below 10^6 or above MAX_KEY_PRIME) still open;
+    // the relaxed policy rejects only what the arithmetic cannot handle.
+    #[test]
+    fn v5_16_v7_decryptors_open_out_of_interval_archived_keys() {
+        let key: [u64; 3] = [999_983, 1_000_000, 20_000_003]; // <1e6 prime, composite, >1.5e7
+        let nonce = [9u8; NONCE_SIZE];
+        let kb = key_bytes(&key);
+        let msg: Vec<u32> = "archived".chars().map(|c| c as u32).collect();
+        let padded = pad_message(&msg, &kb, &nonce);
+        let tokens = emit_tokens_v7(&padded, &kb, &nonce, derive_noise_p(&kb, &nonce), &key);
+        let blob = fixed_encode_tokens(&tokens);
+        let ks = varint_keystream(&kb, &nonce, blob.len());
+        let mut ct = nonce.to_vec();
+        ct.extend(blob.iter().zip(ks.iter()).map(|(a, b)| a ^ b));
+        let tag = compute_auth_tag(&kb, b"aad", &ct, AAD_LEN_WIDTH_V7);
+        ct.extend_from_slice(&tag);
+
+        assert!(validate_key(&key).is_err(), "the v8 policy must still reject this key");
+        assert_eq!(decrypt_bytes(&ct, &key, b"aad").unwrap(), "archived");
+        assert_eq!(decrypt_raw(&ct, &key, b"aad").unwrap(), b"archived");
+        assert_eq!(decrypt(&nonce, &tokens, &key).unwrap(), msg);
+
+        for bad in [&[][..], &[1][..], &[7, 7][..], &[1u64 << 40][..]] {
+            assert!(validate_key_v7_decrypt(bad).is_err(), "{:?} accepted", bad);
         }
     }
 

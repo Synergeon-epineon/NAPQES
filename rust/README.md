@@ -162,14 +162,21 @@ length-hiding property Corollary 4.14 proves for v8 does not hold), and v7
 is keyed by the prime tuple rather than `sk`, so no theorem of the paper
 applies (CVF-28). The corresponding decryptors (`decrypt`, `decrypt_bytes`,
 `decrypt_str`, `decrypt_raw`) remain to decrypt existing v7 ciphertexts and
-are not deprecated.
+are not deprecated. **Compatibility envelope (CVF-V5-16):** they accept any
+key of 1–128 distinct elements in `[2, 2^40 - 1]` (no primality or interval
+check, so keys from any earlier interval still work) and reject a ciphertext
+whose plaintext contains a surrogate or a value above U+10FFFF (which the v4
+`encrypt` and the Python v7 encryptor could produce); `decrypt_raw` also
+rejects values above 0xFF. See the rustdoc of `decrypt_bytes`.
 
 ## Key handling
 
-Every entry point taking `&[u64]` runs `validate_key` at its head
-(CVF-15/CVF-16). Rejected: empty tuples, composite elements, elements
-outside `[MIN_KEY_PRIME, MAX_KEY_PRIME]`, duplicates. Key ordering is a
-security parameter — `[k0, k1]` and `[k1, k0]` are distinct keys.
+Every encrypt entry point and every v8 decrypt entry point taking `&[u64]`
+runs `validate_key` at its head (CVF-15/CVF-16). Rejected: empty tuples,
+composite elements, elements outside `[MIN_KEY_PRIME, MAX_KEY_PRIME]`,
+duplicates, more than `MAX_KEY_ELEMENTS`. The v7 decryptors instead apply
+the relaxed policy above, once, after the tag check (CVF-V5-12/V5-16). Key
+ordering is a security parameter — `[k0, k1]` and `[k1, k0]` are distinct keys.
 `generate_v8_key` and `generate_prime_numbers` return `Err` on an invalid
 or prime-poor range instead of panicking (CVF-20).
 

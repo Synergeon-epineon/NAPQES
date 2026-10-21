@@ -24,7 +24,7 @@ The Fourth Review Round audit delivered 37 findings against the NAPQES v4 delive
 - Rust reference implementation: **234 unit tests + 3 doctests + 8 KAT parity tests + 1 fips_gate integration test pass** — up from 197 pre-remediation. All 22 new regression tests are named after the CVF they close (`cvf<N>_...`) so future regressions surface immediately.
 - Cross-language KAT corpus regenerated: `tests/kat/v8_vectors.json` now carries 23 vectors (was 20); the twelve W001–W012 vectors are byte-identical to before; three new W013–W015 vectors pin the `coarse(3)`, `coarse(12)`, and `frame(1024)` padding profiles (CVF-32).
 - NIST SP 800-22 Statistical Test Suite regenerated over v8 output (CVF-33): a 1M-bit smoke run passed 14/14 scored tests, and the subsequent $5\times10^7$-bit run (15 tests, 40 scored sub-results, all pass; `sts_report.json`) is the one reported in paper Section 9.
-- No wire-format breaks. Every existing v7 and v8 ciphertext continues to decrypt byte-for-byte.
+- No wire-format breaks. Every existing v8 ciphertext continues to decrypt byte-for-byte; existing v7 ciphertexts decrypt within the compatibility envelope documented on `decrypt_bytes` (*corrected in round 5, CVF-V5-16: this line previously claimed every v7 ciphertext decrypts; keys with an element of 0, 1 or ≥ 2^40 or a repeated element, and plaintexts containing surrogates or values above U+10FFFF, are rejected*).
 
 **What follows.** Section 2 covers process. Section 3 gives a status table for all 37 findings. Sections 4–5 give per-finding narratives grouped by severity. Section 6 lists the deliberate deferrals. Section 7 documents verification. Section 8 records the final verification pass. Appendices A–C give file-level change summaries and reproduction commands.
 
