@@ -407,8 +407,8 @@ fn validate_key(key: &[u64]) -> Result<(), String> {
         return Err(format!(
             "Key has {} elements, exceeding MAX_KEY_ELEMENTS ({}). Very large \
              keys are rejected because per-message primality/distinctness \
-             validation is O(K²) with the classic scan and O(K log K) with \
-             sort-and-scan; the cap makes the cost of legitimate use bounded.",
+             validation grows with K; the cap makes the cost of legitimate \
+             use bounded.",
             key.len(),
             MAX_KEY_ELEMENTS
         ));
@@ -443,15 +443,18 @@ fn validate_key(key: &[u64]) -> Result<(), String> {
             return Err(format!("Key element at index {} ({}) is not prime.", i, k));
         }
     }
-    // Distinctness via sort-and-scan on a local clone (CVF-41).
-    let mut sorted = key.to_vec();
-    sorted.sort_unstable();
-    for w in sorted.windows(2) {
-        if w[0] == w[1] {
-            return Err(format!(
-                "Key element {} is a duplicate; all elements must be distinct.",
-                w[0]
-            ));
+    // Distinctness via an in-place pairwise scan (CVF-V5-11): no scratch copy
+    // of the key is made, so nothing is left on the heap to wipe. At most
+    // MAX_KEY_ELEMENTS*(MAX_KEY_ELEMENTS-1)/2 = 8,128 comparisons, negligible
+    // beside the trial division above.
+    for i in 0..key.len() {
+        for j in (i + 1)..key.len() {
+            if key[i] == key[j] {
+                return Err(format!(
+                    "Key element at index {} duplicates index {}; all elements must be distinct.",
+                    j, i
+                ));
+            }
         }
     }
     Ok(())
@@ -1718,6 +1721,18 @@ pub fn zeroize_key(key: &mut [u64]) {
     }
 }
 
+/// Wipe a plaintext codepoint buffer over its whole capacity (live elements
+/// and the spare capacity left by earlier `clear`/`drain` calls), then
+/// empty it (CVF-V5-11).
+fn zeroize_codepoints(buf: &mut Vec<u32>) {
+    let cap = buf.capacity();
+    buf.resize(cap, 0);
+    for x in buf.iter_mut() {
+        unsafe { std::ptr::write_volatile(x, 0u32) };
+    }
+    buf.clear();
+}
+
 // --- Streaming AE v8 (misuse-resistant primitives, streaming nonce) -----------
 //
 // Wire format (FORMAT_STREAM_AE_V8 = 0x02):
@@ -2223,7 +2238,8 @@ fn decrypt_stream_ae_v8_inner(
 /// for the security caveats (CAV-005).
 pub struct StreamV8Encryptor {
     primes: Vec<u64>,
-    sk_fmt: [u8; 32],
+    // CVF-V5-11: boxed so that moving the encryptor never copies sk_fmt.
+    sk_fmt: Box<Secret32>,
     aad: Vec<u8>,
     nonce: [u8; NONCE_SIZE],
     f: u32,
@@ -2249,7 +2265,7 @@ impl StreamV8Encryptor {
         validate_key(primes)?;
         validate_stream_v8_frame(frame_codepoints)?;
         let nonce = generate_nonce_with_crng_check()?;
-        let sk_fmt = derive_format_subkey(sk, FORMAT_STREAM_AE_V8);
+        let sk_fmt = Box::new(Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8)));
         let mut header = Vec::with_capacity(1 + 4 + NONCE_SIZE);
         header.push(FORMAT_STREAM_AE_V8);
         header.extend_from_slice(&frame_codepoints.to_be_bytes());
@@ -2289,11 +2305,12 @@ impl StreamV8Encryptor {
                 &self.cp_buf[..self.f as usize],
                 self.chunk_idx,
                 &self.primes,
-                &self.sk_fmt,
+                Secret32::as_ref(&self.sk_fmt),
                 &self.nonce,
                 &self.aad,
             );
-            self.cp_buf.drain(..self.f as usize);
+            // CVF-V5-11: wipe the consumed plaintext before releasing it.
+            zeroize_codepoints(&mut self.cp_buf);
             self.chunk_idx += 1;
             Ok(Some(frame))
         } else {
@@ -2313,17 +2330,17 @@ impl StreamV8Encryptor {
         let mut out: Vec<u8> = Vec::new();
         if !self.cp_buf.is_empty() {
             let sub_nonce_last =
-                derive_stream_v8_sub_nonce(&self.sk_fmt, &self.nonce, self.chunk_idx);
+                derive_stream_v8_sub_nonce(Secret32::as_ref(&self.sk_fmt), &self.nonce, self.chunk_idx);
             let fill_needed = (self.f as usize) - self.cp_buf.len();
             for i in 0..fill_needed {
                 self.cp_buf.push(derive_stream_v8_filler_cp(
-                    &self.sk_fmt, &sub_nonce_last, i as u32));
+                    Secret32::as_ref(&self.sk_fmt), &sub_nonce_last, i as u32));
             }
             let frame = emit_stream_v8_chunk(
                 &self.cp_buf,
                 self.chunk_idx,
                 &self.primes,
-                &self.sk_fmt,
+                Secret32::as_ref(&self.sk_fmt),
                 &self.nonce,
                 &self.aad,
             );
@@ -2331,7 +2348,7 @@ impl StreamV8Encryptor {
             self.chunk_idx += 1;
         }
         let tag = compute_stream_v8_sentinel_tag(
-            &self.sk_fmt, &self.nonce, self.chunk_idx, &self.aad, self.total_real_cps);
+            Secret32::as_ref(&self.sk_fmt), &self.nonce, self.chunk_idx, &self.aad, self.total_real_cps);
         out.extend_from_slice(&0u32.to_be_bytes());
         out.extend_from_slice(&self.total_real_cps.to_be_bytes());
         out.extend_from_slice(&tag);
@@ -2341,8 +2358,8 @@ impl StreamV8Encryptor {
 
 impl Drop for StreamV8Encryptor {
     fn drop(&mut self) {
-        zeroize_sk(&mut self.sk_fmt);
         zeroize_key(&mut self.primes);
+        zeroize_codepoints(&mut self.cp_buf);
     }
 }
 
@@ -3354,5 +3371,33 @@ mod tests {
         assert!(
             encrypt_bytes_v8_with_profile(&msg, &primes, &sk, b"", PadProfile::Frame(512)).is_err()
         );
+    }
+}
+
+// --- Round-5 audit regression tests (CVF-V5-*) ------------------------------
+
+#[cfg(test)]
+mod v5_tests {
+    use super::*;
+
+    // CVF-V5-11: the plaintext buffer is wiped over its whole capacity.
+    #[test]
+    fn v5_11_zeroize_codepoints_wipes_spare_capacity() {
+        let mut buf: Vec<u32> = Vec::with_capacity(8);
+        buf.extend_from_slice(&[0x41, 0x42, 0x43, 0x44, 0x45]);
+        buf.truncate(2); // stale plaintext now sits in spare capacity
+        let cap = buf.capacity();
+        zeroize_codepoints(&mut buf);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), cap);
+        unsafe { buf.set_len(cap) };
+        assert!(buf.iter().all(|&c| c == 0), "stale codepoints survived");
+    }
+
+    // CVF-V5-11: duplicate detection no longer needs a sorted scratch copy.
+    #[test]
+    fn v5_11_validate_key_reports_duplicate_indices() {
+        let err = validate_key(&[1_000_003, 1_000_033, 1_000_003]).unwrap_err();
+        assert!(err.contains("index 2 duplicates index 0"), "{}", err);
     }
 }

@@ -51,8 +51,13 @@ impl NapqesKey {
     /// Any of the rejection reasons [`crate::validate_key`] documents (empty
     /// tuple, composite element, out-of-range element, duplicate, more than
     /// [`crate::MAX_KEY_ELEMENTS`] elements) surface here as `Err`.
-    pub fn new(primes: Vec<u64>, sk: [u8; SK_SIZE]) -> Result<Self, String> {
-        validate_key(&primes)?;
+    pub fn new(mut primes: Vec<u64>, mut sk: [u8; SK_SIZE]) -> Result<Self, String> {
+        if let Err(e) = validate_key(&primes) {
+            // CVF-V5-11: rejected key material is wiped, not just dropped.
+            zeroize_key(&mut primes);
+            zeroize_sk(&mut sk);
+            return Err(e);
+        }
         Ok(Self { primes, sk })
     }
 
@@ -167,7 +172,7 @@ impl fmt::Debug for NapqesKey {
 /// that this path knows via type that the caller has already run
 /// [`crate::validate_key`] (in `NapqesKey::new`), so it calls the
 /// `pub(crate)` `_core` function directly and the per-message
-/// `is_prime`/sort-and-scan cost the auditor flagged is not paid.
+/// `is_prime`/distinctness cost the auditor flagged is not paid.
 pub fn encrypt_bytes_v8_key(
     message: &str,
     key: &NapqesKey,
