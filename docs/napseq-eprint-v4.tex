@@ -2481,19 +2481,24 @@ on them.
 % ─────────────────────────────────────────────────────────────────────────────
 
 Two fuzz harnesses are provided. The Python harness
-(\texttt{tests/fuzz\_atheris.py}, using \texttt{atheris}) targets
-\texttt{decrypt\_bytes\_v8} and the fixed-width token decoder, verifying
-that no exception other than \texttt{ValueError} escapes the public API.
-The Rust harness (\texttt{rust/fuzz/}, using \texttt{cargo-fuzz}) has three
-targets: \texttt{decode\_bytes} derives a valid ciphertext from the fuzzer
-input, mutates it and \emph{re-tags} it, so mutated inputs pass
-authentication and reach the post-authentication checks of
-$\mathsf{Dec}$; \texttt{validate\_key} feeds arbitrary key tuples to every
-entry point; and \texttt{unauth\_decode} covers the unauthenticated
-token-slice decoder. The ``no panics across $10^6$ corpus entries'' figure
-recorded in \texttt{docs/FUZZ\_ATTESTATION.md} predates the re-tagging
-target and therefore covers only inputs rejected at the tag; a run of the
-current targets has not yet been recorded.
+(\texttt{tests/fuzz\_atheris.py}) targets the legacy decoders, runs on
+Windows only in a seeded random mode without coverage guidance, and has no
+recorded coverage-guided run; it is not cited as evidence for $\Pi$
+(corrected in round 5, CVF-V5-26). The Rust harness (\texttt{rust/fuzz/},
+using \texttt{cargo-fuzz}) has four targets: \texttt{decode\_bytes} derives
+a valid ciphertext under any of the three padding profiles from the fuzzer
+input, mutates its body or nonce and \emph{re-tags} it, so mutated inputs
+pass authentication and reach the post-authentication checks of
+$\mathsf{Dec}$; \texttt{stream\_decode} does the same for the experimental
+streaming format, re-tagging every chunk and the sentinel;
+\texttt{unauth\_decode} feeds the unauthenticated token-slice decoder
+structurally valid $c\cdot k+a$ token streams with one mutation each; and
+\texttt{validate\_key} feeds arbitrary key tuples to every entry point.
+\texttt{docs/FUZZ\_ATTESTATION.md} records a ten-minute run of each target
+under AddressSanitizer at commit \texttt{471501e}, with no crash or panic
+(between $5.9\times10^{3}$ and $3.8\times10^{5}$ executions per target). This is a
+smoke test, not a saturation campaign: v8 ciphertexts are large, so the
+decoder targets execute at only 9 to 46 inputs per second.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Known Caveats}
