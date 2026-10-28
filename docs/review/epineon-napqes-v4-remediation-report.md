@@ -512,3 +512,13 @@ claim). The `Secret32` coverage statement is superseded by CVF-V5-11.
 The audited commit `f6ced5d` is `acbf9d0` in the published history (the
 history was rewritten to remove a committed key tuple, CVF-V5-15; the
 trees differ only by `meta.json`).
+
+**Final report.** ABDK issued the final report v1.0 on 27 October 2026
+([epineon-napqes-v4-public-report-v1.0.pdf](epineon-napqes-v4-public-report-v1.0.pdf)).
+Its Section 6 lists 30 of these findings (CVF-V5-15 was dropped after
+the history rewrite) and reproduces our Client Comments, but it does not
+review the fixes. Our record of the post-audit fixes, with answers to the
+report's Sections 8 and 9, is in
+[epineon-napqes-v4-post-audit-addendum.md](epineon-napqes-v4-post-audit-addendum.md).
+A non-technical summary is in
+[NAPQES-security-audit-summary.md](NAPQES-security-audit-summary.md).

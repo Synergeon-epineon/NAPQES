@@ -7,6 +7,11 @@ pasted into the finding's **Client Comment** box.
 
 **These are client statements; they have not been reviewed by ABDK.**
 
+**Status.** These comments are reproduced in ABDK's final report v1.0
+(27 October 2026). For the post-audit fix record and our answers to the
+report's Sections 8 and 9, see
+[epineon-napqes-v4-post-audit-addendum.md](epineon-napqes-v4-post-audit-addendum.md).
+
 **Commit identifiers.** Before these fixes, the repository history was
 rewritten to remove a committed key tuple (CVF-V5-15). The audited commit
 `f6ced5d` is therefore `acbf9d0` in the published history; its tree is
