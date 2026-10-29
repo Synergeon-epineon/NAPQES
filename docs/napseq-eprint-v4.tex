@@ -45,8 +45,9 @@ Built from HMAC-SHA256}}
 \author[1]{Abdeslam Jakjoud}
 \author[1]{Karim Amor}
 \affil[1]{QAegis, France}
-\date{Specification revision 4.2 --- October 2026\\
-\small (file \texttt{docs/napseq-eprint-v4.tex}; revision history in
+\date{Specification revision 4.3 --- October 2026\\
+\small (IACR ePrint submission version; file
+\texttt{docs/napseq-eprint-v4.tex}; revision history in
 Section~\ref{sec:revisions})}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ earlier revision must apply every normative change listed after it.
         must be byte-valued (step (8)). \emph{Text:} remediation of the
         round-4 findings. This revision was filed as
         \texttt{napseq-eprint-v3.tex} and carried no version marker.
-  \item[4.2 (this revision; round-5 remediation).] \emph{Normative for the
+  \item[4.2 (October 2026; round-5 remediation).] \emph{Normative for the
         block format:} none — the bytes of every v8 block ciphertext and
         every KAT vector of 4.1 are unchanged; vectors \texttt{W023} and
         \texttt{W-E02} were added to pin $\mathcal{P}_2$.
@@ -158,6 +159,15 @@ earlier revision must apply every normative change listed after it.
         in terms of $\mathsf{sk}_{\mathrm{fmt}}$; the domain table lists the
         streaming domains $\texttt{0x0C}$--$\texttt{0x0F}$; the file is
         renamed \texttt{napseq-eprint-v4.tex}.
+  \item[4.3 (this revision; IACR ePrint submission).] \emph{Normative:}
+        none — every byte of every v8 block ciphertext and KAT vector of
+        4.2 is unchanged, and no theorem, definition, lemma, proof,
+        algorithm step, or parameter has moved. \emph{Text only:} adds
+        the Acknowledgments section (Section~\ref{sec:acknowledgments})
+        that records the four external review rounds performed by ABDK
+        Consulting between July and October 2026; corrects the title-block
+        date; the file keeps the name \texttt{napseq-eprint-v4.tex} and
+        the normative content of revision 4.2.
 \end{description}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -2683,6 +2693,30 @@ Future work includes a TVLA side-channel analysis of the Rust
 implementation's full encode/decode path (only its tag comparison is
 constant-time today), a FIPS 140-3 module boundary definition, and a
 performance evaluation on embedded ARM Cortex-M4 and RISC-V targets.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section*{Acknowledgments}
+\label{sec:acknowledgments}
+\addcontentsline{toc}{section}{Acknowledgments}
+% ─────────────────────────────────────────────────────────────────────────────
+
+NAPQES was independently reviewed by ABDK Consulting over four rounds
+between July and October 2026, led by Dmitry Khovratovich. Rounds 1--3
+reviewed earlier revisions of this specification; round 4 reviewed the
+Rust reference implementation against revision 4.1. The final report
+(ABDK Consulting, \emph{Fourth Review Round --- NAPQES v4 AEAD Scheme
+Audit}, version 1.0, 27 October 2026) reports no critical or major
+findings against the fixed code; its remaining moderate and minor
+findings, and the client-side status of the fixes for them, are recorded
+in a separate addendum published alongside this preprint
+(\url{https://github.com/Synergeon-epineon/NAPQES/tree/main/docs/review}).
+The present revision has not been re-reviewed by ABDK.
+The authors are grateful to Dmitry Khovratovich and the ABDK team for
+their thorough and constructive review across all four rounds; the
+construction, the security analysis, and the specification have improved
+substantially as a result. The ABDK team is not an author and did not
+contribute text to this paper; any remaining errors are the authors'
+alone.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \bibliographystyle{plain}

@@ -25,4 +25,4 @@ tools/**
 # CVF-V5-15: never commit key material (prime tuples, sk) or demo metadata that embeds it.
 meta.json
 *.key.json
-
+docs/nist-submission
