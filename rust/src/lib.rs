@@ -324,6 +324,66 @@ fn hmac_digest(kb: &[u8], data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// The keyed HMAC-SHA256 function every derivation in the schedule calls.
+///
+/// Raw key bytes absorb the key on each call. [`HmacKey`] absorbs it once and
+/// is what the v8 entry points use. Both return the same value for the same
+/// key and data, so the wire format does not depend on which one is used.
+pub(crate) trait Prf {
+    fn prf(&self, data: &[u8]) -> [u8; 32];
+}
+
+impl Prf for [u8] {
+    #[inline]
+    fn prf(&self, data: &[u8]) -> [u8; 32] { hmac_digest(self, data) }
+}
+
+impl<const N: usize> Prf for [u8; N] {
+    #[inline]
+    fn prf(&self, data: &[u8]) -> [u8; 32] { hmac_digest(self, data) }
+}
+
+impl Prf for Vec<u8> {
+    #[inline]
+    fn prf(&self, data: &[u8]) -> [u8; 32] { hmac_digest(self, data) }
+}
+
+impl Prf for crate::key::SecretBytes {
+    #[inline]
+    fn prf(&self, data: &[u8]) -> [u8; 32] { hmac_digest(self, data) }
+}
+
+/// HMAC-SHA256 with the key already absorbed.
+///
+/// A v8 message makes thousands of HMAC calls under one format subkey.
+/// Absorbing that key costs two SHA-256 compressions; this holds the result
+/// so each call clones it instead of repeating them.
+///
+/// Lifetime: one is built per encrypt or decrypt call, next to the `Secret32`
+/// holding `sk_fmt`, and dropped when that call returns. It is never stored
+/// in a key object, a static or a thread-local. The state it holds is
+/// equivalent to `sk_fmt` and, like the per-call `Hmac` values it replaces,
+/// is not wiped on drop: `hmac` 0.12 offers no zeroisation.
+pub(crate) struct HmacKey(HmacSha256);
+
+impl HmacKey {
+    pub(crate) fn new(kb: &[u8]) -> Self {
+        Self(HmacSha256::new_from_slice(kb).expect("hmac"))
+    }
+}
+
+impl Prf for HmacKey {
+    #[inline]
+    fn prf(&self, data: &[u8]) -> [u8; 32] {
+        let mut mac = self.0.clone();
+        mac.update(data);
+        let r = mac.finalize().into_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&r);
+        out
+    }
+}
+
 fn be5(n: u64) -> [u8; 5] {
     // CVF-38: `be5` keeps only the low 5 bytes (bits 0..40). All in-crate
     // callers pass values well below 2^40 (ct_pos and real_idx are bounded
@@ -375,22 +435,22 @@ fn u32_from_be4(b: &[u8]) -> u32 {
 
 const TWO_POW_64: f64 = 18446744073709551616.0_f64;
 
-fn is_noise_pos(kb: &[u8], nonce: &[u8], ct_pos: u64, noise_p: f64) -> bool {
+fn is_noise_pos(kb: &(impl Prf + ?Sized), nonce: &[u8], ct_pos: u64, noise_p: f64) -> bool {
     let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
     buf.push(0x00);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&be5(ct_pos));
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     let v = u64_from_be8(&d[..8]) as f64 / TWO_POW_64;
     v < noise_p
 }
 
-fn derive_addend(kb: &[u8], nonce: &[u8], real_idx: u64, key_element: u64) -> u64 {
+fn derive_addend(kb: &(impl Prf + ?Sized), nonce: &[u8], real_idx: u64, key_element: u64) -> u64 {
     let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
     buf.push(0x01);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&be5(real_idx));
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     // CVF-16: `key_element >= MIN_KEY_PRIME >= 2` after validate_key, so
     // `key_element - 1 >= 1` and the modulus is well defined. The debug
     // assertion guards against a caller that skipped validation.
@@ -401,22 +461,22 @@ fn derive_addend(kb: &[u8], nonce: &[u8], real_idx: u64, key_element: u64) -> u6
     (u32_from_be4(&d[..4]) as u64 % (key_element - 1)) + 1
 }
 
-fn derive_noise_char(kb: &[u8], nonce: &[u8], ct_pos: u64) -> u64 {
+fn derive_noise_char(kb: &(impl Prf + ?Sized), nonce: &[u8], ct_pos: u64) -> u64 {
     let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
     buf.push(0x04);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&be5(ct_pos));
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     // CVF-42: named constants replace the bare `% 96) + 32` literal.
     (u32_from_be4(&d[..4]) as u64 % NOISE_ALPHABET) + ASCII_PRINTABLE_BASE
 }
 
-fn derive_noise_token_addend(kb: &[u8], nonce: &[u8], ct_pos: u64, key_element: u64) -> u64 {
+fn derive_noise_token_addend(kb: &(impl Prf + ?Sized), nonce: &[u8], ct_pos: u64, key_element: u64) -> u64 {
     let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
     buf.push(0x05);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&be5(ct_pos));
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     // CVF-16: same invariant as derive_addend — validate_key enforces
     // key_element >= MIN_KEY_PRIME so key_element - 1 is well defined.
     debug_assert!(
@@ -426,11 +486,11 @@ fn derive_noise_token_addend(kb: &[u8], nonce: &[u8], ct_pos: u64, key_element: 
     (u32_from_be4(&d[..4]) as u64 % (key_element - 1)) + 1
 }
 
-fn derive_noise_p(kb: &[u8], nonce: &[u8]) -> f64 {
+fn derive_noise_p(kb: &(impl Prf + ?Sized), nonce: &[u8]) -> f64 {
     let mut buf = Vec::with_capacity(1 + nonce.len());
     buf.push(0x02);
     buf.extend_from_slice(nonce);
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     let t = u64_from_be8(&d[..8]) as f64 / TWO_POW_64;
     // CVF-42: named constants replace bare 0.75/0.99 literals; CVF-30 flags
     // that the v7 float path is retained only for backward compatibility.
@@ -536,22 +596,22 @@ fn validate_key(key: &[u64]) -> Result<(), String> {
 /// IEEE-754 form only conditionally reproducible across languages and
 /// platforms. The legacy v7 path keeps [`derive_noise_p`] and stays
 /// byte-compatible.
-fn derive_noise_threshold_v8(kb: &[u8], nonce: &[u8]) -> u64 {
+fn derive_noise_threshold_v8(kb: &(impl Prf + ?Sized), nonce: &[u8]) -> u64 {
     let mut buf = Vec::with_capacity(1 + nonce.len());
     buf.push(0x02);
     buf.extend_from_slice(nonce);
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     let tau = u64_from_be8(&d[..8]) as u128;
     THETA_MIN + ((tau * (THETA_MAX - THETA_MIN) as u128) >> 64) as u64
 }
 
 /// Integer-arithmetic counterpart of [`is_noise_pos`] for v8.
-fn is_noise_pos_v8(kb: &[u8], nonce: &[u8], ct_pos: u64, theta: u64) -> bool {
+fn is_noise_pos_v8(kb: &(impl Prf + ?Sized), nonce: &[u8], ct_pos: u64, theta: u64) -> bool {
     let mut buf = Vec::with_capacity(1 + nonce.len() + 5);
     buf.push(0x00);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&be5(ct_pos));
-    let d = hmac_digest(kb, &buf);
+    let d = kb.prf(&buf);
     u64_from_be8(&d[..8]) < theta
 }
 
@@ -562,7 +622,7 @@ fn is_noise_pos_v8(kb: &[u8], nonce: &[u8], ct_pos: u64, theta: u64) -> bool {
 //
 // `aad_len_width` is 8 for v8 block mode (third-round audit finding CVF1)
 // and 4 for the legacy v7 format, which stays byte-compatible.
-fn compute_auth_tag(kb: &[u8], aad: &[u8], payload: &[u8], aad_len_width: usize) -> [u8; 32] {
+fn compute_auth_tag(kb: &(impl Prf + ?Sized), aad: &[u8], payload: &[u8], aad_len_width: usize) -> [u8; 32] {
     let (nonce, masked_blob) = payload.split_at(NONCE_SIZE);
     let mut buf =
         Vec::with_capacity(1 + nonce.len() + aad_len_width + aad.len() + masked_blob.len());
@@ -571,7 +631,7 @@ fn compute_auth_tag(kb: &[u8], aad: &[u8], payload: &[u8], aad_len_width: usize)
     buf.extend_from_slice(&be_len_prefix(aad.len(), aad_len_width));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(masked_blob);
-    hmac_digest(kb, &buf)
+    kb.prf(&buf)
 }
 
 // ─── Padding ─────────────────────────────────────────────────────────────────
@@ -703,7 +763,7 @@ impl PadProfile {
 
 /// HMAC-derived padding — domain byte 0x06 (matches Python `_pad_message`).
 /// Each padding codepoint is in [32, 126], matching the reference exactly.
-fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
+fn pad_message(msg: &[u32], kb: &(impl Prf + ?Sized), nonce: &[u8]) -> Vec<u32> {
     let n = msg.len();
     // CVF-34: public entry points check MAX_PLAINTEXT_CODEPOINTS and return
     // `Err`; this is the release-mode backstop for internal callers.
@@ -713,7 +773,7 @@ fn pad_message(msg: &[u32], kb: &[u8], nonce: &[u8]) -> Vec<u32> {
 
 /// Padding body shared by every profile; `block_size` must exceed `msg.len()`,
 /// which [`PadProfile::block_size`] guarantees for the profiles it accepts.
-fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<u32> {
+fn pad_to_block(msg: &[u32], kb: &(impl Prf + ?Sized), nonce: &[u8], block_size: usize) -> Vec<u32> {
     let n = msg.len();
     // CVF-31: a release build must never reach `block_size - n` with block_size <= n.
     assert!(block_size > n, "padding block must exceed the message");
@@ -727,7 +787,7 @@ fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<
         buf.push(0x06);
         buf.extend_from_slice(nonce);
         buf.extend_from_slice(&(i as u32).to_be_bytes());
-        let d = hmac_digest(kb, &buf);
+        let d = kb.prf(&buf);
         // CVF-42: named constants replace bare `% 95) + 32` literal.
         out.push(((u32_from_be4(&d[..4]) as u64 % PAD_ALPHABET) + ASCII_PRINTABLE_BASE) as u32); // [32, 126]
     }
@@ -743,7 +803,7 @@ fn pad_to_block(msg: &[u32], kb: &[u8], nonce: &[u8], block_size: usize) -> Vec<
 /// is what makes the ciphertext bytes look uniform. (CVF-V5-22: the earlier
 /// LEB128 continuation-bit justification referred to a format that no longer
 /// exists; the function name keeps its historical `varint_` prefix.)
-fn varint_keystream(kb: &[u8], nonce: &[u8], length: usize) -> Vec<u8> {
+fn varint_keystream(kb: &(impl Prf + ?Sized), nonce: &[u8], length: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(length + 32);
     let mut block: u32 = 0;
     while out.len() < length {
@@ -751,7 +811,7 @@ fn varint_keystream(kb: &[u8], nonce: &[u8], length: usize) -> Vec<u8> {
         buf.push(0x07);
         buf.extend_from_slice(nonce);
         buf.extend_from_slice(&block.to_be_bytes());
-        out.extend_from_slice(&hmac_digest(kb, &buf));
+        out.extend_from_slice(&kb.prf(&buf));
         block += 1;
     }
     out.truncate(length);
@@ -848,7 +908,7 @@ fn decrypt_core(
     nonce: &[u8],
     cypher: &[u64],
     key: &[u64],
-    kb: &[u8],
+    kb: &(impl Prf + ?Sized),
 ) -> Result<Vec<u32>, String> {
     let noise_p = derive_noise_p(kb, nonce);
     let kk = key.len() as u64;
@@ -945,7 +1005,7 @@ pub fn decrypt(nonce: &[u8], cypher: &[u64], key: &[u64]) -> Result<Vec<u32>, St
 /// exactly `real_count * (MAX_NOISE_RUN + 1)` tokens — and stops as soon as
 /// that many real tokens have been extracted, discarding any trailing
 /// filler tokens rather than feeding them through the noise/real decision.
-fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &[u8]) -> Result<Vec<u32>, String> {
+fn decrypt_core_v8(nonce: &[u8], cypher: &[u64], key: &[u64], kb: &(impl Prf + ?Sized)) -> Result<Vec<u32>, String> {
     let ceiling_unit = MAX_NOISE_RUN + 1;
     let n_tokens = cypher.len() as u64;
     if n_tokens % ceiling_unit != 0 {
@@ -1114,7 +1174,7 @@ fn fixed_encode_tokens(tokens: &[u64]) -> Vec<u8> {
 /// changes a ciphertext a v7 decryptor could have to read.
 fn emit_tokens_v7(
     padded: &[u32],
-    kb: &[u8],
+    kb: &(impl Prf + ?Sized),
     nonce: &[u8],
     noise_p: f64,
     key: &[u64],
@@ -1661,13 +1721,13 @@ pub fn generate_v8_key(
 /// the same ciphertext), which is the standard MRAE trade-off. Encrypting
 /// any *different* `(aad, message)` pair produces a nonce that collides
 /// with a previous one only with HMAC-SHA256-collision probability.
-fn synthetic_nonce(sk_fmt: &[u8], aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE] {
+fn synthetic_nonce(sk_fmt: &(impl Prf + ?Sized), aad: &[u8], message: &[u8]) -> [u8; NONCE_SIZE] {
     let mut buf = Vec::with_capacity(1 + AAD_LEN_WIDTH_V8 + aad.len() + message.len());
     buf.push(0x0A);
     buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(message);
-    let d = hmac_digest(sk_fmt, &buf);
+    let d = sk_fmt.prf(&buf);
     let mut n = [0u8; NONCE_SIZE];
     n.copy_from_slice(&d[..NONCE_SIZE]);
     n
@@ -1746,11 +1806,11 @@ pub(crate) fn encrypt_bytes_v8_core(
 ) -> Result<Vec<u8>, String> {
     // CVF-37: `sk_fmt` keys every derivation; the guard wipes it on every exit.
     let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_BLOCK_V8));
-    encrypt_bytes_v8_core_inner(sk_fmt.as_ref(), message, primes, aad, pad_profile)
+    encrypt_bytes_v8_core_inner(&HmacKey::new(sk_fmt.as_ref()), message, primes, aad, pad_profile)
 }
 
 fn encrypt_bytes_v8_core_inner(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     message: &str,
     primes: &[u64],
     aad: &[u8],
@@ -1827,11 +1887,11 @@ pub(crate) fn decrypt_bytes_v8_core(
         );
     }
     let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_BLOCK_V8));
-    decrypt_bytes_v8_core_inner(sk_fmt.as_ref(), ciphertext, primes, aad)
+    decrypt_bytes_v8_core_inner(&HmacKey::new(sk_fmt.as_ref()), ciphertext, primes, aad)
 }
 
 fn decrypt_bytes_v8_core_inner(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     ciphertext: &[u8],
     primes: &[u64],
     aad: &[u8],
@@ -2053,7 +2113,7 @@ fn stream_v8_header(f: u32, nonce: &[u8; NONCE_SIZE]) -> [u8; 1 + 4 + NONCE_SIZE
 /// not sent in clear. Only the chunk count (`ceil(n / F)`) remains visible.
 #[cfg(any(test, feature = "experimental-stream"))]
 fn stream_v8_count_mask(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     f: u32,
     nonce: &[u8; NONCE_SIZE],
     chunk_count: u32,
@@ -2062,12 +2122,12 @@ fn stream_v8_count_mask(
     buf.push(DOMAIN_STREAM_V8_COUNT_MASK);
     buf.extend_from_slice(&stream_v8_header(f, nonce));
     buf.extend_from_slice(&chunk_count.to_be_bytes());
-    u64_from_be8(&hmac_digest(sk_fmt, &buf)[..8])
+    u64_from_be8(&sk_fmt.prf(&buf)[..8])
 }
 
 #[cfg(any(test, feature = "experimental-stream"))]
 fn derive_stream_v8_sub_nonce(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     nonce: &[u8; NONCE_SIZE],
     chunk_idx: u32,
 ) -> [u8; NONCE_SIZE] {
@@ -2075,7 +2135,7 @@ fn derive_stream_v8_sub_nonce(
     buf.push(DOMAIN_STREAM_V8_SUBNONCE);
     buf.extend_from_slice(nonce);
     buf.extend_from_slice(&chunk_idx.to_be_bytes());
-    let d = hmac_digest(sk_fmt, &buf);
+    let d = sk_fmt.prf(&buf);
     let mut out = [0u8; NONCE_SIZE];
     out.copy_from_slice(&d[..NONCE_SIZE]);
     out
@@ -2086,7 +2146,7 @@ fn derive_stream_v8_sub_nonce(
 /// wire from real codepoints once passed through `c * k + addend`.
 #[cfg(any(test, feature = "experimental-stream"))]
 fn derive_stream_v8_filler_cp(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     sub_nonce: &[u8; NONCE_SIZE],
     fill_idx: u32,
 ) -> u32 {
@@ -2094,7 +2154,7 @@ fn derive_stream_v8_filler_cp(
     buf.push(0x06);
     buf.extend_from_slice(sub_nonce);
     buf.extend_from_slice(&fill_idx.to_be_bytes());
-    let d = hmac_digest(sk_fmt, &buf);
+    let d = sk_fmt.prf(&buf);
     let n = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
     // CVF-42: streaming filler codepoints draw from the same padding
     // alphabet as pad_to_block.
@@ -2106,7 +2166,7 @@ fn derive_stream_v8_filler_cp(
 fn encrypt_v8_stream_chunk_core(
     chunk_cps: &[u32],
     primes: &[u64],
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     sub_nonce: &[u8; NONCE_SIZE],
 ) -> Vec<u64> {
     emit_tokens_v8(chunk_cps, primes, sk_fmt, sub_nonce)
@@ -2118,7 +2178,7 @@ fn encrypt_v8_stream_chunk_core(
 /// runs of noise are capped at `MAX_NOISE_RUN`, and the tail is topped up
 /// with noise to that fixed ceiling (V2-CVF2) so the length never depends on
 /// the noise realisation.
-fn emit_tokens_v8(padded: &[u32], primes: &[u64], sk_fmt: &[u8; 32], nonce: &[u8]) -> Vec<u64> {
+fn emit_tokens_v8(padded: &[u32], primes: &[u64], sk_fmt: &(impl Prf + ?Sized), nonce: &[u8]) -> Vec<u64> {
     let noise_theta = derive_noise_threshold_v8(sk_fmt, nonce);
     let kk = primes.len() as u64;
     let ceiling = (padded.len() as u64) * (MAX_NOISE_RUN + 1);
@@ -2153,7 +2213,7 @@ fn emit_tokens_v8(padded: &[u32], primes: &[u64], sk_fmt: &[u8; 32], nonce: &[u8
 }
 
 /// A noise token at position `ct_pos`: `noise_char * k + noise_addend`.
-fn noise_token(kb: &[u8], nonce: &[u8], ct_pos: u64, k: u64) -> u64 {
+fn noise_token(kb: &(impl Prf + ?Sized), nonce: &[u8], ct_pos: u64, k: u64) -> u64 {
     derive_noise_char(kb, nonce, ct_pos) * k + derive_noise_token_addend(kb, nonce, ct_pos, k)
 }
 
@@ -2162,7 +2222,7 @@ fn noise_token(kb: &[u8], nonce: &[u8], ct_pos: u64, k: u64) -> u64 {
 fn decrypt_v8_stream_chunk_core(
     chunk_tokens: &[u64],
     primes: &[u64],
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     sub_nonce: &[u8; NONCE_SIZE],
     f: u32,
 ) -> Result<Vec<u32>, String> {
@@ -2210,7 +2270,7 @@ fn decrypt_v8_stream_chunk_core(
 
 #[cfg(any(test, feature = "experimental-stream"))]
 fn compute_stream_v8_chunk_tag(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     f: u32,
     nonce: &[u8; NONCE_SIZE],
     chunk_idx: u32,
@@ -2224,12 +2284,12 @@ fn compute_stream_v8_chunk_tag(
     buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(masked_chunk);
-    hmac_digest(sk_fmt, &buf)
+    sk_fmt.prf(&buf)
 }
 
 #[cfg(any(test, feature = "experimental-stream"))]
 fn compute_stream_v8_sentinel_tag(
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     f: u32,
     nonce: &[u8; NONCE_SIZE],
     chunk_count: u32,
@@ -2243,7 +2303,7 @@ fn compute_stream_v8_sentinel_tag(
     buf.extend_from_slice(&be_len_prefix(aad.len(), AAD_LEN_WIDTH_V8));
     buf.extend_from_slice(aad);
     buf.extend_from_slice(&total_real_cps.to_be_bytes());
-    hmac_digest(sk_fmt, &buf)
+    sk_fmt.prf(&buf)
 }
 
 #[cfg(any(test, feature = "experimental-stream"))]
@@ -2262,7 +2322,7 @@ fn emit_stream_v8_chunk(
     codepoints_f: &[u32],
     idx: u32,
     primes: &[u64],
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     nonce: &[u8; NONCE_SIZE],
     aad: &[u8],
 ) -> Vec<u8> {
@@ -2300,14 +2360,14 @@ pub(crate) fn encrypt_stream_ae_v8_with_nonce(
     validate_stream_v8_frame(frame_codepoints)?;
 
     let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8));
-    encrypt_stream_ae_v8_inner(plaintext, primes, sk_fmt.as_ref(), nonce, aad, frame_codepoints)
+    encrypt_stream_ae_v8_inner(plaintext, primes, &HmacKey::new(sk_fmt.as_ref()), nonce, aad, frame_codepoints)
 }
 
 #[cfg(any(test, feature = "experimental-stream"))]
 fn encrypt_stream_ae_v8_inner(
     plaintext: &str,
     primes: &[u64],
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     nonce: &[u8; NONCE_SIZE],
     aad: &[u8],
     frame_codepoints: u32,
@@ -2412,7 +2472,7 @@ pub fn encrypt_stream_ae_v8_key(
     validate_stream_v8_frame(frame_codepoints)?;
     let nonce = generate_nonce_with_crng_check()?;
     let sk_fmt = Secret32::new(derive_format_subkey(key.sk(), FORMAT_STREAM_AE_V8));
-    encrypt_stream_ae_v8_inner(plaintext, key.primes(), sk_fmt.as_ref(), &nonce, aad, frame_codepoints)
+    encrypt_stream_ae_v8_inner(plaintext, key.primes(), &HmacKey::new(sk_fmt.as_ref()), &nonce, aad, frame_codepoints)
 }
 
 /// [`decrypt_stream_ae_v8`] taking a validated [`NapqesKey`]: no per-call
@@ -2422,7 +2482,7 @@ pub fn decrypt_stream_ae_v8_key(stream: &[u8], key: &NapqesKey, aad: &[u8]) -> R
     #[cfg(feature = "fips_gate")]
     self_test::require_post().map_err(|e| e.to_string())?;
     let sk_fmt = Secret32::new(derive_format_subkey(key.sk(), FORMAT_STREAM_AE_V8));
-    decrypt_stream_ae_v8_inner(stream, key.primes(), sk_fmt.as_ref(), aad)
+    decrypt_stream_ae_v8_inner(stream, key.primes(), &HmacKey::new(sk_fmt.as_ref()), aad)
 }
 
 /// v8 streaming-AE decryption -- consumes the full ciphertext byte stream.
@@ -2452,14 +2512,14 @@ pub fn decrypt_stream_ae_v8(
     self_test::require_post().map_err(|e| e.to_string())?;
     validate_key(primes)?;
     let sk_fmt = Secret32::new(derive_format_subkey(sk, FORMAT_STREAM_AE_V8));
-    decrypt_stream_ae_v8_inner(stream, primes, sk_fmt.as_ref(), aad)
+    decrypt_stream_ae_v8_inner(stream, primes, &HmacKey::new(sk_fmt.as_ref()), aad)
 }
 
 #[cfg(any(test, feature = "experimental-stream"))]
 fn decrypt_stream_ae_v8_inner(
     stream: &[u8],
     primes: &[u64],
-    sk_fmt: &[u8; 32],
+    sk_fmt: &(impl Prf + ?Sized),
     aad: &[u8],
 ) -> Result<String, String> {
     if stream.len() < 1 + 4 + NONCE_SIZE {
